@@ -150,11 +150,12 @@ ipcMain.handle('lyrics:searchUfanv', async (_e, query: string): Promise<string |
     // Step 1: Search for the song
     const searchUrl = `https://www.ufanv.cn/search?keyword=${encodeURIComponent(query)}`
     const searchReq = net.request(searchUrl)
+    searchReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
     
     const searchHtml = await new Promise<string>((resolve, reject) => {
       let data = ''
       searchReq.on('response', (response) => {
-        response.on('data', (chunk) => { data += chunk })
+        response.on('data', (chunk) => { data += chunk.toString() })
         response.on('end', () => resolve(data))
         response.on('error', reject)
       })
@@ -163,17 +164,18 @@ ipcMain.handle('lyrics:searchUfanv', async (_e, query: string): Promise<string |
     })
     
     // Extract the first lyric page URL from search results
-    const lyricMatch = searchHtml.match(/href="\/lyric\/(\d+)"/)
+    const lyricMatch = searchHtml.match(/href="(\/lyric\/\d+)"/)
     if (!lyricMatch) return null
     
     // Step 2: Fetch the lyric page
-    const lyricUrl = `https://www.ufanv.cn/lyric/${lyricMatch[1]}`
+    const lyricUrl = `https://www.ufanv.cn${lyricMatch[1]}`
     const lyricReq = net.request(lyricUrl)
+    lyricReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
     
     const lyricHtml = await new Promise<string>((resolve, reject) => {
       let data = ''
       lyricReq.on('response', (response) => {
-        response.on('data', (chunk) => { data += chunk })
+        response.on('data', (chunk) => { data += chunk.toString() })
         response.on('end', () => resolve(data))
         response.on('error', reject)
       })
@@ -181,19 +183,32 @@ ipcMain.handle('lyrics:searchUfanv', async (_e, query: string): Promise<string |
       lyricReq.end()
     })
     
-    // Extract LRC content from the page
-    const lrcMatch = lyricHtml.match(/<div[^>]*class="[^"]*lrc-content[^"]*"[^>]*>([\s\S]*?)<\/div>/)
-    if (lrcMatch) {
-      // Clean HTML tags and return
-      return lrcMatch[1].replace(/<[^>]+>/g, '').trim()
+    // Extract LRC content - the lyrics are in a text block with timestamps
+    // Format: [00:04.98]歌词1 [00:09.90]歌词2 ...
+    // Look for the LRC section between "LRC 歌词" and "TXT 歌词" or similar markers
+    const lrcSectionMatch = lyricHtml.match(/LRC\s*歌词([\s\S]*?)TXT\s*歌词/)
+    if (lrcSectionMatch) {
+      let rawText = lrcSectionMatch[1]
+      // Remove HTML tags
+      rawText = rawText.replace(/<[^>]+>/g, ' ')
+      // Decode HTML entities
+      rawText = rawText.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      // Split by timestamp pattern to put each line on its own line
+      rawText = rawText.replace(/\[(\d+:\d+\.\d+)\]/g, '\n[$1]')
+      // Clean up empty lines and whitespace
+      rawText = rawText.split('\n').map(l => l.trim()).filter(l => l.startsWith('[')).join('\n')
+      return rawText || null
     }
     
-    // Try alternative: look for LRC format in script tags or data attributes
+    // Fallback: try to find LRC data in the page
     const lrcDataMatch = lyricHtml.match(/"lrc"\s*:\s*"([^"]+)"/)
     if (lrcDataMatch) {
-      return decodeURIComponent(lrcDataMatch[1].replace(/\\u[\da-fA-F]{4}/g, (m) => 
+      let rawText = decodeURIComponent(lrcDataMatch[1].replace(/\\u[\da-fA-F]{4}/g, (m) => 
         String.fromCharCode(parseInt(m.slice(2), 16))
       ))
+      rawText = rawText.replace(/\[(\d+:\d+\.\d+)\]/g, '\n[$1]')
+      rawText = rawText.split('\n').map(l => l.trim()).filter(l => l.startsWith('[')).join('\n')
+      return rawText || null
     }
     
     return null

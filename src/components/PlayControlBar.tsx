@@ -20,9 +20,10 @@ import Tooltip from './Tooltip'
 
 interface PlayControlBarProps {
   onPlayToggle: () => void
+  onSeek?: (time: number) => void
 }
 
-export default function PlayControlBar({ onPlayToggle }: PlayControlBarProps) {
+export default function PlayControlBar({ onPlayToggle, onSeek }: PlayControlBarProps) {
   const {
     currentSong,
     isPlaying,
@@ -57,7 +58,11 @@ export default function PlayControlBar({ onPlayToggle }: PlayControlBarProps) {
     const rect = progressRef.current.getBoundingClientRect()
     const percent = (e.clientX - rect.left) / rect.width
     const newTime = percent * duration
-    setCurrentTime(newTime)
+    if (onSeek) {
+      onSeek(newTime)
+    } else {
+      setCurrentTime(newTime)
+    }
   }
   
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {

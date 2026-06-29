@@ -70,15 +70,6 @@ export default function TitleBar() {
           </button>
         </Tooltip>
         
-        <Tooltip text="设置" position="bottom">
-          <button 
-            onClick={toggleSettings}
-            className="w-9 h-9 rounded-full glass-button flex items-center justify-center text-white/70 hover:text-white"
-          >
-            <User size={18} />
-          </button>
-        </Tooltip>
-        
         <div className="w-px h-6 bg-white/10 mx-2" />
         
         <Tooltip text="最小化" position="bottom">

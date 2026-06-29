@@ -18,6 +18,7 @@ function App() {
   const audioAnalyzerRef = useRef<AudioAnalyzer | null>(null)
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const animationFrameRef = useRef<number | null>(null)
+  const userSeekingRef = useRef(false)
   const [webglAvailable, setWebglAvailable] = useState(true)
   
   const { 
@@ -241,6 +242,13 @@ function App() {
     if (!currentSong?.url) return
     setIsPlaying(!isPlaying)
   }
+
+  const handleSeek = (time: number) => {
+    if (audioElementRef.current) {
+      audioElementRef.current.currentTime = time
+      setCurrentTime(time)
+    }
+  }
   
   return (
     <div className="w-full h-full relative overflow-hidden">
@@ -279,7 +287,7 @@ function App() {
           <QueuePanel />
         </div>
         
-        <PlayControlBar onPlayToggle={handlePlayToggle} />
+        <PlayControlBar onPlayToggle={handlePlayToggle} onSeek={handleSeek} />
       </div>
       
       <SettingsPanel />
