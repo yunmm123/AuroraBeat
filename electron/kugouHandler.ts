@@ -145,12 +145,19 @@ export async function kgSongUrl(hash: string, albumId?: string) {
 
 // ============ Lyrics ============
 export async function kgLyric(hash: string, albumId?: string) {
-  // First get song info to retrieve lyric id and accesskey
   const songInfo = await callApi('song_url', { hash, album_id: albumId || 0 })
   const lyricId = songInfo?.data?.lyric_id || songInfo?.data?.[0]?.lyric_id
   const accesskey = songInfo?.data?.accesskey || songInfo?.data?.[0]?.accesskey
   if (!lyricId || !accesskey) return null
   return callApi('lyric', { id: lyricId, accesskey, fmt: 'lrc', decode: true })
+}
+
+export async function kgSearchLyric(keyword: string, duration?: number, hash?: string) {
+  return callApi('search_lyric', { keywords: keyword, duration: duration || 0, hash: hash || '' })
+}
+
+export async function kgGetLyricById(id: string, accesskey: string) {
+  return callApi('lyric', { id, accesskey, fmt: 'lrc', decode: true })
 }
 
 // ============ Login (QR Code) ============
@@ -184,6 +191,10 @@ export async function kgPlaylistDetail(id: string) {
 
 export async function kgPlaylistTrackAll(id: string, page = 1) {
   return callApi('playlist_track_all', { id, page })
+}
+
+export async function kgPlaylistTrackAllNew(listId: string, page = 1) {
+  return callApi('playlist_track_all_new', { listid: listId, page })
 }
 
 // ============ Rank ============

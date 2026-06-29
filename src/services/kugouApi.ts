@@ -35,6 +35,14 @@ export async function kugouLyric(hash: string, albumId?: string) {
   return invoke('kg:lyric', hash, albumId)
 }
 
+export async function kugouSearchLyric(keyword: string, duration?: number, hash?: string) {
+  return invoke('kg:searchLyric', keyword, duration, hash)
+}
+
+export async function kugouGetLyricById(id: string, accesskey: string) {
+  return invoke('kg:getLyricById', id, accesskey)
+}
+
 // ============ Login (QR Code) ============
 export async function kugouQrKey() {
   return invoke('kg:qrKey')
@@ -64,6 +72,10 @@ export async function kugouPlaylistDetail(id: string) {
 
 export async function kugouPlaylistTrackAll(id: string, page: number = 1) {
   return invoke('kg:playlistTrackAll', id, page)
+}
+
+export async function kugouPlaylistTrackAllNew(listId: string, page: number = 1) {
+  return invoke('kg:playlistTrackAllNew', listId, page)
 }
 
 // ============ Rank ============

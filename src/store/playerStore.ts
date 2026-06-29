@@ -3,6 +3,7 @@ import type { Song, Playlist, PlayMode, AudioFeatures, VisualEffectType, Theme }
 import { themes } from '@/utils/themes'
 import { getAllAudioFiles, saveAudioFile, deleteAudioFile, type StoredAudio } from '@/utils/audioDB'
 import { searchLyricsFromUfanv, parseLrc, parseSongFilename, type LyricLine } from '@/services/lyricsApi'
+import { kugouSearchLyric, kugouGetLyricById } from '@/services/kugouApi'
 
 interface PlayerState {
   currentSong: Song | null
@@ -109,6 +110,46 @@ const mockSong: Song = {
   url: '',
   source: 'local',
   quality: 'lossless',
+}
+
+async function loadLyricsForSong(trackName: string, artistName: string, duration?: number) {
+  const keyword = artistName ? `${trackName} ${artistName}` : trackName
+  
+  try {
+    const ufanvText = await searchLyricsFromUfanv(trackName, artistName)
+    if (ufanvText) {
+      const lines = parseLrc(ufanvText)
+      if (lines.length > 0) {
+        usePlayerStore.setState({ lyrics: lines, lyricsLoading: false })
+        return
+      }
+    }
+  } catch {
+    // ufanv failed, try kugou
+  }
+  
+  try {
+    const searchRes = await kugouSearchLyric(keyword, duration)
+    const candidates = searchRes?.candidates || searchRes?.data?.candidates || []
+    if (candidates.length > 0) {
+      const best = candidates[0]
+      if (best?.id && best?.accesskey) {
+        const lyricRes = await kugouGetLyricById(String(best.id), best.accesskey)
+        const lrcContent = lyricRes?.decodeContent || lyricRes?.data?.decodeContent || ''
+        if (lrcContent) {
+          const lines = parseLrc(lrcContent)
+          if (lines.length > 0) {
+            usePlayerStore.setState({ lyrics: lines, lyricsLoading: false })
+            return
+          }
+        }
+      }
+    }
+  } catch {
+    // kugou failed too
+  }
+  
+  usePlayerStore.setState({ lyricsLoading: false })
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => ({
@@ -298,21 +339,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     const trackName = song.title.replace(/\.[^.]+$/, '')
     const artistName = song.artist !== '未知艺术家' ? song.artist : ''
     
-    // Search lyrics from ufanv.cn
-    searchLyricsFromUfanv(trackName, artistName).then((lrcText) => {
-      if (lrcText) {
-        const lines = parseLrc(lrcText)
-        if (lines.length > 0) {
-          set({ lyrics: lines, lyricsLoading: false })
-        } else {
-          set({ lyricsLoading: false })
-        }
-      } else {
-        set({ lyricsLoading: false })
-      }
-    }).catch(() => {
-      set({ lyricsLoading: false })
-    })
+    loadLyricsForSong(trackName, artistName, song.duration)
   },
   
   refreshLyrics: () => {
@@ -324,20 +351,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     const trackName = currentSong.title.replace(/\.[^.]+$/, '')
     const artistName = currentSong.artist !== '未知艺术家' ? currentSong.artist : ''
     
-    searchLyricsFromUfanv(trackName, artistName).then((lrcText) => {
-      if (lrcText) {
-        const lines = parseLrc(lrcText)
-        if (lines.length > 0) {
-          set({ lyrics: lines, lyricsLoading: false })
-        } else {
-          set({ lyricsLoading: false })
-        }
-      } else {
-        set({ lyricsLoading: false })
-      }
-    }).catch(() => {
-      set({ lyricsLoading: false })
-    })
+    loadLyricsForSong(trackName, artistName, currentSong.duration)
   },
   
   loadFromDB: async () => {

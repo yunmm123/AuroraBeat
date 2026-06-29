@@ -250,6 +250,14 @@ ipcMain.handle('kg:lyric', async (_e, hash: string, albumId?: string) => {
   return kugouHandler.kgLyric(hash, albumId)
 })
 
+ipcMain.handle('kg:searchLyric', async (_e, keyword: string, duration?: number, hash?: string) => {
+  return kugouHandler.kgSearchLyric(keyword, duration, hash)
+})
+
+ipcMain.handle('kg:getLyricById', async (_e, id: string, accesskey: string) => {
+  return kugouHandler.kgGetLyricById(id, accesskey)
+})
+
 ipcMain.handle('kg:qrKey', async () => {
   return kugouHandler.kgQrKey()
 })
@@ -304,6 +312,10 @@ ipcMain.handle('kg:playlistDetail', async (_e, id: string) => {
 
 ipcMain.handle('kg:playlistTrackAll', async (_e, id: string, page = 1) => {
   return kugouHandler.kgPlaylistTrackAll(id, page)
+})
+
+ipcMain.handle('kg:playlistTrackAllNew', async (_e, listId: string, page = 1) => {
+  return kugouHandler.kgPlaylistTrackAllNew(listId, page)
 })
 
 ipcMain.handle('kg:artistDetail', async (_e, artistId: string) => {

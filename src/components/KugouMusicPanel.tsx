@@ -2,14 +2,14 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Search, Play, Music, User, ListMusic, Trophy, Radio,
-  Disc3, ChevronRight, Loader2, LogIn, Heart,
+  Disc3, ChevronRight, ChevronLeft, Loader2, LogIn, Heart,
   TrendingUp, Headphones, X, AlertCircle, RefreshCw
 } from 'lucide-react'
 import {
   kugouSearch, kugouSongUrl, kugouSearchHot,
-  kugouTopSong, kugouRankList,
-  kugouFmClass, kugouRecommendSongs, kugouUserPlaylist,
-  kugouPlaylistTrackAll
+  kugouTopSong, kugouRankList, kugouRankAudio,
+  kugouRecommendSongs, kugouUserPlaylist,
+  kugouPlaylistTrackAllNew
 } from '@/services/kugouApi'
 import type { Song } from '@/types'
 
@@ -107,6 +107,10 @@ export default function KugouMusicPanel({
   const [loading, setLoading] = useState(false)
   const [playingHash, setPlayingHash] = useState('')
   const [apiError, setApiError] = useState(false)
+  const [searchError, setSearchError] = useState(false)
+  const [selectedRankId, setSelectedRankId] = useState('')
+  const [selectedRankName, setSelectedRankName] = useState('')
+  const [rankSongs, setRankSongs] = useState<KugouSongItem[]>([])
 
   useEffect(() => {
     loadDiscoverData()
@@ -192,16 +196,17 @@ export default function KugouMusicPanel({
   async function handleSearch() {
     if (!searchQuery.trim()) return
     setLoading(true)
-    setApiError(false)
+    setSearchError(false)
+    setSearchResults([])
     try {
       const res = await kugouSearch(searchQuery.trim())
       const rawList = extractSongList(res)
       if (rawList.length === 0 && (res?.error_code || res?.errcode)) {
-        setApiError(true)
+        setSearchError(true)
       }
       setSearchResults(rawList.map(normalizeSong))
     } catch {
-      setApiError(true)
+      setSearchError(true)
     }
     setLoading(false)
   }
@@ -209,13 +214,17 @@ export default function KugouMusicPanel({
   async function handlePlayHotKeyword(keyword: string) {
     setSearchQuery(keyword)
     setLoading(true)
-    setApiError(false)
+    setSearchError(false)
+    setSearchResults([])
     try {
       const res = await kugouSearch(keyword)
       const rawList = extractSongList(res)
+      if (rawList.length === 0 && (res?.error_code || res?.errcode)) {
+        setSearchError(true)
+      }
       setSearchResults(rawList.map(normalizeSong))
     } catch {
-      setApiError(true)
+      setSearchError(true)
     }
     setLoading(false)
   }
@@ -224,7 +233,16 @@ export default function KugouMusicPanel({
     setPlayingHash(song.Hash)
     try {
       const urlRes = await kugouSongUrl(song.Hash, song.AlbumID)
-      const playUrl = urlRes?.data?.play_url || urlRes?.data?.play_backup_url || urlRes?.data?.url
+      const data = urlRes?.data
+      let playUrl = ''
+      if (Array.isArray(data) && data.length > 0) {
+        playUrl = data[0]?.play_url || data[0]?.play_backup_url || data[0]?.url || ''
+      } else if (data && typeof data === 'object') {
+        playUrl = data.play_url || data.play_backup_url || data.url || ''
+      }
+      if (!playUrl && urlRes && urlRes.data) {
+        playUrl = urlRes.data.play_url || urlRes.data.play_backup_url || urlRes.data.url || ''
+      }
       if (playUrl) {
         const kugouSong: Song = {
           id: song.Hash,
@@ -237,18 +255,48 @@ export default function KugouMusicPanel({
           source: 'kugou' as const,
         }
         onPlaySong(kugouSong)
+        onClose()
+      } else {
+        console.warn('No play URL found for song:', song.SongName)
       }
-    } catch {
-      console.error('Failed to get song URL')
+    } catch (e) {
+      console.error('Failed to get song URL:', e)
+    } finally {
+      setPlayingHash('')
     }
+  }
+
+  async function handleRankClick(rank: any) {
+    const n = normalizePlaylist(rank)
+    if (!n.id) return
+    setSelectedRankId(n.id)
+    setSelectedRankName(n.name || '榜单')
+    setRankSongs([])
+    setLoading(true)
+    try {
+      const res = await kugouRankAudio(n.id, 1)
+      const rawList = extractSongList(res)
+      setRankSongs(rawList.map(normalizeSong))
+    } catch {
+      // ignore
+    }
+    setLoading(false)
+  }
+
+  function handleRankBack() {
+    setSelectedRankId('')
+    setSelectedRankName('')
+    setRankSongs([])
   }
 
   async function handleOpenPlaylist(playlist: any) {
     setLoading(true)
     const n = normalizePlaylist(playlist)
     setCurrentPlaylistName(n.name || '歌单')
+    setPlaylistTracks([])
     try {
-      const res = await kugouPlaylistTrackAll(String(n.id))
+      const listId = String(playlist.listid || playlist.specialid || playlist.id || n.id || '')
+      const res = await kugouPlaylistTrackAllNew(listId)
       const rawList = extractSongList(res)
       setPlaylistTracks(rawList.map(normalizeSong))
     } catch {
@@ -372,6 +420,20 @@ export default function KugouMusicPanel({
               </motion.div>
             )}
 
+            {/* Search Error */}
+            {searchError && searchResults.length === 0 && !loading && !apiError && (
+              <motion.div key="search-error" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-col items-center justify-center py-16">
+                <div className="w-16 h-16 rounded-full flex items-center justify-center mb-4" style={{ background: 'rgba(251,191,36,0.15)' }}>
+                  <AlertCircle size={32} className="text-yellow-400" />
+                </div>
+                <h3 className="text-white text-lg font-semibold mb-2">搜索失败</h3>
+                <p className="text-white/50 text-center mb-4 max-w-sm text-sm">搜索服务暂时不可用，请稍后重试</p>
+                <button onClick={handleSearch} className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-colors hover:bg-white/10" style={{ background: 'rgba(255,255,255,0.1)' }}>
+                  <RefreshCw size={16} /> 重新搜索
+                </button>
+              </motion.div>
+            )}
+
             {/* Search Results */}
             {searchResults.length > 0 && (
               <motion.div key="search" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
@@ -468,19 +530,49 @@ export default function KugouMusicPanel({
             {/* Rank Tab */}
             {activeTab === 'rank' && searchResults.length === 0 && !apiError && !loading && (
               <motion.div key="rank" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><Trophy size={16} className="text-yellow-400" />排行榜</h3>
-                {rankList.length === 0 ? (
-                  <div className="text-white/40 text-center py-8">暂无榜单数据</div>
+                {selectedRankId ? (
+                  <div>
+                    <button onClick={handleRankBack} className="flex items-center gap-2 text-white/60 hover:text-white mb-4 text-sm">
+                      <ChevronLeft size={16} />返回榜单列表
+                    </button>
+                    <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><Trophy size={16} className="text-yellow-400" />{selectedRankName}</h3>
+                    <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-2">
+                      {rankSongs.map((song: KugouSongItem, idx: number) => (
+                        <div key={song.Hash || idx} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors group" style={{ background: 'rgba(255,255,255,0.03)' }}
+                          onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
+                          onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.03)'}>
+                          <div className="w-6 text-center text-sm text-white/30 flex-shrink-0">{idx + 1}</div>
+                          <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
+                            {playingHash === song.Hash ? <Loader2 size={14} className="text-purple-400 animate-spin" /> : <Play size={14} className="text-white/60 group-hover:text-purple-400" />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-white text-sm font-medium truncate">{song.SongName}</div>
+                            <div className="text-white/50 text-xs truncate">{song.SingerName}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 ) : (
-                  <div className="grid grid-cols-2 gap-3">
-                    {rankList.map((rank: any) => (
-                      <div key={rank.rankid} className="p-4 rounded-xl cursor-pointer transition-colors group" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
-                        onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
-                        onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'}>
-                        <div className="text-white text-sm font-medium truncate group-hover:text-purple-400 transition-colors">{rank.rankname}</div>
-                        <div className="text-white/40 text-xs mt-1 truncate">{rank.intro || '热门榜单'}</div>
+                  <div>
+                    <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><Trophy size={16} className="text-yellow-400" />排行榜</h3>
+                    {rankList.length === 0 ? (
+                      <div className="text-white/40 text-center py-8">暂无榜单数据</div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-3">
+                        {rankList.map((rank: any) => {
+                          const n = normalizePlaylist(rank)
+                          return (
+                            <div key={n.id || rank.rankid} onClick={() => handleRankClick(rank)} className="p-4 rounded-xl cursor-pointer transition-colors group" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+                              onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
+                              onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'}>
+                              <div className="text-white text-sm font-medium truncate group-hover:text-purple-400 transition-colors">{rank.rankname}</div>
+                              <div className="text-white/40 text-xs mt-1 truncate">{rank.intro || '热门榜单'}</div>
+                            </div>
+                          )
+                        })}
                       </div>
-                    ))}
+                    )}
                   </div>
                 )}
               </motion.div>
