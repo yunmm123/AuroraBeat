@@ -73,7 +73,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "AuroraBeat"
+      "shortcutName": "AuroraBeat",
+      "include": "build/installer.nsh"
     },
     "mac": {
       "target": [
