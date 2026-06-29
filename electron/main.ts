@@ -1,8 +1,11 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut, systemPreferences, net } from 'electron'
 import path from 'path'
+import { fork } from 'child_process'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
+let kugouApiProcess: ReturnType<typeof fork> | null = null
+const KUGOU_API_PORT = 13456
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -58,6 +61,48 @@ function createWindow() {
   })
 }
 
+// Start KuGouMusic API subprocess
+function startKugouApi() {
+  const apiDir = path.join(__dirname, '../kugou-api')
+  kugouApiProcess = fork(path.join(apiDir, 'app.js'), [], {
+    cwd: apiDir,
+    env: {
+      ...process.env,
+      PORT: String(KUGOU_API_PORT),
+      HOST: '127.0.0.1',
+      platform: 'lite',
+    },
+    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+  })
+
+  kugouApiProcess.stdout?.on('data', (data: Buffer) => {
+    console.log('[KuGouAPI]', data.toString().trim())
+  })
+
+  kugouApiProcess.stderr?.on('data', (data: Buffer) => {
+    console.error('[KuGouAPI]', data.toString().trim())
+  })
+
+  kugouApiProcess.on('exit', (code) => {
+    console.log(`[KuGouAPI] exited with code ${code}`)
+    kugouApiProcess = null
+  })
+
+  // Wait for API to be ready
+  const waitForApi = () => {
+    return new Promise<void>((resolve) => {
+      const check = () => {
+        const req = net.request(`http://127.0.0.1:${KUGOU_API_PORT}/`)
+        req.on('response', () => resolve())
+        req.on('error', () => setTimeout(check, 500))
+        req.end()
+      }
+      check()
+    })
+  }
+  return waitForApi()
+}
+
 function createTray() {
   const iconPath = path.join(__dirname, '../public/icon.png')
   const trayIcon = nativeImage.createFromPath(iconPath)
@@ -95,10 +140,20 @@ function registerGlobalShortcuts() {
   })
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createWindow()
   createTray()
   registerGlobalShortcuts()
+  
+  // Start KuGouMusic API in background
+  try {
+    await startKugouApi()
+    console.log(`[KuGouAPI] Ready on port ${KUGOU_API_PORT}`)
+    mainWindow?.webContents.send('kugou-api:ready')
+  } catch (error) {
+    console.error('[KuGouAPI] Failed to start:', error)
+    mainWindow?.webContents.send('kugou-api:error', String(error))
+  }
   
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -110,8 +165,20 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  // Kill KuGou API subprocess
+  if (kugouApiProcess) {
+    kugouApiProcess.kill()
+    kugouApiProcess = null
+  }
   if (process.platform !== 'darwin') {
     app.quit()
+  }
+})
+
+app.on('before-quit', () => {
+  if (kugouApiProcess) {
+    kugouApiProcess.kill()
+    kugouApiProcess = null
   }
 })
 

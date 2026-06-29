@@ -10,6 +10,8 @@ import SongListPanel from '@/components/SongListPanel'
 import QueuePanel from '@/components/QueuePanel'
 import SettingsPanel from '@/components/SettingsPanel'
 import SearchPanel from '@/components/SearchPanel'
+import KugouMusicPanel from '@/components/KugouMusicPanel'
+import KugouLogin from '@/components/KugouLogin'
 import { applyTheme } from '@/utils/themes'
 
 function App() {
@@ -20,6 +22,7 @@ function App() {
   const animationFrameRef = useRef<number | null>(null)
   const userSeekingRef = useRef(false)
   const [webglAvailable, setWebglAvailable] = useState(true)
+  const [showKugouLogin, setShowKugouLogin] = useState(false)
   
   const { 
     currentTheme, 
@@ -36,6 +39,10 @@ function App() {
     currentPlaylist,
     renderQuality,
     loadFromDB,
+    showKugou,
+    toggleKugou,
+    kugouUserInfo,
+    setKugouUserInfo,
   } = usePlayerStore()
 
   // Load songs from IndexedDB on mount
@@ -292,6 +299,30 @@ function App() {
       
       <SettingsPanel />
       <SearchPanel />
+      
+      {/* KuGou Music Panel */}
+      {showKugou && (
+        <KugouMusicPanel
+          onClose={toggleKugou}
+          onPlaySong={(song) => {
+            usePlayerStore.getState().playSong(song)
+          }}
+          userInfo={kugouUserInfo}
+          onLoginClick={() => setShowKugouLogin(true)}
+          onLogout={() => setKugouUserInfo(null)}
+        />
+      )}
+      
+      {/* KuGou Login Modal */}
+      {showKugouLogin && (
+        <KugouLogin
+          onClose={() => setShowKugouLogin(false)}
+          onLoginSuccess={(info) => {
+            setKugouUserInfo(info)
+            setShowKugouLogin(false)
+          }}
+        />
+      )}
     </div>
   )
 }

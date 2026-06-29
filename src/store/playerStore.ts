@@ -48,6 +48,10 @@ interface PlayerState {
   lyrics: LyricLine[]
   lyricsLoading: boolean
   
+  // KuGou Music
+  showKugou: boolean
+  kugouUserInfo: { uid: string; token: string; nickname: string } | null
+  
   setCurrentSong: (song: Song | null) => void
   setIsPlaying: (playing: boolean) => void
   togglePlay: () => void
@@ -89,6 +93,10 @@ interface PlayerState {
   playSong: (song: Song) => void
   refreshLyrics: () => void
   loadFromDB: () => Promise<void>
+  
+  // KuGou Music actions
+  toggleKugou: () => void
+  setKugouUserInfo: (info: { uid: string; token: string; nickname: string } | null) => void
 }
 
 const mockSong: Song = {
@@ -154,6 +162,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   // Lyrics
   lyrics: [],
   lyricsLoading: false,
+  
+  // KuGou Music
+  showKugou: false,
+  kugouUserInfo: null,
   
   setCurrentSong: (song) => set({ currentSong: song }),
   setIsPlaying: (playing) => set({ isPlaying: playing }),
@@ -358,4 +370,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       set({ dbLoading: false })
     }
   },
+  
+  // KuGou Music actions
+  toggleKugou: () => set({ showKugou: !get().showKugou }),
+  setKugouUserInfo: (info) => set({ kugouUserInfo: info }),
 }))
