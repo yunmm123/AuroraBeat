@@ -1,10 +1,10 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { usePlayerStore } from '@/store/playerStore'
 import { useEffect, useState } from 'react'
-import { Music3, Loader2 } from 'lucide-react'
+import { Music3, Loader2, RefreshCw } from 'lucide-react'
 
 export default function LyricsVisual() {
-  const { currentSong, currentTime, isPlaying, lyrics, lyricsLoading } = usePlayerStore()
+  const { currentSong, currentTime, isPlaying, lyrics, lyricsLoading, refreshLyrics } = usePlayerStore()
   const [currentLyricIndex, setCurrentLyricIndex] = useState(0)
 
   useEffect(() => {
@@ -44,14 +44,21 @@ export default function LyricsVisual() {
     )
   }
 
-  // No lyrics found - show song info
+  // No lyrics found - show song info with refresh button
   if (lyrics.length === 0) {
     return (
-      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+      <div className="absolute inset-0 flex items-center justify-center pointer-events-auto">
         <div className="text-center">
           <Music3 size={48} className="text-white/20 mx-auto mb-4" />
           <div className="text-white/60 text-2xl font-medium mb-2">{currentSong.title}</div>
-          <div className="text-white/40 text-lg">{currentSong.artist}</div>
+          <div className="text-white/40 text-lg mb-6">{currentSong.artist}</div>
+          <button
+            onClick={refreshLyrics}
+            className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full glass-button text-white/70 hover:text-white transition-colors"
+          >
+            <RefreshCw size={16} />
+            <span>刷新歌词</span>
+          </button>
         </div>
       </div>
     )
@@ -71,7 +78,7 @@ export default function LyricsVisual() {
   }
 
   return (
-    <div className="absolute inset-0 flex items-center justify-center pointer-events-none overflow-hidden">
+    <div className="absolute inset-0 flex items-center justify-center pointer-events-auto overflow-hidden">
       <div className="relative w-full max-w-4xl h-96 flex flex-col items-center justify-center">
         <AnimatePresence mode="popLayout">
           {visibleLyrics.map((lyric) => (

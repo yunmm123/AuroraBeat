@@ -87,6 +87,7 @@ interface PlayerState {
   removeLocalSong: (id: string) => void
   setSearchQuery: (query: string) => void
   playSong: (song: Song) => void
+  refreshLyrics: () => void
   loadFromDB: () => Promise<void>
 }
 
@@ -286,6 +287,31 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     const artistName = song.artist !== '未知艺术家' ? song.artist : ''
     
     // Search lyrics from ufanv.cn
+    searchLyricsFromUfanv(trackName, artistName).then((lrcText) => {
+      if (lrcText) {
+        const lines = parseLrc(lrcText)
+        if (lines.length > 0) {
+          set({ lyrics: lines, lyricsLoading: false })
+        } else {
+          set({ lyricsLoading: false })
+        }
+      } else {
+        set({ lyricsLoading: false })
+      }
+    }).catch(() => {
+      set({ lyricsLoading: false })
+    })
+  },
+  
+  refreshLyrics: () => {
+    const { currentSong } = get()
+    if (!currentSong) return
+    
+    set({ lyrics: [], lyricsLoading: true })
+    
+    const trackName = currentSong.title.replace(/\.[^.]+$/, '')
+    const artistName = currentSong.artist !== '未知艺术家' ? currentSong.artist : ''
+    
     searchLyricsFromUfanv(trackName, artistName).then((lrcText) => {
       if (lrcText) {
         const lines = parseLrc(lrcText)
