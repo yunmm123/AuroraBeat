@@ -34,6 +34,9 @@ jobs:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
           ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
           
+      - name: Install KuGou API dependencies
+        run: cd kugou-api && npm install --legacy-peer-deps
+          
       - name: Build
         run: npm run build:win
         env:
@@ -79,6 +82,9 @@ jobs:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
           ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
           
+      - name: Install KuGou API dependencies
+        run: cd kugou-api && npm install --legacy-peer-deps
+          
       - name: Build
         run: npm run build:mac
         env:
@@ -116,6 +122,9 @@ jobs:
         env:
           ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
           ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+          
+      - name: Install KuGou API dependencies
+        run: cd kugou-api && npm install --legacy-peer-deps
           
       - name: Build
         run: npm run build -- --linux

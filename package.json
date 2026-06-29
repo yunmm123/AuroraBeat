@@ -52,6 +52,17 @@
       "dist",
       "dist-electron"
     ],
+    "extraResources": [
+      {
+        "from": "kugou-api",
+        "to": "kugou-api",
+        "filter": [
+          "**/*",
+          "!**/node_modules/.cache/**",
+          "!**/.git/**"
+        ]
+      }
+    ],
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },

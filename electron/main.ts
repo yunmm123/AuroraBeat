@@ -63,7 +63,19 @@ function createWindow() {
 
 // Start KuGouMusic API subprocess
 function startKugouApi() {
-  const apiDir = path.join(__dirname, '../kugou-api')
+  // In packaged app, app.getAppPath() returns the resources/app.asar path
+  // We need to go up one level to find kugou-api alongside the asar
+  const appPath = app.getAppPath()
+  let apiDir: string
+  
+  if (appPath.endsWith('app.asar')) {
+    // Packaged: resources/app.asar -> resources/kugou-api
+    apiDir = path.join(path.dirname(appPath), 'kugou-api')
+  } else {
+    // Dev: project root
+    apiDir = path.join(appPath, 'kugou-api')
+  }
+  
   kugouApiProcess = fork(path.join(apiDir, 'app.js'), [], {
     cwd: apiDir,
     env: {
