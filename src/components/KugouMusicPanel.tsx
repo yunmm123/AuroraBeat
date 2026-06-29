@@ -66,21 +66,25 @@ function extractSongList(body: any): any[] {
   if (Array.isArray(d.list)) return d.list
   if (Array.isArray(d.info)) return d.info
   if (Array.isArray(d)) return d
-  // data.data nested
-  if (d.data && Array.isArray(d.data.lists)) return d.data.lists
-  if (d.data && Array.isArray(d.data.songlist)) return d.data.songlist
-  if (d.data && Array.isArray(d.data.list)) return d.data.list
+  if (d.audios && Array.isArray(d.audios)) return d.audios
+  if (d.songs && Array.isArray(d.songs)) return d.songs
+  if (d.data && d.data.lists && Array.isArray(d.data.lists)) return d.data.lists
+  if (d.data && d.data.songlist && Array.isArray(d.data.songlist)) return d.data.songlist
+  if (d.data && d.data.list && Array.isArray(d.data.list)) return d.data.list
+  if (d.data && Array.isArray(d.data)) return d.data
+  if (d.rank_songs && Array.isArray(d.rank_songs)) return d.rank_songs
+  if (d.rank_audio && Array.isArray(d.rank_audio)) return d.rank_audio
   return []
 }
 
 function normalizeSong(raw: any): KugouSongItem {
-  const hash = raw.Hash || raw.hash || raw.audio_id || ''
-  const songName = raw.SongName || raw.songname || raw.song_name || raw.name || ''
+  const hash = raw.Hash || raw.hash || raw.audio_id || raw.id || ''
+  const songName = raw.SongName || raw.songname || raw.song_name || raw.name || raw.filename || raw.title || ''
   const singer = raw.SingerName || raw.singername || raw.author_name || raw.artist || raw.singer ||
-    (raw.authors?.[0]?.author_name) || ''
-  const albumName = raw.AlbumName || raw.album_name || raw.albumname || ''
-  const albumId = String(raw.AlbumID || raw.album_id || raw.albumid || '')
-  const duration = raw.Duration || raw.duration || raw.timelength || 0
+    (raw.authors?.[0]?.author_name) || raw.artists?.[0]?.name || ''
+  const albumName = raw.AlbumName || raw.album_name || raw.albumname || raw.album_name || raw.album || ''
+  const albumId = String(raw.AlbumID || raw.album_id || raw.albumid || raw.album_audio_id || '')
+  const duration = raw.Duration || raw.duration || raw.timelength || raw.length || 0
   return {
     Hash: String(hash),
     SongName: songName,
@@ -296,7 +300,9 @@ export default function KugouMusicPanel({
     setPlaylistTracks([])
     try {
       const listId = String(playlist.listid || playlist.specialid || playlist.id || n.id || '')
-      const res = await kugouPlaylistTrackAllNew(listId)
+      const uid = userInfo?.uid
+      const token = userInfo?.token
+      const res = await kugouPlaylistTrackAllNew(listId, 1, uid, token)
       const rawList = extractSongList(res)
       setPlaylistTracks(rawList.map(normalizeSong))
     } catch {

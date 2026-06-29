@@ -113,7 +113,11 @@ async function callApi(fnName: string, params: Record<string, any> = {}): Promis
 
 // ============ Search ============
 export async function kgSearch(keyword: string, page = 1, pageSize = 30) {
-  return callApi('search', { keywords: keyword, page, pagesize: pageSize })
+  let body = await callApi('search', { keywords: keyword, page, pagesize: pageSize })
+  if (body?.error_code && body.error_code !== 0) {
+    body = await callApi('search_complex', { keywords: keyword, page, pagesize: pageSize })
+  }
+  return body
 }
 
 export async function kgSearchHot() {
@@ -134,9 +138,17 @@ export async function kgSearchComplex(keyword: string, page = 1) {
 
 // ============ Song URL ============
 export async function kgSongUrl(hash: string, albumId?: string) {
-  const body = await callApi('song_url', { hash, album_id: albumId || 0 })
-  // KuGou /v5/url returns data as an array — normalize to first item
-  // so the frontend can access res.data.play_url directly
+  let body = await callApi('song_url', { hash, album_id: albumId || 0 })
+  if (body?.errcode && body.errcode !== 0) {
+    body = await callApi('song_url_new', { hash, album_id: albumId || 0 })
+    if (body?.data) {
+      const data = body.data
+      const cand = data.candidates?.[0] || data.track_urls?.[0] || data.pur_url_info || data
+      if (cand) {
+        body = { ...body, data: cand }
+      }
+    }
+  }
   if (Array.isArray(body?.data) && body.data.length > 0) {
     return { ...body, data: body.data[0] }
   }
@@ -193,8 +205,11 @@ export async function kgPlaylistTrackAll(id: string, page = 1) {
   return callApi('playlist_track_all', { id, page })
 }
 
-export async function kgPlaylistTrackAllNew(listId: string, page = 1) {
-  return callApi('playlist_track_all_new', { listid: listId, page })
+export async function kgPlaylistTrackAllNew(listId: string, page = 1, uid?: string, token?: string) {
+  const cookie: Record<string, string> = {}
+  if (uid) cookie.userid = uid
+  if (token) cookie.token = token
+  return callApi('playlist_track_all_new', { listid: listId, page, cookie })
 }
 
 // ============ Rank ============

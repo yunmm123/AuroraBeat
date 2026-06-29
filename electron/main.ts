@@ -314,8 +314,8 @@ ipcMain.handle('kg:playlistTrackAll', async (_e, id: string, page = 1) => {
   return kugouHandler.kgPlaylistTrackAll(id, page)
 })
 
-ipcMain.handle('kg:playlistTrackAllNew', async (_e, listId: string, page = 1) => {
-  return kugouHandler.kgPlaylistTrackAllNew(listId, page)
+ipcMain.handle('kg:playlistTrackAllNew', async (_e, listId: string, page = 1, uid?: string, token?: string) => {
+  return kugouHandler.kgPlaylistTrackAllNew(listId, page, uid, token)
 })
 
 ipcMain.handle('kg:artistDetail', async (_e, artistId: string) => {
