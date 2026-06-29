@@ -13,6 +13,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   lyrics: {
     searchUfanv: (query: string) => ipcRenderer.invoke('lyrics:searchUfanv', query),
   },
+  kugou: {
+    // Generic, guarded invoke for KuGou channels (kg:*)
+    invoke: (channel: string, ...args: any[]) => {
+      if (typeof channel !== 'string' || !channel.startsWith('kg:')) {
+        return Promise.reject(new Error('Invalid kugou channel: ' + channel))
+      }
+      return ipcRenderer.invoke(channel, ...args)
+    },
+  },
+  onKugouReady: (callback: () => void) => {
+    ipcRenderer.on('kugou-api:ready', callback)
+  },
   onPlaybackToggle: (callback: () => void) => {
     ipcRenderer.on('playback:toggle', callback)
   },

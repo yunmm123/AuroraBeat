@@ -357,3 +357,14 @@ ipcMain.handle('kg:videoUrl', async (_e, videoHash: string) => {
 ipcMain.handle('kg:healthCheck', async () => {
   return kugouHandler.kgHealthCheck()
 })
+
+// ============ Stubs for KuGou channels not yet implemented in kugouHandler ============
+// These return null so the UI can degrade gracefully instead of throwing
+// "No handler registered" errors. Implement them in kugouHandler.ts when ready.
+ipcMain.handle('kg:personalFm', async () => null)
+ipcMain.handle('kg:topAlbum', async () => null)
+ipcMain.handle('kg:topPlaylist', async () => null)
+ipcMain.handle('kg:everydayRecommend', async () => null)
+ipcMain.handle('kg:searchSuggest', async () => null)
+ipcMain.handle('kg:searchComplex', async () => null)
+ipcMain.handle('kg:songClimax', async () => null)

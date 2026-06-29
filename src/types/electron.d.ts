@@ -15,6 +15,10 @@ declare global {
       lyrics: {
         searchUfanv: (query: string) => Promise<string | null>
       }
+      kugou: {
+        invoke: (channel: string, ...args: any[]) => Promise<any>
+      }
+      onKugouReady: (callback: () => void) => void
       onPlaybackToggle: (callback: () => void) => void
       onPlaybackNext: (callback: () => void) => void
       onPlaybackPrev: (callback: () => void) => void
