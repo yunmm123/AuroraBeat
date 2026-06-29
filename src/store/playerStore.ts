@@ -190,7 +190,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   }),
   
   setPlaylists: (playlists) => set({ playlists }),
-  setCurrentPlaylist: (playlist) => set({ currentPlaylist: playlist, activeCategory: null }),
+  setCurrentPlaylist: (playlist) => {
+    const current = get().currentPlaylist
+    // Toggle: clicking same playlist again closes it
+    if (current?.id === playlist?.id) {
+      set({ currentPlaylist: null })
+    } else {
+      set({ currentPlaylist: playlist, activeCategory: null })
+    }
+  },
   setActiveCategory: (category) => set({ activeCategory: category, currentPlaylist: null }),
   
   setAudioFeatures: (features) => set({ audioFeatures: features }),
