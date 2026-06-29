@@ -93,7 +93,8 @@ export default function KugouLogin({ onClose, onLoginSuccess }: KugouLoginProps)
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        className="fixed inset-0 z-[10000] flex items-center justify-center"
+        style={{ background: 'rgba(0,0,0,0.9)' }}
         onClick={onClose}
       >
         <motion.div
@@ -101,22 +102,23 @@ export default function KugouLogin({ onClose, onLoginSuccess }: KugouLoginProps)
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.9, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
-          className="relative w-[400px] bg-[#1a1a2e]/95 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl overflow-hidden"
+          className="relative w-[420px] rounded-2xl overflow-hidden shadow-2xl"
+          style={{ background: '#0d0d1a', border: '1px solid rgba(255,255,255,0.15)' }}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+          <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid rgba(255,255,255,0.08)', background: 'linear-gradient(90deg, rgba(59,130,246,0.15), rgba(147,51,234,0.15))' }}>
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #3b82f6, #9333ea)' }}>
                 <QrCode size={20} className="text-white" />
               </div>
               <div>
-                <h3 className="text-white font-medium text-lg">酷狗音乐登录</h3>
+                <h3 className="text-white font-bold text-lg">酷狗音乐登录</h3>
                 <p className="text-white/50 text-xs">扫码登录，享受完整功能</p>
               </div>
             </div>
             <button
               onClick={onClose}
-              className="w-8 h-8 rounded-full flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-colors"
+              className="w-8 h-8 rounded-full flex items-center justify-center text-white/60 hover:text-white transition-colors hover:bg-white/10"
             >
               <X size={18} />
             </button>
