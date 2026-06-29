@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut, systemPreferences } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut, systemPreferences, net } from 'electron'
 import path from 'path'
 
 let mainWindow: BrowserWindow | null = null
@@ -142,4 +142,63 @@ ipcMain.handle('window:isMaximized', () => {
 
 ipcMain.handle('app:getPath', (_e, name: string) => {
   return app.getPath(name as any)
+})
+
+// Lyrics search via ufanv.cn (scrapes the website)
+ipcMain.handle('lyrics:searchUfanv', async (_e, query: string): Promise<string | null> => {
+  try {
+    // Step 1: Search for the song
+    const searchUrl = `https://www.ufanv.cn/search?keyword=${encodeURIComponent(query)}`
+    const searchReq = net.request(searchUrl)
+    
+    const searchHtml = await new Promise<string>((resolve, reject) => {
+      let data = ''
+      searchReq.on('response', (response) => {
+        response.on('data', (chunk) => { data += chunk })
+        response.on('end', () => resolve(data))
+        response.on('error', reject)
+      })
+      searchReq.on('error', reject)
+      searchReq.end()
+    })
+    
+    // Extract the first lyric page URL from search results
+    const lyricMatch = searchHtml.match(/href="\/lyric\/(\d+)"/)
+    if (!lyricMatch) return null
+    
+    // Step 2: Fetch the lyric page
+    const lyricUrl = `https://www.ufanv.cn/lyric/${lyricMatch[1]}`
+    const lyricReq = net.request(lyricUrl)
+    
+    const lyricHtml = await new Promise<string>((resolve, reject) => {
+      let data = ''
+      lyricReq.on('response', (response) => {
+        response.on('data', (chunk) => { data += chunk })
+        response.on('end', () => resolve(data))
+        response.on('error', reject)
+      })
+      lyricReq.on('error', reject)
+      lyricReq.end()
+    })
+    
+    // Extract LRC content from the page
+    const lrcMatch = lyricHtml.match(/<div[^>]*class="[^"]*lrc-content[^"]*"[^>]*>([\s\S]*?)<\/div>/)
+    if (lrcMatch) {
+      // Clean HTML tags and return
+      return lrcMatch[1].replace(/<[^>]+>/g, '').trim()
+    }
+    
+    // Try alternative: look for LRC format in script tags or data attributes
+    const lrcDataMatch = lyricHtml.match(/"lrc"\s*:\s*"([^"]+)"/)
+    if (lrcDataMatch) {
+      return decodeURIComponent(lrcDataMatch[1].replace(/\\u[\da-fA-F]{4}/g, (m) => 
+        String.fromCharCode(parseInt(m.slice(2), 16))
+      ))
+    }
+    
+    return null
+  } catch (error) {
+    console.error('ufanv.cn lyrics search failed:', error)
+    return null
+  }
 })

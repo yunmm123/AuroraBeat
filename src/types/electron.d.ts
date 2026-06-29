@@ -12,6 +12,9 @@ declare global {
       app: {
         getPath: (name: string) => Promise<string>
       }
+      lyrics: {
+        searchUfanv: (query: string) => Promise<string | null>
+      }
       onPlaybackToggle: (callback: () => void) => void
       onPlaybackNext: (callback: () => void) => void
       onPlaybackPrev: (callback: () => void) => void

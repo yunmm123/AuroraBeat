@@ -3,7 +3,8 @@ import { Music3, ChevronLeft, Upload, FileText } from 'lucide-react'
 import { usePlayerStore } from '@/store/playerStore'
 import { useRef } from 'react'
 import type { Song } from '@/types'
-import { parseLrc } from '@/services/lyricsApi'
+import { parseLrc, parseSongFilename } from '@/services/lyricsApi'
+import Tooltip from './Tooltip'
 
 export default function PlaylistSidebar() {
   const { 
@@ -26,16 +27,19 @@ export default function PlaylistSidebar() {
     const files = e.target.files
     if (!files) return
     
-    const songs: Song[] = Array.from(files).map((file, i) => ({
-      id: `local-${Date.now()}-${i}`,
-      title: file.name.replace(/\.[^.]+$/, ''),
-      artist: '未知艺术家',
-      album: '本地音乐',
-      cover: '',
-      duration: 0,
-      url: URL.createObjectURL(file),
-      source: 'local' as const,
-    }))
+    const songs: Song[] = Array.from(files).map((file, i) => {
+      const { title, artist } = parseSongFilename(file.name)
+      return {
+        id: `local-${Date.now()}-${i}`,
+        title,
+        artist,
+        album: '本地音乐',
+        cover: '',
+        duration: 0,
+        url: URL.createObjectURL(file),
+        source: 'local' as const,
+      }
+    })
     
     addLocalSongs(songs)
     if (songs.length > 0) {
@@ -107,20 +111,22 @@ export default function PlaylistSidebar() {
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-white font-semibold text-lg">音乐库</h2>
         <div className="flex gap-2">
-          <button
-            onClick={() => lrcInputRef.current?.click()}
-            className="w-8 h-8 rounded-lg glass-button flex items-center justify-center text-white/60 hover:text-white"
-            title="导入歌词文件 (.lrc)"
-          >
-            <FileText size={18} />
-          </button>
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="w-8 h-8 rounded-lg glass-button flex items-center justify-center text-white/60 hover:text-white"
-            title="添加本地音乐"
-          >
-            <Upload size={18} />
-          </button>
+          <Tooltip text="导入歌词文件 (.lrc)" position="bottom">
+            <button
+              onClick={() => lrcInputRef.current?.click()}
+              className="w-8 h-8 rounded-lg glass-button flex items-center justify-center text-white/60 hover:text-white"
+            >
+              <FileText size={18} />
+            </button>
+          </Tooltip>
+          <Tooltip text="添加本地音乐" position="bottom">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="w-8 h-8 rounded-lg glass-button flex items-center justify-center text-white/60 hover:text-white"
+            >
+              <Upload size={18} />
+            </button>
+          </Tooltip>
         </div>
         <input
           ref={fileInputRef}

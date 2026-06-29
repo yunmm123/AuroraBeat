@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   app: {
     getPath: (name: string) => ipcRenderer.invoke('app:getPath', name),
   },
+  lyrics: {
+    searchUfanv: (query: string) => ipcRenderer.invoke('lyrics:searchUfanv', query),
+  },
   onPlaybackToggle: (callback: () => void) => {
     ipcRenderer.on('playback:toggle', callback)
   },

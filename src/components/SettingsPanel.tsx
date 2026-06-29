@@ -3,6 +3,7 @@ import { X, Palette, Volume2, Music, Monitor, Keyboard } from 'lucide-react'
 import { usePlayerStore } from '@/store/playerStore'
 import { themes } from '@/utils/themes'
 import { useState } from 'react'
+import Tooltip from './Tooltip'
 
 export default function SettingsPanel() {
   const { 
@@ -47,12 +48,14 @@ export default function SettingsPanel() {
         >
           <div className="flex items-center justify-between p-6 border-b border-white/10">
             <h2 className="text-2xl font-bold text-white">设置</h2>
-            <button
-              onClick={toggleSettings}
-              className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/60 hover:text-white"
-            >
-              <X size={20} />
-            </button>
+            <Tooltip text="关闭" position="bottom">
+              <button
+                onClick={toggleSettings}
+                className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/60 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </Tooltip>
           </div>
           
           <div className="flex">

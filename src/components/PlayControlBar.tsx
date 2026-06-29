@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { usePlayerStore } from '@/store/playerStore'
 import { useState, useRef, useEffect } from 'react'
+import Tooltip from './Tooltip'
 
 interface PlayControlBarProps {
   onPlayToggle: () => void
@@ -76,6 +77,15 @@ export default function PlayControlBar({ onPlayToggle }: PlayControlBarProps) {
       case 'single': return <Repeat1 size={18} />
       case 'loop': return <Repeat size={18} />
       default: return <Repeat size={18} />
+    }
+  }
+
+  const getPlayModeLabel = () => {
+    switch (playMode) {
+      case 'shuffle': return '随机播放'
+      case 'single': return '单曲循环'
+      case 'loop': return '列表循环'
+      default: return '顺序播放'
     }
   }
   
@@ -145,46 +155,56 @@ export default function PlayControlBar({ onPlayToggle }: PlayControlBarProps) {
           </div>
           
           <div className="flex items-center gap-2">
-            <button
-              onClick={cyclePlayMode}
-              className={`w-10 h-10 rounded-full glass-button flex items-center justify-center transition-colors ${
-                playMode !== 'sequence' ? 'text-purple-400' : 'text-white/60 hover:text-white'
-              }`}
-            >
-              {getPlayModeIcon()}
-            </button>
+            <Tooltip text={getPlayModeLabel()} position="top">
+              <button
+                onClick={cyclePlayMode}
+                className={`w-10 h-10 rounded-full glass-button flex items-center justify-center transition-colors ${
+                  playMode !== 'sequence' ? 'text-purple-400' : 'text-white/60 hover:text-white'
+                }`}
+              >
+                {getPlayModeIcon()}
+              </button>
+            </Tooltip>
             
-            <button
-              onClick={() => usePlayerStore.getState().prevSong()}
-              className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/80 hover:text-white"
-            >
-              <SkipBack size={20} fill="currentColor" />
-            </button>
+            <Tooltip text="上一首" position="top">
+              <button
+                onClick={() => usePlayerStore.getState().prevSong()}
+                className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/80 hover:text-white"
+              >
+                <SkipBack size={20} fill="currentColor" />
+              </button>
+            </Tooltip>
             
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={onPlayToggle}
-              className="w-14 h-14 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white shadow-lg shadow-purple-500/30 pulse-glow"
-            >
-              {isPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" className="ml-1" />}
-            </motion.button>
+            <Tooltip text={isPlaying ? '暂停' : '播放'} position="top">
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={onPlayToggle}
+                className="w-14 h-14 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-white shadow-lg shadow-purple-500/30 pulse-glow"
+              >
+                {isPlaying ? <Pause size={28} fill="currentColor" /> : <Play size={28} fill="currentColor" className="ml-1" />}
+              </motion.button>
+            </Tooltip>
             
-            <button
-              onClick={() => usePlayerStore.getState().nextSong()}
-              className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/80 hover:text-white"
-            >
-              <SkipForward size={20} fill="currentColor" />
-            </button>
+            <Tooltip text="下一首" position="top">
+              <button
+                onClick={() => usePlayerStore.getState().nextSong()}
+                className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/80 hover:text-white"
+              >
+                <SkipForward size={20} fill="currentColor" />
+              </button>
+            </Tooltip>
             
             <div className="relative">
-              <button
-                onClick={toggleMute}
-                onMouseEnter={() => setShowVolumeSlider(true)}
-                className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/60 hover:text-white"
-              >
-                {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
-              </button>
+              <Tooltip text={isMuted || volume === 0 ? '取消静音' : '音量'} position="top">
+                <button
+                  onClick={toggleMute}
+                  onMouseEnter={() => setShowVolumeSlider(true)}
+                  className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/60 hover:text-white"
+                >
+                  {isMuted || volume === 0 ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                </button>
+              </Tooltip>
               
               <AnimatePresence>
                 {showVolumeSlider && (
@@ -216,30 +236,36 @@ export default function PlayControlBar({ onPlayToggle }: PlayControlBarProps) {
           <div className="w-px h-10 bg-white/10" />
           
           <div className="flex items-center gap-2">
-            <button
-              onClick={toggleLyrics}
-              className={`w-10 h-10 rounded-full glass-button flex items-center justify-center transition-colors ${
-                showLyrics ? 'text-purple-400' : 'text-white/60 hover:text-white'
-              }`}
-            >
-              <Mic2 size={18} />
-            </button>
+            <Tooltip text={showLyrics ? '隐藏歌词' : '显示歌词'} position="top">
+              <button
+                onClick={toggleLyrics}
+                className={`w-10 h-10 rounded-full glass-button flex items-center justify-center transition-colors ${
+                  showLyrics ? 'text-purple-400' : 'text-white/60 hover:text-white'
+                }`}
+              >
+                <Mic2 size={18} />
+              </button>
+            </Tooltip>
             
-            <button
-              onClick={toggleQueue}
-              className={`w-10 h-10 rounded-full glass-button flex items-center justify-center transition-colors ${
-                showQueue ? 'text-purple-400' : 'text-white/60 hover:text-white'
-              }`}
-            >
-              <ListMusic size={18} />
-            </button>
+            <Tooltip text={showQueue ? '隐藏队列' : '播放队列'} position="top">
+              <button
+                onClick={toggleQueue}
+                className={`w-10 h-10 rounded-full glass-button flex items-center justify-center transition-colors ${
+                  showQueue ? 'text-purple-400' : 'text-white/60 hover:text-white'
+                }`}
+              >
+                <ListMusic size={18} />
+              </button>
+            </Tooltip>
             
-            <button
-              onClick={toggleSettings}
-              className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/60 hover:text-white"
-            >
-              <Settings size={18} />
-            </button>
+            <Tooltip text="设置" position="top">
+              <button
+                onClick={toggleSettings}
+                className="w-10 h-10 rounded-full glass-button flex items-center justify-center text-white/60 hover:text-white"
+              >
+                <Settings size={18} />
+              </button>
+            </Tooltip>
           </div>
         </div>
       </div>
