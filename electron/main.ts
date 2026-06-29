@@ -1,11 +1,9 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut, systemPreferences, net } from 'electron'
 import path from 'path'
-import { fork } from 'child_process'
+import * as kugouHandler from './kugouHandler'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
-let kugouApiProcess: ReturnType<typeof fork> | null = null
-const KUGOU_API_PORT = 13456
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -61,60 +59,6 @@ function createWindow() {
   })
 }
 
-// Start KuGouMusic API subprocess
-function startKugouApi() {
-  // In packaged app, app.getAppPath() returns the resources/app.asar path
-  // We need to go up one level to find kugou-api alongside the asar
-  const appPath = app.getAppPath()
-  let apiDir: string
-  
-  if (appPath.endsWith('app.asar')) {
-    // Packaged: resources/app.asar -> resources/kugou-api
-    apiDir = path.join(path.dirname(appPath), 'kugou-api')
-  } else {
-    // Dev: project root
-    apiDir = path.join(appPath, 'kugou-api')
-  }
-  
-  kugouApiProcess = fork(path.join(apiDir, 'app.js'), [], {
-    cwd: apiDir,
-    env: {
-      ...process.env,
-      PORT: String(KUGOU_API_PORT),
-      HOST: '127.0.0.1',
-      platform: 'lite',
-    },
-    stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-  })
-
-  kugouApiProcess.stdout?.on('data', (data: Buffer) => {
-    console.log('[KuGouAPI]', data.toString().trim())
-  })
-
-  kugouApiProcess.stderr?.on('data', (data: Buffer) => {
-    console.error('[KuGouAPI]', data.toString().trim())
-  })
-
-  kugouApiProcess.on('exit', (code) => {
-    console.log(`[KuGouAPI] exited with code ${code}`)
-    kugouApiProcess = null
-  })
-
-  // Wait for API to be ready
-  const waitForApi = () => {
-    return new Promise<void>((resolve) => {
-      const check = () => {
-        const req = net.request(`http://127.0.0.1:${KUGOU_API_PORT}/`)
-        req.on('response', () => resolve())
-        req.on('error', () => setTimeout(check, 500))
-        req.end()
-      }
-      check()
-    })
-  }
-  return waitForApi()
-}
-
 function createTray() {
   const iconPath = path.join(__dirname, '../public/icon.png')
   const trayIcon = nativeImage.createFromPath(iconPath)
@@ -157,15 +101,9 @@ app.whenReady().then(async () => {
   createTray()
   registerGlobalShortcuts()
   
-  // Start KuGouMusic API in background
-  try {
-    await startKugouApi()
-    console.log(`[KuGouAPI] Ready on port ${KUGOU_API_PORT}`)
-    mainWindow?.webContents.send('kugou-api:ready')
-  } catch (error) {
-    console.error('[KuGouAPI] Failed to start:', error)
-    mainWindow?.webContents.send('kugou-api:error', String(error))
-  }
+  // KuGou API is now handled directly via IPC, no subprocess needed
+  console.log('[KuGouAPI] Ready (direct IPC mode)')
+  mainWindow?.webContents.send('kugou-api:ready')
   
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -177,21 +115,13 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  // Kill KuGou API subprocess
-  if (kugouApiProcess) {
-    kugouApiProcess.kill()
-    kugouApiProcess = null
-  }
   if (process.platform !== 'darwin') {
     app.quit()
   }
 })
 
 app.on('before-quit', () => {
-  if (kugouApiProcess) {
-    kugouApiProcess.kill()
-    kugouApiProcess = null
-  }
+  // No subprocess to kill
 })
 
 app.on('will-quit', () => {
@@ -295,4 +225,135 @@ ipcMain.handle('lyrics:searchUfanv', async (_e, query: string): Promise<string |
     console.error('ufanv.cn lyrics search failed:', error)
     return null
   }
+})
+
+// ============ KuGou Music API Handlers ============
+// These handlers call KuGou API directly from Electron main process
+
+ipcMain.handle('kg:search', async (_e, keyword: string, page = 1, pageSize = 30) => {
+  return kugouHandler.kgSearch(keyword, page, pageSize)
+})
+
+ipcMain.handle('kg:searchHot', async () => {
+  return kugouHandler.kgSearchHot()
+})
+
+ipcMain.handle('kg:searchDefault', async () => {
+  return kugouHandler.kgSearchDefault()
+})
+
+ipcMain.handle('kg:songUrl', async (_e, hash: string, albumId?: string) => {
+  return kugouHandler.kgSongUrl(hash, albumId)
+})
+
+ipcMain.handle('kg:lyric', async (_e, hash: string, albumId?: string) => {
+  return kugouHandler.kgLyric(hash, albumId)
+})
+
+ipcMain.handle('kg:qrKey', async () => {
+  return kugouHandler.kgQrKey()
+})
+
+ipcMain.handle('kg:qrCreate', async (_e, key: string) => {
+  return kugouHandler.kgQrCreate(key)
+})
+
+ipcMain.handle('kg:qrCheck', async (_e, key: string) => {
+  return kugouHandler.kgQrCheck(key)
+})
+
+ipcMain.handle('kg:topSong', async () => {
+  return kugouHandler.kgTopSong()
+})
+
+ipcMain.handle('kg:rankList', async () => {
+  return kugouHandler.kgRankList()
+})
+
+ipcMain.handle('kg:rankAudio', async (_e, rankId: string, page = 1) => {
+  return kugouHandler.kgRankAudio(rankId, page)
+})
+
+ipcMain.handle('kg:recommendSongs', async () => {
+  return kugouHandler.kgRecommendSongs()
+})
+
+ipcMain.handle('kg:fmClass', async () => {
+  return kugouHandler.kgFmClass()
+})
+
+ipcMain.handle('kg:fmRecommend', async (_e, classId: string) => {
+  return kugouHandler.kgFmRecommend(classId)
+})
+
+ipcMain.handle('kg:fmSongs', async (_e, classId: string, songId?: string) => {
+  return kugouHandler.kgFmSongs(classId, songId)
+})
+
+ipcMain.handle('kg:userDetail', async (_e, uid: string, token: string) => {
+  return kugouHandler.kgUserDetail(uid, token)
+})
+
+ipcMain.handle('kg:userPlaylist', async (_e, uid: string, token: string, page = 1) => {
+  return kugouHandler.kgUserPlaylist(uid, token, page)
+})
+
+ipcMain.handle('kg:playlistDetail', async (_e, id: string) => {
+  return kugouHandler.kgPlaylistDetail(id)
+})
+
+ipcMain.handle('kg:playlistTrackAll', async (_e, id: string, page = 1) => {
+  return kugouHandler.kgPlaylistTrackAll(id, page)
+})
+
+ipcMain.handle('kg:artistDetail', async (_e, artistId: string) => {
+  return kugouHandler.kgArtistDetail(artistId)
+})
+
+ipcMain.handle('kg:artistAudios', async (_e, artistId: string, page = 1) => {
+  return kugouHandler.kgArtistAudios(artistId, page)
+})
+
+ipcMain.handle('kg:albumDetail', async (_e, albumId: string) => {
+  return kugouHandler.kgAlbumDetail(albumId)
+})
+
+ipcMain.handle('kg:albumSongs', async (_e, albumId: string, page = 1) => {
+  return kugouHandler.kgAlbumSongs(albumId, page)
+})
+
+ipcMain.handle('kg:banner', async () => {
+  return kugouHandler.kgBanner()
+})
+
+ipcMain.handle('kg:sceneLists', async () => {
+  return kugouHandler.kgSceneLists()
+})
+
+ipcMain.handle('kg:sceneAudioList', async (_e, sceneId: string, page = 1) => {
+  return kugouHandler.kgSceneAudioList(sceneId, page)
+})
+
+ipcMain.handle('kg:diantai', async () => {
+  return kugouHandler.kgDiantai()
+})
+
+ipcMain.handle('kg:commentMusic', async (_e, hash: string, page = 1) => {
+  return kugouHandler.kgCommentMusic(hash, page)
+})
+
+ipcMain.handle('kg:songDetail', async (_e, hash: string) => {
+  return kugouHandler.kgSongDetail(hash)
+})
+
+ipcMain.handle('kg:audioMv', async (_e, hash: string) => {
+  return kugouHandler.kgAudioMv(hash)
+})
+
+ipcMain.handle('kg:videoUrl', async (_e, videoHash: string) => {
+  return kugouHandler.kgVideoUrl(videoHash)
+})
+
+ipcMain.handle('kg:healthCheck', async () => {
+  return kugouHandler.kgHealthCheck()
 })
