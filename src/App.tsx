@@ -6,9 +6,9 @@ import TitleBar from '@/components/TitleBar'
 import PlaylistSidebar from '@/components/PlaylistSidebar'
 import PlayControlBar from '@/components/PlayControlBar'
 import LyricsPanel from '@/components/LyricsPanel'
+import LyricsVisual from '@/components/LyricsVisual'
 import QueuePanel from '@/components/QueuePanel'
 import SettingsPanel from '@/components/SettingsPanel'
-import VisualEffectSelector from '@/components/VisualEffectSelector'
 import SearchPanel from '@/components/SearchPanel'
 import { applyTheme } from '@/utils/themes'
 
@@ -18,9 +18,7 @@ function App() {
   const audioAnalyzerRef = useRef<AudioAnalyzer | null>(null)
   const audioElementRef = useRef<HTMLAudioElement | null>(null)
   const animationFrameRef = useRef<number | null>(null)
-  const demoIntervalRef = useRef<number | null>(null)
   const [webglAvailable, setWebglAvailable] = useState(true)
-  const [demoMode, setDemoMode] = useState(true)
   
   const { 
     currentTheme, 
@@ -34,7 +32,14 @@ function App() {
     isMuted,
     setIsPlaying,
     currentSong,
+    renderQuality,
+    loadFromDB,
   } = usePlayerStore()
+
+  // Load songs from IndexedDB on mount
+  useEffect(() => {
+    loadFromDB()
+  }, [])
   
   useEffect(() => {
     applyTheme(currentTheme)
@@ -54,6 +59,7 @@ function App() {
       
       visualEngineRef.current = new VisualEngine(visualContainerRef.current)
       visualEngineRef.current.start()
+      visualEngineRef.current.setQuality(renderQuality)
       
       visualEngineRef.current.setColors(
         currentTheme.primary,
@@ -69,13 +75,17 @@ function App() {
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current)
       }
-      if (demoIntervalRef.current) {
-        clearInterval(demoIntervalRef.current)
-      }
       visualEngineRef.current?.destroy()
       audioAnalyzerRef.current?.destroy()
     }
   }, [])
+
+  // Update render quality
+  useEffect(() => {
+    if (visualEngineRef.current) {
+      visualEngineRef.current.setQuality(renderQuality)
+    }
+  }, [renderQuality])
   
   useEffect(() => {
     if (visualEngineRef.current) {
@@ -93,12 +103,11 @@ function App() {
     }
   }, [visualEffect])
   
+  // Demo animation for visual effect
   useEffect(() => {
-    if (!demoMode) return
-    
     let time = 0
     const demoAnimation = () => {
-      if (!isPlaying || !visualEngineRef.current) {
+      if (!visualEngineRef.current) {
         animationFrameRef.current = requestAnimationFrame(demoAnimation)
         return
       }
@@ -165,8 +174,9 @@ function App() {
         cancelAnimationFrame(animationFrameRef.current)
       }
     }
-  }, [isPlaying, demoMode, setAudioFeatures])
+  }, [setAudioFeatures])
   
+  // Audio element setup
   useEffect(() => {
     const audio = new Audio()
     audioElementRef.current = audio
@@ -183,7 +193,7 @@ function App() {
     initAudio()
     
     const updateAnalysis = () => {
-      if (audioAnalyzerRef.current && isPlaying && !demoMode) {
+      if (audioAnalyzerRef.current && isPlaying) {
         const features = audioAnalyzerRef.current.analyze()
         setAudioFeatures(features)
         
@@ -224,6 +234,7 @@ function App() {
     }
   }, [])
 
+  // Load new song when currentSong changes
   useEffect(() => {
     if (!audioElementRef.current || !currentSong?.url) return
     const audio = audioElementRef.current
@@ -233,30 +244,20 @@ function App() {
       audio.play().catch(() => {})
     }
   }, [currentSong?.url])
-  
-  const handlePlayToggle = async () => {
-    if (demoMode) {
-      setIsPlaying(!isPlaying)
-      return
-    }
-    
-    if (!audioElementRef.current || !audioAnalyzerRef.current) return
-    
-    await audioAnalyzerRef.current.resume()
-    
+
+  // Handle play/pause
+  useEffect(() => {
+    if (!audioElementRef.current) return
     if (isPlaying) {
-      audioElementRef.current.pause()
-      setIsPlaying(false)
+      audioElementRef.current.play().catch(() => {})
     } else {
-      try {
-        await audioElementRef.current.play()
-        setIsPlaying(true)
-      } catch (e) {
-        console.log('Play failed, using demo mode')
-        setDemoMode(true)
-        setIsPlaying(true)
-      }
+      audioElementRef.current.pause()
     }
+  }, [isPlaying])
+  
+  const handlePlayToggle = () => {
+    if (!currentSong?.url) return
+    setIsPlaying(!isPlaying)
   }
   
   return (
@@ -290,7 +291,7 @@ function App() {
           <PlaylistSidebar />
           
           <div className="flex-1 relative pointer-events-auto">
-            <VisualEffectSelector />
+            <LyricsVisual />
           </div>
           
           <QueuePanel />

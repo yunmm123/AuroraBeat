@@ -1,11 +1,22 @@
 import { motion } from 'framer-motion'
-import { Heart, Clock, Music3, Folder, Plus, ChevronLeft, Upload } from 'lucide-react'
+import { Music3, ChevronLeft, Upload } from 'lucide-react'
 import { usePlayerStore } from '@/store/playerStore'
 import { useRef } from 'react'
 import type { Song } from '@/types'
 
 export default function PlaylistSidebar() {
-  const { playlists, showPlaylist, togglePlaylist, setCurrentPlaylist, currentPlaylist, addLocalSongs, playSong } = usePlayerStore()
+  const { 
+    playlists, 
+    showPlaylist, 
+    togglePlaylist, 
+    setCurrentPlaylist, 
+    currentPlaylist, 
+    activeCategory,
+    setActiveCategory,
+    addLocalSongs, 
+    playSong,
+    localSongs,
+  } = usePlayerStore()
   const fileInputRef = useRef<HTMLInputElement>(null)
   
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -75,13 +86,6 @@ export default function PlaylistSidebar() {
         />
       </div>
       
-      <div className="space-y-1 mb-6">
-        <SidebarItem icon={<Heart size={18} />} label="我喜欢" count={128} active />
-        <SidebarItem icon={<Clock size={18} />} label="最近播放" count={50} />
-        <SidebarItem icon={<Music3 size={18} />} label="全部音乐" count={1024} />
-        <SidebarItem icon={<Folder size={18} />} label="本地音乐" count={playlists.find(p => p.id === 'local')?.songs.length || 0} />
-      </div>
-      
       <div className="flex-1 overflow-hidden flex flex-col">
         <div className="flex items-center justify-between mb-3">
           <span className="text-white/60 text-xs font-medium uppercase tracking-wider">我的歌单</span>
@@ -126,17 +130,5 @@ export default function PlaylistSidebar() {
         收起侧边栏
       </button>
     </motion.div>
-  )
-}
-
-function SidebarItem({ icon, label, count, active }: { icon: React.ReactNode; label: string; count: number; active?: boolean }) {
-  return (
-    <div className={`flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-all ${
-      active ? 'bg-gradient-to-r from-purple-500/20 to-pink-500/10 text-white' : 'text-white/70 hover:bg-white/5 hover:text-white'
-    }`}>
-      <div className={active ? 'text-purple-400' : ''}>{icon}</div>
-      <span className="flex-1 text-sm font-medium">{label}</span>
-      <span className="text-xs text-white/40">{count}</span>
-    </div>
   )
 }

@@ -1,9 +1,8 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Palette, Sparkles, Volume2, Music, Monitor, Keyboard } from 'lucide-react'
+import { X, Palette, Volume2, Music, Monitor, Keyboard } from 'lucide-react'
 import { usePlayerStore } from '@/store/playerStore'
 import { themes } from '@/utils/themes'
 import { useState } from 'react'
-import type { VisualEffectType } from '@/types'
 
 export default function SettingsPanel() {
   const { 
@@ -11,10 +10,6 @@ export default function SettingsPanel() {
     toggleSettings, 
     currentTheme, 
     setTheme,
-    visualEffect,
-    setVisualEffect,
-    autoVisualEffect,
-    setAutoVisualEffect,
     equalizerEnabled,
     setEqualizerEnabled,
     bassBoost,
@@ -28,14 +23,6 @@ export default function SettingsPanel() {
   } = usePlayerStore()
   
   const [activeTab, setActiveTab] = useState<'visual' | 'audio' | 'general'>('visual')
-  
-  const visualEffects: { id: VisualEffectType; name: string; icon: string }[] = [
-    { id: 'particles', name: '星河粒子', icon: '✨' },
-    { id: 'fluid', name: '流体光影', icon: '🌊' },
-    { id: 'geometry', name: '几何律动', icon: '💎' },
-    { id: 'waveform', name: '波形可视化', icon: '📊' },
-    { id: 'nebula', name: '频谱星云', icon: '🌌' },
-  ]
   
   const eqBands = ['32Hz', '64Hz', '125Hz', '250Hz', '500Hz', '1kHz', '2kHz', '4kHz', '8kHz', '16kHz']
   
@@ -94,66 +81,31 @@ export default function SettingsPanel() {
               {activeTab === 'visual' && (
                 <div className="space-y-6">
                   <div>
-                    <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                      <Sparkles size={20} className="text-purple-400" />
-                      视觉效果
-                    </h3>
-                    
-                    <div className="flex items-center justify-between mb-4">
-                      <span className="text-white/80 text-sm">自动切换（根据音乐情绪）</span>
-                      <button
-                        onClick={() => setAutoVisualEffect(!autoVisualEffect)}
-                        className={`w-12 h-6 rounded-full transition-all ${
-                          autoVisualEffect ? 'bg-gradient-to-r from-purple-500 to-pink-500' : 'bg-white/20'
-                        }`}
-                      >
-                        <motion.div
-                          animate={{ x: autoVisualEffect ? 24 : 2 }}
-                          className="w-5 h-5 bg-white rounded-full shadow-lg"
-                        />
-                      </button>
-                    </div>
-                    
-                    <div className="grid grid-cols-3 gap-3">
-                      {visualEffects.map((effect) => (
-                        <motion.button
-                          key={effect.id}
-                          whileHover={{ scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
-                          onClick={() => setVisualEffect(effect.id)}
-                          className={`p-4 rounded-2xl text-center transition-all ${
-                            visualEffect === effect.id
-                              ? 'bg-gradient-to-br from-purple-500/30 to-pink-500/20 border border-purple-500/50'
-                              : 'glass-button'
-                          }`}
-                        >
-                          <div className="text-3xl mb-2">{effect.icon}</div>
-                          <div className={`text-sm font-medium ${
-                            visualEffect === effect.id ? 'text-purple-300' : 'text-white/70'
-                          }`}>
-                            {effect.name}
-                          </div>
-                        </motion.button>
-                      ))}
-                    </div>
-                  </div>
-                  
-                  <div>
                     <h3 className="text-white font-semibold mb-4">渲染质量</h3>
+                    <p className="text-white/50 text-sm mb-4">
+                      调节粒子数量和渲染精度，影响视觉效果细腻程度
+                    </p>
                     <div className="grid grid-cols-4 gap-2">
                       {(['low', 'medium', 'high', 'ultra'] as const).map((quality) => {
                         const labels: Record<string, string> = { low: '低', medium: '中', high: '高', ultra: '极致' }
+                        const desc: Record<string, string> = { 
+                          low: '1000粒子', 
+                          medium: '2500粒子', 
+                          high: '5000粒子', 
+                          ultra: '10000粒子' 
+                        }
                         return (
                           <button
                             key={quality}
                             onClick={() => setRenderQuality(quality)}
-                            className={`py-2 rounded-xl text-sm transition-all ${
+                            className={`py-3 rounded-xl text-sm transition-all ${
                               renderQuality === quality
                                 ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
                                 : 'glass-button text-white/70'
                             }`}
                           >
-                            {labels[quality]}
+                            <div className="font-medium">{labels[quality]}</div>
+                            <div className="text-xs opacity-70 mt-1">{desc[quality]}</div>
                           </button>
                         )
                       })}

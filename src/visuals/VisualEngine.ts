@@ -2,12 +2,6 @@ import * as THREE from 'three'
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer'
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass'
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass'
-import { particleVertexShader, particleFragmentShader } from '@/shaders/particleShaders'
-import { fluidVertexShader, fluidFragmentShader } from '@/shaders/fluidShaders'
-import { geometryVertexShader, geometryFragmentShader } from '@/shaders/geometryShaders'
-import { nebulaVertexShader, nebulaFragmentShader } from '@/shaders/nebulaShaders'
-import { waveformVertexShader, waveformFragmentShader } from '@/shaders/waveformShaders'
 import type { AudioFeatures, VisualEffectType } from '@/types'
 
 export class VisualEngine {
@@ -20,10 +14,6 @@ export class VisualEngine {
   private clock: THREE.Clock
   private animationId: number | null = null
   
-  private currentEffect: VisualEffectType = 'particles'
-  private effects: Map<VisualEffectType, THREE.Object3D> = new Map()
-  private effectMaterials: Map<VisualEffectType, THREE.ShaderMaterial> = new Map()
-  
   private audioDataTexture: THREE.DataTexture
   private audioDataArray: Uint8Array<ArrayBuffer>
   
@@ -32,10 +22,14 @@ export class VisualEngine {
   private accentColor: THREE.Color = new THREE.Color(0xa78bfa)
   
   private bloomPass: UnrealBloomPass
-  private chromaticAberrationPass: ShaderPass
   
   private isPaused = false
   private quality: 'low' | 'medium' | 'high' | 'ultra' = 'high'
+  
+  // Lyrics particle system
+  private particleSystem: THREE.Points | null = null
+  private particleMaterial: THREE.ShaderMaterial | null = null
+  private particleCount = 0
   
   constructor(container: HTMLElement) {
     this.container = container
@@ -57,9 +51,9 @@ export class VisualEngine {
       powerPreference: 'high-performance',
     })
     this.renderer.setSize(container.clientWidth, container.clientHeight)
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5))
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = 1.2
+    this.renderer.toneMappingExposure = 1.0
     container.appendChild(this.renderer.domElement)
     
     this.audioDataArray = new Uint8Array(128) as unknown as Uint8Array<ArrayBuffer>
@@ -78,72 +72,109 @@ export class VisualEngine {
     
     this.bloomPass = new UnrealBloomPass(
       new THREE.Vector2(container.clientWidth, container.clientHeight),
-      1.0,
+      0.6,
       0.4,
       0.85
     )
     this.composer.addPass(this.bloomPass)
     
-    this.chromaticAberrationPass = this.createChromaticAberrationPass()
-    this.composer.addPass(this.chromaticAberrationPass)
-    
-    this.initEffects()
+    this.initLyricsParticles()
     
     window.addEventListener('resize', this.handleResize)
   }
   
-  private initEffects() {
-    this.initParticleEffect()
-    this.initFluidEffect()
-    this.initGeometryEffect()
-    this.initNebulaEffect()
-    this.initWaveformEffect()
+  private initLyricsParticles() {
+    const count = this.getParticleCount()
+    this.particleCount = count
     
-    this.setEffect('particles')
-  }
-  
-  private initParticleEffect() {
-    const particleCount = 5000
     const geometry = new THREE.BufferGeometry()
-    const positions = new Float32Array(particleCount * 3)
-    const colors = new Float32Array(particleCount * 3)
-    const sizes = new Float32Array(particleCount)
-    const speeds = new Float32Array(particleCount)
-    const indices = new Float32Array(particleCount)
+    const positions = new Float32Array(count * 3)
+    const colors = new Float32Array(count * 3)
+    const sizes = new Float32Array(count)
+    const speeds = new Float32Array(count)
+    const phases = new Float32Array(count)
     
-    for (let i = 0; i < particleCount; i++) {
+    for (let i = 0; i < count; i++) {
       const i3 = i * 3
-      const radius = Math.random() * 15 + 5
-      const theta = Math.random() * Math.PI * 2
-      const phi = Math.random() * Math.PI
+      // Distribute particles in a wide area
+      positions[i3] = (Math.random() - 0.5) * 40
+      positions[i3 + 1] = (Math.random() - 0.5) * 30
+      positions[i3 + 2] = (Math.random() - 0.5) * 20 - 5
       
-      positions[i3] = radius * Math.sin(phi) * Math.cos(theta)
-      positions[i3 + 1] = radius * Math.sin(phi) * Math.sin(theta)
-      positions[i3 + 2] = radius * Math.cos(phi)
-      
-      const color = new THREE.Color().setHSL(
-        Math.random() * 0.3 + 0.6,
-        0.8,
-        0.6
-      )
+      const hue = Math.random() * 0.3 + 0.6 // purple-blue range
+      const color = new THREE.Color().setHSL(hue, 0.7, 0.5 + Math.random() * 0.3)
       colors[i3] = color.r
       colors[i3 + 1] = color.g
       colors[i3 + 2] = color.b
       
-      sizes[i] = Math.random() * 2 + 0.5
-      speeds[i] = Math.random() * 0.5 + 0.5
-      indices[i] = i
+      sizes[i] = Math.random() * 1.5 + 0.3
+      speeds[i] = Math.random() * 0.3 + 0.1
+      phases[i] = Math.random() * Math.PI * 2
     }
     
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     geometry.setAttribute('customColor', new THREE.BufferAttribute(colors, 3))
     geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1))
     geometry.setAttribute('speed', new THREE.BufferAttribute(speeds, 1))
-    geometry.setAttribute('index', new THREE.BufferAttribute(indices, 1))
+    geometry.setAttribute('phase', new THREE.BufferAttribute(phases, 1))
     
     const material = new THREE.ShaderMaterial({
-      vertexShader: particleVertexShader,
-      fragmentShader: particleFragmentShader,
+      vertexShader: `
+        attribute float size;
+        attribute float speed;
+        attribute float phase;
+        attribute vec3 customColor;
+        
+        uniform float uTime;
+        uniform float uBeatIntensity;
+        uniform float uLowFreq;
+        uniform float uMidFreq;
+        uniform float uHighFreq;
+        uniform float uPointSize;
+        
+        varying vec3 vColor;
+        varying float vAlpha;
+        
+        void main() {
+          vColor = customColor;
+          
+          vec3 pos = position;
+          
+          // Gentle floating motion
+          float t = uTime * speed + phase;
+          pos.x += sin(t * 0.7) * 2.0;
+          pos.y += cos(t * 0.5) * 1.5;
+          pos.z += sin(t * 0.3) * 1.0;
+          
+          // Beat pulse - expand outward
+          float beatPulse = uBeatIntensity * 3.0;
+          vec3 dir = normalize(pos);
+          pos += dir * beatPulse * sin(t * 2.0) * 0.5;
+          
+          // Low freq - vertical wave
+          pos.y += sin(uTime * 0.8 + pos.x * 0.3) * uLowFreq * 2.0;
+          
+          vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+          
+          float dist = length(mvPosition.xyz);
+          vAlpha = smoothstep(30.0, 10.0, dist) * (0.4 + uMidFreq * 0.3);
+          
+          gl_PointSize = size * uPointSize * (200.0 / -mvPosition.z);
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vColor;
+        varying float vAlpha;
+        
+        void main() {
+          float d = length(gl_PointCoord - 0.5);
+          if (d > 0.5) discard;
+          
+          float alpha = smoothstep(0.5, 0.1, d) * vAlpha;
+          gl_FragColor = vec4(vColor, alpha);
+        }
+      `,
       uniforms: {
         uTime: { value: 0 },
         uBeatIntensity: { value: 0 },
@@ -158,183 +189,24 @@ export class VisualEngine {
     })
     
     const points = new THREE.Points(geometry, material)
-    points.visible = false
     this.scene.add(points)
-    this.effects.set('particles', points)
-    this.effectMaterials.set('particles', material)
+    this.particleSystem = points
+    this.particleMaterial = material
   }
   
-  private initFluidEffect() {
-    const geometry = new THREE.PlaneGeometry(40, 40, 1, 1)
-    const material = new THREE.ShaderMaterial({
-      vertexShader: fluidVertexShader,
-      fragmentShader: fluidFragmentShader,
-      uniforms: {
-        uTime: { value: 0 },
-        uBeatIntensity: { value: 0 },
-        uLowFreq: { value: 0 },
-        uMidFreq: { value: 0 },
-        uHighFreq: { value: 0 },
-        uResolution: { value: new THREE.Vector2(1, 1) },
-        uColor1: { value: new THREE.Color(0x1a0533) },
-        uColor2: { value: new THREE.Color(0x6d28d9) },
-        uColor3: { value: new THREE.Color(0xa78bfa) },
-      },
-      transparent: true,
-    })
-    
-    const mesh = new THREE.Mesh(geometry, material)
-    mesh.position.z = -5
-    mesh.visible = false
-    this.scene.add(mesh)
-    this.effects.set('fluid', mesh)
-    this.effectMaterials.set('fluid', material)
+  private getParticleCount(): number {
+    const counts = { low: 1000, medium: 2500, high: 5000, ultra: 10000 }
+    return counts[this.quality]
   }
   
-  private initGeometryEffect() {
-    const geometry = new THREE.IcosahedronGeometry(6, 4)
-    const material = new THREE.ShaderMaterial({
-      vertexShader: geometryVertexShader,
-      fragmentShader: geometryFragmentShader,
-      uniforms: {
-        uTime: { value: 0 },
-        uBeatIntensity: { value: 0 },
-        uLowFreq: { value: 0 },
-        uMidFreq: { value: 0 },
-        uHighFreq: { value: 0 },
-        uAudioTexture: { value: this.audioDataTexture },
-        uColor1: { value: new THREE.Color(0x4c1d95) },
-        uColor2: { value: new THREE.Color(0x8b5cf6) },
-        uColor3: { value: new THREE.Color(0xc4b5fd) },
-        uWireframe: { value: 0 },
-        uGlass: { value: 1 },
-      },
-      transparent: true,
-      side: THREE.DoubleSide,
-    })
-    
-    const mesh = new THREE.Mesh(geometry, material)
-    mesh.visible = false
-    this.scene.add(mesh)
-    this.effects.set('geometry', mesh)
-    this.effectMaterials.set('geometry', material)
-  }
-  
-  private initNebulaEffect() {
-    const geometry = new THREE.SphereGeometry(50, 32, 32)
-    const material = new THREE.ShaderMaterial({
-      vertexShader: nebulaVertexShader,
-      fragmentShader: nebulaFragmentShader,
-      uniforms: {
-        uTime: { value: 0 },
-        uBeatIntensity: { value: 0 },
-        uLowFreq: { value: 0 },
-        uMidFreq: { value: 0 },
-        uHighFreq: { value: 0 },
-        uColor1: { value: new THREE.Color(0x0f0a1e) },
-        uColor2: { value: new THREE.Color(0x6d28d9) },
-        uColor3: { value: new THREE.Color(0xf472b6) },
-        uCameraPos: { value: new THREE.Vector3() },
-      },
-      transparent: true,
-      side: THREE.BackSide,
-      depthWrite: false,
-    })
-    
-    const mesh = new THREE.Mesh(geometry, material)
-    mesh.visible = false
-    this.scene.add(mesh)
-    this.effects.set('nebula', mesh)
-    this.effectMaterials.set('nebula', material)
-  }
-  
-  private initWaveformEffect() {
-    const geometry = new THREE.PlaneGeometry(30, 10, 128, 64)
-    const material = new THREE.ShaderMaterial({
-      vertexShader: waveformVertexShader,
-      fragmentShader: waveformFragmentShader,
-      uniforms: {
-        uTime: { value: 0 },
-        uBeatIntensity: { value: 0 },
-        uLowFreq: { value: 0 },
-        uMidFreq: { value: 0 },
-        uHighFreq: { value: 0 },
-        uAudioTexture: { value: this.audioDataTexture },
-        uColor1: { value: new THREE.Color(0x1e1b4b) },
-        uColor2: { value: new THREE.Color(0x6366f1) },
-        uColor3: { value: new THREE.Color(0xa5b4fc) },
-      },
-      transparent: true,
-      side: THREE.DoubleSide,
-    })
-    
-    const mesh = new THREE.Mesh(geometry, material)
-    mesh.rotation.x = -Math.PI / 4
-    mesh.position.y = -2
-    mesh.visible = false
-    this.scene.add(mesh)
-    this.effects.set('waveform', mesh)
-    this.effectMaterials.set('waveform', material)
-  }
-  
-  private createChromaticAberrationPass(): ShaderPass {
-    const shader = {
-      uniforms: {
-        tDiffuse: { value: null },
-        uAmount: { value: 0.002 },
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D tDiffuse;
-        uniform float uAmount;
-        varying vec2 vUv;
-        
-        void main() {
-          vec2 dir = vUv - 0.5;
-          float dist = length(dir);
-          
-          float r = texture2D(tDiffuse, vUv + dir * uAmount * dist).r;
-          float g = texture2D(tDiffuse, vUv).g;
-          float b = texture2D(tDiffuse, vUv - dir * uAmount * dist).b;
-          
-          gl_FragColor = vec4(r, g, b, 1.0);
-        }
-      `,
-    }
-    
-    return new ShaderPass(shader)
-  }
-  
-  setEffect(effect: VisualEffectType) {
-    this.currentEffect = effect
-    
-    this.effects.forEach((obj, key) => {
-      obj.visible = key === effect
-    })
+  setEffect(_effect: VisualEffectType) {
+    // Only one effect now
   }
   
   setColors(primary: string, secondary: string, accent: string) {
     this.primaryColor.set(primary)
     this.secondaryColor.set(secondary)
     this.accentColor.set(accent)
-    
-    this.effectMaterials.forEach((material) => {
-      if (material.uniforms.uColor1) {
-        material.uniforms.uColor1.value = this.primaryColor.clone().multiplyScalar(0.2)
-      }
-      if (material.uniforms.uColor2) {
-        material.uniforms.uColor2.value = this.primaryColor.clone()
-      }
-      if (material.uniforms.uColor3) {
-        material.uniforms.uColor3.value = this.accentColor.clone()
-      }
-    })
   }
   
   updateAudio(features: AudioFeatures) {
@@ -347,23 +219,15 @@ export class VisualEngine {
     }
     this.audioDataTexture.needsUpdate = true
     
-    this.effectMaterials.forEach((material) => {
-      if (material.uniforms.uBeatIntensity) {
-        material.uniforms.uBeatIntensity.value = features.beatIntensity
-      }
-      if (material.uniforms.uLowFreq) {
-        material.uniforms.uLowFreq.value = features.lowFrequency
-      }
-      if (material.uniforms.uMidFreq) {
-        material.uniforms.uMidFreq.value = features.midFrequency
-      }
-      if (material.uniforms.uHighFreq) {
-        material.uniforms.uHighFreq.value = features.highFrequency
-      }
-    })
+    if (this.particleMaterial) {
+      this.particleMaterial.uniforms.uBeatIntensity.value = features.beatIntensity
+      this.particleMaterial.uniforms.uLowFreq.value = features.lowFrequency
+      this.particleMaterial.uniforms.uMidFreq.value = features.midFrequency
+      this.particleMaterial.uniforms.uHighFreq.value = features.highFrequency
+    }
     
-    this.bloomPass.strength = 0.8 + features.beatIntensity * 0.8
-    this.chromaticAberrationPass.uniforms.uAmount.value = 0.001 + features.beatIntensity * 0.005
+    // Subtle bloom, not too flashy
+    this.bloomPass.strength = 0.4 + features.beatIntensity * 0.3
   }
   
   start() {
@@ -388,31 +252,17 @@ export class VisualEngine {
     const delta = this.clock.getDelta()
     const time = this.clock.getElapsedTime()
     
-    this.effectMaterials.forEach((material) => {
-      if (material.uniforms.uTime) {
-        material.uniforms.uTime.value = time
-      }
-    })
-    
-    const particleObj = this.effects.get('particles')
-    if (particleObj) {
-      particleObj.rotation.y += delta * 0.1
-      particleObj.rotation.x += delta * 0.05
+    if (this.particleMaterial) {
+      this.particleMaterial.uniforms.uTime.value = time
     }
     
-    const geoObj = this.effects.get('geometry')
-    if (geoObj) {
-      geoObj.rotation.y += delta * 0.3
-      geoObj.rotation.x += delta * 0.1
+    if (this.particleSystem) {
+      this.particleSystem.rotation.y += delta * 0.02
     }
     
-    const nebulaMat = this.effectMaterials.get('nebula')
-    if (nebulaMat && nebulaMat.uniforms.uCameraPos) {
-      nebulaMat.uniforms.uCameraPos.value.copy(this.camera.position)
-    }
-    
-    this.camera.position.x = Math.sin(time * 0.1) * 2
-    this.camera.position.y = Math.cos(time * 0.08) * 1.5
+    // Very subtle camera movement
+    this.camera.position.x = Math.sin(time * 0.05) * 0.5
+    this.camera.position.y = Math.cos(time * 0.04) * 0.3
     this.camera.lookAt(0, 0, 0)
     
     this.composer.render()
@@ -427,40 +277,36 @@ export class VisualEngine {
     
     this.renderer.setSize(width, height)
     this.composer.setSize(width, height)
-    
-    const fluidMat = this.effectMaterials.get('fluid')
-    if (fluidMat && fluidMat.uniforms.uResolution) {
-      fluidMat.uniforms.uResolution.value.set(width, height)
-    }
   }
   
   setQuality(quality: 'low' | 'medium' | 'high' | 'ultra') {
     this.quality = quality
-    const particleObj = this.effects.get('particles')
-    if (particleObj) {
-      const mat = this.effectMaterials.get('particles')
-      if (mat && mat.uniforms.uPointSize) {
-        const sizeMap = { low: 0.5, medium: 0.75, high: 1.0, ultra: 1.5 }
-        mat.uniforms.uPointSize.value = sizeMap[quality]
-      }
-    }
     
-    this.bloomPass.strength = quality === 'ultra' ? 1.2 : quality === 'high' ? 1.0 : 0.7
-    this.renderer.setPixelRatio(quality === 'ultra' ? 2 : quality === 'high' ? 1.5 : 1)
+    // Rebuild particles with new count
+    if (this.particleSystem) {
+      this.scene.remove(this.particleSystem)
+      this.particleSystem.geometry.dispose()
+      this.particleMaterial?.dispose()
+    }
+    this.initLyricsParticles()
+    
+    // Bloom and pixel ratio per quality
+    const bloomStrength = { low: 0.2, medium: 0.4, high: 0.6, ultra: 0.8 }
+    this.bloomPass.strength = bloomStrength[quality]
+    
+    const pixelRatios = { low: 0.5, medium: 1.0, high: 1.5, ultra: 2.0 }
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatios[quality]))
   }
   
   destroy() {
     this.pause()
     window.removeEventListener('resize', this.handleResize)
     
-    this.effects.forEach((obj) => {
-      this.scene.remove(obj)
-    })
-    
-    this.effectMaterials.forEach((material) => {
-      material.dispose()
-    })
-    
+    if (this.particleSystem) {
+      this.scene.remove(this.particleSystem)
+      this.particleSystem.geometry.dispose()
+    }
+    this.particleMaterial?.dispose()
     this.audioDataTexture.dispose()
     this.renderer.dispose()
     this.composer.dispose()

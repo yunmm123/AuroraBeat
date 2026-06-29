@@ -37,7 +37,7 @@ export interface AudioFeatures {
   mood: 'energetic' | 'calm' | 'sad' | 'happy' | 'electronic' | 'classical'
 }
 
-export type VisualEffectType = 'particles' | 'fluid' | 'geometry' | 'waveform' | 'nebula'
+export type VisualEffectType = 'lyrics'
 
 export interface Theme {
   id: string

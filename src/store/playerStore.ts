@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { Song, Playlist, PlayMode, AudioFeatures, VisualEffectType, Theme } from '@/types'
 import { themes } from '@/utils/themes'
+import { getAllAudioFiles, saveAudioFile, deleteAudioFile, type StoredAudio } from '@/utils/audioDB'
 
 interface PlayerState {
   currentSong: Song | null
@@ -16,6 +17,7 @@ interface PlayerState {
   
   playlists: Playlist[]
   currentPlaylist: Playlist | null
+  activeCategory: string | null
   
   audioFeatures: AudioFeatures | null
   visualEffect: VisualEffectType
@@ -39,6 +41,7 @@ interface PlayerState {
   localSongs: Song[]
   searchQuery: string
   searchResults: Song[]
+  dbLoading: boolean
   
   setCurrentSong: (song: Song | null) => void
   setIsPlaying: (playing: boolean) => void
@@ -55,6 +58,7 @@ interface PlayerState {
   
   setPlaylists: (playlists: Playlist[]) => void
   setCurrentPlaylist: (playlist: Playlist | null) => void
+  setActiveCategory: (category: string | null) => void
   
   setAudioFeatures: (features: AudioFeatures) => void
   setVisualEffect: (effect: VisualEffectType) => void
@@ -75,8 +79,10 @@ interface PlayerState {
   setSurroundEnabled: (enabled: boolean) => void
   setRenderQuality: (quality: 'low' | 'medium' | 'high' | 'ultra') => void
   addLocalSongs: (songs: Song[]) => void
+  removeLocalSong: (id: string) => void
   setSearchQuery: (query: string) => void
   playSong: (song: Song) => void
+  loadFromDB: () => Promise<void>
 }
 
 const mockSong: Song = {
@@ -92,44 +98,31 @@ const mockSong: Song = {
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => ({
-  currentSong: mockSong,
+  currentSong: null,
   isPlaying: false,
   currentTime: 0,
-  duration: 245,
+  duration: 0,
   volume: 0.75,
   isMuted: false,
   playMode: 'sequence',
   playbackRate: 1,
-  queue: [mockSong],
+  queue: [],
   queueIndex: 0,
   
   playlists: [
     {
-      id: 'favorites',
-      name: '我喜欢',
-      cover: '',
-      songs: [mockSong],
-      source: 'local',
-    },
-    {
-      id: 'recent',
-      name: '最近播放',
-      cover: '',
-      songs: [mockSong],
-      source: 'local',
-    },
-    {
-      id: 'local',
-      name: '本地音乐',
+      id: 'all',
+      name: '全部音乐',
       cover: '',
       songs: [],
       source: 'local',
     },
   ],
   currentPlaylist: null,
+  activeCategory: null,
   
   audioFeatures: null,
-  visualEffect: 'particles',
+  visualEffect: 'lyrics',
   autoVisualEffect: true,
   
   currentTheme: themes[0],
@@ -150,6 +143,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   localSongs: [],
   searchQuery: '',
   searchResults: [],
+  dbLoading: true,
   
   setCurrentSong: (song) => set({ currentSong: song }),
   setIsPlaying: (playing) => set({ isPlaying: playing }),
@@ -162,6 +156,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setPlaybackRate: (rate) => set({ playbackRate: rate }),
   nextSong: () => {
     const { queue, queueIndex, playMode } = get()
+    if (queue.length === 0) return
     let nextIndex = queueIndex
     if (playMode === 'shuffle') {
       nextIndex = Math.floor(Math.random() * queue.length)
@@ -174,6 +169,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   },
   prevSong: () => {
     const { queue, queueIndex } = get()
+    if (queue.length === 0) return
     const prevIndex = queueIndex === 0 ? queue.length - 1 : queueIndex - 1
     set({ queueIndex: prevIndex, currentSong: queue[prevIndex], currentTime: 0 })
   },
@@ -185,7 +181,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   }),
   
   setPlaylists: (playlists) => set({ playlists }),
-  setCurrentPlaylist: (playlist) => set({ currentPlaylist: playlist }),
+  setCurrentPlaylist: (playlist) => set({ currentPlaylist: playlist, activeCategory: null }),
+  setActiveCategory: (category) => set({ activeCategory: category, currentPlaylist: null }),
   
   setAudioFeatures: (features) => set({ audioFeatures: features }),
   setVisualEffect: (effect) => set({ visualEffect: effect }),
@@ -205,12 +202,47 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setBassBoost: (value) => set({ bassBoost: value }),
   setSurroundEnabled: (enabled) => set({ surroundEnabled: enabled }),
   setRenderQuality: (quality) => set({ renderQuality: quality }),
-  addLocalSongs: (songs) => set((state) => ({
-    localSongs: [...state.localSongs, ...songs],
-    playlists: state.playlists.map(p =>
-      p.id === 'local' ? { ...p, songs: [...p.songs, ...songs] } : p
-    ),
-  })),
+  
+  addLocalSongs: async (songs) => {
+    const state = get()
+    const newSongs = [...state.localSongs, ...songs]
+    
+    for (const song of songs) {
+      const file = await fetch(song.url).then(r => r.blob()).then(b => new File([b], song.title + '.mp3'))
+      await saveAudioFile({
+        id: song.id,
+        title: song.title,
+        artist: song.artist,
+        album: song.album,
+        duration: song.duration,
+        fileName: song.title,
+        file,
+      })
+    }
+    
+    const allPlaylist = state.playlists.find(p => p.id === 'all')
+    set({
+      localSongs: newSongs,
+      playlists: state.playlists.map(p =>
+        p.id === 'all' ? { ...p, songs: newSongs } : p
+      ),
+      queue: state.queue.length === 0 ? newSongs : state.queue,
+      currentSong: state.currentSong || newSongs[0] || null,
+    })
+  },
+  
+  removeLocalSong: async (id) => {
+    await deleteAudioFile(id)
+    const state = get()
+    const newLocal = state.localSongs.filter(s => s.id !== id)
+    set({
+      localSongs: newLocal,
+      playlists: state.playlists.map(p =>
+        p.id === 'all' ? { ...p, songs: newLocal } : p
+      ),
+    })
+  },
+  
   setSearchQuery: (query) => {
     const q = query.toLowerCase()
     const allSongs = [
@@ -229,7 +261,39 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       : []
     set({ searchQuery: query, searchResults: results })
   },
+  
   playSong: (song) => {
     set({ currentSong: song, isPlaying: true, currentTime: 0 })
+  },
+  
+  loadFromDB: async () => {
+    try {
+      const stored = await getAllAudioFiles()
+      const songs: Song[] = stored.map(s => ({
+        id: s.id,
+        title: s.title,
+        artist: s.artist,
+        album: s.album,
+        cover: '',
+        duration: s.duration,
+        url: URL.createObjectURL(s.file),
+        source: 'local' as const,
+      }))
+      set({
+        localSongs: songs,
+        dbLoading: false,
+        playlists: [{
+          id: 'all',
+          name: '全部音乐',
+          cover: '',
+          songs,
+          source: 'local',
+        }],
+        queue: songs,
+        currentSong: songs[0] || null,
+      })
+    } catch {
+      set({ dbLoading: false })
+    }
   },
 }))
