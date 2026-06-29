@@ -1,8 +1,9 @@
 import { motion } from 'framer-motion'
-import { Music3, ChevronLeft, Upload } from 'lucide-react'
+import { Music3, ChevronLeft, Upload, FileText } from 'lucide-react'
 import { usePlayerStore } from '@/store/playerStore'
 import { useRef } from 'react'
 import type { Song } from '@/types'
+import { parseLrc } from '@/services/lyricsApi'
 
 export default function PlaylistSidebar() {
   const { 
@@ -16,8 +17,10 @@ export default function PlaylistSidebar() {
     addLocalSongs, 
     playSong,
     localSongs,
+    currentSong,
   } = usePlayerStore()
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const lrcInputRef = useRef<HTMLInputElement>(null)
   
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -41,6 +44,40 @@ export default function PlaylistSidebar() {
     
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
+    }
+  }
+
+  const handleLrcUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files || files.length === 0) return
+
+    const file = files[0]
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string
+      if (!text) return
+      const lines = parseLrc(text)
+      
+      // Try to match with current song by name
+      const songName = file.name.replace(/\.[^.]+$/, '').toLowerCase()
+      const allSongs = [...localSongs, ...(currentPlaylist?.songs || [])]
+      const matched = allSongs.find(s => 
+        s.title.toLowerCase().replace(/\.[^.]+$/, '') === songName
+      )
+
+      if (matched || currentSong) {
+        // Apply lyrics to matched song or current song
+        const targetId = matched?.id || currentSong?.id
+        if (targetId) {
+          // Store lyrics in a simple way - set as current lyrics
+          usePlayerStore.setState({ lyrics: lines, lyricsLoading: false })
+        }
+      }
+    }
+    reader.readAsText(file, 'utf-8')
+
+    if (lrcInputRef.current) {
+      lrcInputRef.current.value = ''
     }
   }
   
@@ -69,19 +106,35 @@ export default function PlaylistSidebar() {
     >
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-white font-semibold text-lg">音乐库</h2>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="w-8 h-8 rounded-lg glass-button flex items-center justify-center text-white/60 hover:text-white"
-          title="添加本地音乐"
-        >
-          <Upload size={18} />
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => lrcInputRef.current?.click()}
+            className="w-8 h-8 rounded-lg glass-button flex items-center justify-center text-white/60 hover:text-white"
+            title="导入歌词文件 (.lrc)"
+          >
+            <FileText size={18} />
+          </button>
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="w-8 h-8 rounded-lg glass-button flex items-center justify-center text-white/60 hover:text-white"
+            title="添加本地音乐"
+          >
+            <Upload size={18} />
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
           accept="audio/*"
           multiple
           onChange={handleFileUpload}
+          className="hidden"
+        />
+        <input
+          ref={lrcInputRef}
+          type="file"
+          accept=".lrc"
+          onChange={handleLrcUpload}
           className="hidden"
         />
       </div>

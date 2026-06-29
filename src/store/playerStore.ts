@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { Song, Playlist, PlayMode, AudioFeatures, VisualEffectType, Theme } from '@/types'
 import { themes } from '@/utils/themes'
 import { getAllAudioFiles, saveAudioFile, deleteAudioFile, type StoredAudio } from '@/utils/audioDB'
+import { searchLyrics, parseSyncedLyrics, type LyricLine } from '@/services/lyricsApi'
 
 interface PlayerState {
   currentSong: Song | null
@@ -42,6 +43,10 @@ interface PlayerState {
   searchQuery: string
   searchResults: Song[]
   dbLoading: boolean
+  
+  // Lyrics
+  lyrics: LyricLine[]
+  lyricsLoading: boolean
   
   setCurrentSong: (song: Song | null) => void
   setIsPlaying: (playing: boolean) => void
@@ -144,6 +149,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   searchQuery: '',
   searchResults: [],
   dbLoading: true,
+  
+  // Lyrics
+  lyrics: [],
+  lyricsLoading: false,
   
   setCurrentSong: (song) => set({ currentSong: song }),
   setIsPlaying: (playing) => set({ isPlaying: playing }),
@@ -263,7 +272,30 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   },
   
   playSong: (song) => {
-    set({ currentSong: song, isPlaying: true, currentTime: 0 })
+    set({ currentSong: song, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
+    
+    // Auto-fetch lyrics from lrclib.net
+    const trackName = song.title.replace(/\.[^.]+$/, '') // remove file extension
+    const artistName = song.artist !== '未知艺术家' ? song.artist : ''
+    const albumName = song.album !== '本地音乐' ? song.album : ''
+    
+    searchLyrics(trackName, artistName, albumName, song.duration).then((result) => {
+      if (result?.syncedLyrics) {
+        const lines = parseSyncedLyrics(result.syncedLyrics)
+        set({ lyrics: lines, lyricsLoading: false })
+      } else if (result?.plainLyrics) {
+        // No timestamps, split by lines
+        const lines = result.plainLyrics.split('\n').filter(l => l.trim()).map((text, i) => ({
+          time: i * 3, // estimate 3 seconds per line
+          text: text.trim(),
+        }))
+        set({ lyrics: lines, lyricsLoading: false })
+      } else {
+        set({ lyricsLoading: false })
+      }
+    }).catch(() => {
+      set({ lyricsLoading: false })
+    })
   },
   
   loadFromDB: async () => {
