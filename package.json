@@ -8,10 +8,10 @@
   "scripts": {
     "dev": "vite",
     "dev:electron": "vite --mode electron",
-    "build": "tsc && vite build && electron-builder",
-    "build:win": "tsc && vite build && electron-builder --win",
-    "build:mac": "tsc && vite build && electron-builder --mac",
-    "build:dir": "tsc && vite build && electron-builder --dir",
+    "build": "tsc && vite build && electron-builder --publish never",
+    "build:win": "tsc && vite build && electron-builder --win --publish never",
+    "build:mac": "tsc && vite build && electron-builder --mac --publish never",
+    "build:dir": "tsc && vite build && electron-builder --dir --publish never",
     "preview": "vite preview",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
@@ -55,7 +55,6 @@
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },
-    "publish": "never",
     "electronLanguages": ["zh-CN", "en-US"],
     "win": {
       "target": [
