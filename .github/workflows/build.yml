@@ -41,20 +41,20 @@ jobs:
           ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
           
       - name: Upload Windows Installer
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: AuroraBeat-Windows-Installer
           path: release/AuroraBeat Setup*.exe
           
       - name: Upload Windows Portable
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: AuroraBeat-Windows-Portable
           path: release/*portable*.exe
           if-no-files-found: ignore
           
       - name: Upload Windows Unpacked
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: AuroraBeat-Windows-Unpacked
           path: release/win-unpacked/
@@ -86,13 +86,13 @@ jobs:
           ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
           
       - name: Upload macOS DMG
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: AuroraBeat-macOS-DMG
           path: release/*.dmg
           
       - name: Upload macOS App
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: AuroraBeat-macOS-App
           path: release/mac/
@@ -124,13 +124,13 @@ jobs:
           ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
           
       - name: Upload Linux AppImage
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: AuroraBeat-Linux-AppImage
           path: release/*.AppImage
           
       - name: Upload Linux DEB
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: AuroraBeat-Linux-DEB
           path: release/*.deb
