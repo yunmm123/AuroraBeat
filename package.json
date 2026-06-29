@@ -67,17 +67,13 @@
           "arch": ["x64"]
         }
       ],
-      "icon": "public/icon.png"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "AuroraBeat",
-      "installerIcon": "public/icon.png",
-      "uninstallerIcon": "public/icon.png",
-      "installerHeaderIcon": "public/icon.png"
+      "shortcutName": "AuroraBeat"
     },
     "mac": {
       "target": [
@@ -86,12 +82,10 @@
           "arch": ["x64", "arm64"]
         }
       ],
-      "icon": "public/icon.icns",
       "category": "public.app-category.music"
     },
     "linux": {
       "target": ["AppImage", "deb"],
-      "icon": "public/icon.png",
       "category": "AudioVideo"
     }
   }
