@@ -1,260 +1,305 @@
 /**
- * KuGou Music API Handler - runs directly in Electron main process
- * Replaces the subprocess approach to avoid packaging issues
+ * KuGou Music API Handler - runs in Electron main process.
+ *
+ * Uses the kugou-api library (main.js) programmatically — no HTTP server needed.
+ * The library handles all request signing, cookie management, and QR code generation.
  */
 
-import { net } from 'electron'
+import { app } from 'electron'
+import path from 'path'
 import crypto from 'crypto'
 
-const KG_API_BASE = 'https://gateway.kugou.com'
-const KG_API_V2 = 'https://complexsearchretry.kugou.com'
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let kugouApi: any = null
+let loadError: string | null = null
 
-function md5(str: string): string {
-  return crypto.createHash('md5').update(str).digest('hex')
-}
+/**
+ * Load the kugou-api library (main.js) at runtime.
+ * Uses eval('require') so the bundler (rollup/vite) doesn't try to resolve
+ * and bundle kugou-api into dist-electron — it must be loaded from disk
+ * because it has its own node_modules with axios, crypto-js, qrcode, etc.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function loadKugouApi(): any {
+  if (kugouApi) return kugouApi
+  if (loadError) throw new Error(loadError)
 
-function generateGuid(): string {
-  const hex = '0123456789abcdef'
-  let guid = ''
-  for (let i = 0; i < 32; i++) {
-    guid += hex[Math.floor(Math.random() * 16)]
+  try {
+    const apiPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'kugou-api', 'main.js')
+      : path.join(__dirname, '..', 'kugou-api', 'main.js')
+
+    // eval('require') prevents static analysis by the bundler
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dynamicRequire = eval('require')
+    kugouApi = dynamicRequire(apiPath)
+    console.log('[KuGouAPI] Library loaded from', apiPath)
+    return kugouApi
+  } catch (e) {
+    loadError = `Failed to load KuGou API library: ${(e as Error).message}`
+    console.error('[KuGouAPI]', loadError)
+    throw new Error(loadError)
   }
-  return guid
 }
 
-function buildRequestParams(params: Record<string, any>): URLSearchParams {
-  const searchParams = new URLSearchParams()
-  // Common params
-  searchParams.set('clienttime', String(Math.floor(Date.now() / 1000)))
-  searchParams.set('mid', md5(generateGuid()))
-  searchParams.set('uuid', generateGuid())
-  searchParams.set('dfid', '-')
-  searchParams.set('appid', '1014')
-  searchParams.set('token', '')
-  searchParams.set('userid', '0')
-  
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      searchParams.set(key, String(value))
+/**
+ * Device cookies — generated once, injected into every API call.
+ * This replaces the cookie injection that server.js middleware would do
+ * when running kugou-api as an HTTP server. Without these, the KuGou API
+ * rejects requests with "Parameter Error" (error_code: 152).
+ */
+let deviceCookies: Record<string, string> | null = null
+
+function getDeviceCookies(): Record<string, string> {
+  if (deviceCookies) return deviceCookies
+
+  // Generate a GUID (UUID v4 format) and hash it — matches kugou-api server.js
+  const guidRaw = crypto.randomUUID()
+  const guidHash = crypto.createHash('md5').update(guidRaw).digest('hex')
+  // Calculate MID: convert the MD5 hex to a decimal string (base-16 → base-10)
+  const mid = BigInt('0x' + guidHash).toString()
+  // Generate random 10-char uppercase DEV ID — matches kugou-api's randomString(10)
+  const chars = '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  const dev = Array.from({ length: 10 }, () =>
+    chars[Math.floor(Math.random() * chars.length)]
+  ).join('')
+  // Random WebGL hash (uint64 as decimal string)
+  const webglHash = BigInt('0x' + crypto.randomBytes(8).toString('hex')).toString()
+
+  deviceCookies = {
+    KUGOU_API_MID: mid,
+    KUGOU_API_GUID: guidHash,
+    KUGOU_API_DEV: dev,
+    KUGOU_API_MAC: '02:00:00:00:00:00',
+    KUGOU_API_WEBGL: webglHash,
+  }
+  console.log('[KuGouAPI] Device cookies generated')
+  return deviceCookies
+}
+
+/**
+ * Call a kugou-api module function and return its response body.
+ *
+ * kugou-api functions return { status, body, cookie, headers } on success,
+ * but REJECT with the same shape ({ status: 502, body, ... }) when the KuGou
+ * server returns an error (error_code !== 0). We catch that rejection and
+ * still return `body` so the frontend can read error_code / error_msg and
+ * show a friendly message instead of an unhandled IPC error.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function callApi(fnName: string, params: Record<string, any> = {}): Promise<any> {
+  const api = loadKugouApi()
+  if (typeof api[fnName] !== 'function') {
+    throw new Error(`KuGou API function not found: ${fnName}`)
+  }
+  // Inject device cookies (merged with any user-provided cookies like token/userid)
+  const userCookie = params.cookie || {}
+  params.cookie = { ...getDeviceCookies(), ...userCookie }
+
+  try {
+    const result = await api[fnName](params)
+    // result = { status, body, cookie, headers }
+    return result?.body ?? result
+  } catch (err: any) {
+    // Library rejects with { status: 502, body, cookie, headers } on API errors.
+    // Return body so the caller can inspect error_code / data.
+    if (err && typeof err === 'object' && 'body' in err) {
+      console.warn(`[KuGouAPI] ${fnName} returned error:`, err.body?.error_code, err.body?.error_msg)
+      return err.body
     }
-  })
-  return searchParams
-}
-
-async function kugouGet(path: string, params: Record<string, any> = {}): Promise<any> {
-  const url = new URL(KG_API_BASE + path)
-  const searchParams = buildRequestParams(params)
-  url.search = searchParams.toString()
-  
-  return new Promise((resolve, reject) => {
-    const req = net.request({
-      method: 'GET',
-      url: url.toString(),
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.kugou.com/',
-      }
-    })
-    
-    req.on('response', (response) => {
-      let data = ''
-      response.on('data', (chunk: Buffer) => { data += chunk.toString() })
-      response.on('end', () => {
-        try {
-          resolve(JSON.parse(data))
-        } catch {
-          reject(new Error(`Invalid response from ${path}`))
-        }
-      })
-    })
-    req.on('error', reject)
-    req.end()
-  })
-}
-
-async function kugouPost(path: string, params: Record<string, any> = {}): Promise<any> {
-  const url = KG_API_BASE + path
-  const body = new URLSearchParams(buildRequestParams(params)).toString()
-  
-  return new Promise((resolve, reject) => {
-    const req = net.request({
-      method: 'POST',
-      url,
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://www.kugou.com/',
-      }
-    })
-    
-    req.on('response', (response) => {
-      let data = ''
-      response.on('data', (chunk: Buffer) => { data += chunk.toString() })
-      response.on('end', () => {
-        try {
-          resolve(JSON.parse(data))
-        } catch {
-          reject(new Error(`Invalid response from ${path}`))
-        }
-      })
-    })
-    req.on('error', reject)
-    req.write(body)
-    req.end()
-  })
+    throw err
+  }
 }
 
 // ============ Search ============
 export async function kgSearch(keyword: string, page = 1, pageSize = 30) {
-  return kugouGet('/v2/search/songs', { keyword, page, pagesize: pageSize })
+  return callApi('search', { keywords: keyword, page, pagesize: pageSize })
 }
 
 export async function kgSearchHot() {
-  return kugouGet('/api/v3/search/hot_tab')
+  return callApi('search_hot')
 }
 
 export async function kgSearchDefault() {
-  return kugouGet('/api/v3/search/default')
+  return callApi('search_default')
+}
+
+export async function kgSearchSuggest(keyword: string) {
+  return callApi('search_suggest', { keyword })
+}
+
+export async function kgSearchComplex(keyword: string, page = 1) {
+  return callApi('search_complex', { keyword, page })
 }
 
 // ============ Song URL ============
 export async function kgSongUrl(hash: string, albumId?: string) {
-  const params: any = { hash, album_id: albumId || '' }
-  return kugouGet('/v5/url', params)
+  const body = await callApi('song_url', { hash, album_id: albumId || 0 })
+  // KuGou /v5/url returns data as an array — normalize to first item
+  // so the frontend can access res.data.play_url directly
+  if (Array.isArray(body?.data) && body.data.length > 0) {
+    return { ...body, data: body.data[0] }
+  }
+  return body
 }
 
 // ============ Lyrics ============
 export async function kgLyric(hash: string, albumId?: string) {
-  const params: any = { hash, album_id: albumId || '' }
-  return kugouGet('/v1/krc', params)
+  // First get song info to retrieve lyric id and accesskey
+  const songInfo = await callApi('song_url', { hash, album_id: albumId || 0 })
+  const lyricId = songInfo?.data?.lyric_id || songInfo?.data?.[0]?.lyric_id
+  const accesskey = songInfo?.data?.accesskey || songInfo?.data?.[0]?.accesskey
+  if (!lyricId || !accesskey) return null
+  return callApi('lyric', { id: lyricId, accesskey, fmt: 'lrc', decode: true })
 }
 
-// ============ Login QR ============
+// ============ Login (QR Code) ============
 export async function kgQrKey() {
-  return kugouGet('/v1/qrcode/key')
+  // type: 'web' uses appid 1014 for web QR login
+  return callApi('login_qr_key', { type: 'web' })
 }
 
 export async function kgQrCreate(key: string) {
-  return kugouGet('/v1/qrcode/create', { key, qrimg: true })
+  // qrimg: true generates a base64 PNG data URL via the qrcode library
+  return callApi('login_qr_create', { key, qrimg: true })
 }
 
 export async function kgQrCheck(key: string) {
-  return kugouGet('/v1/qrcode/check', { key })
-}
-
-// ============ Top Songs ============
-export async function kgTopSong() {
-  return kugouGet('/api/v3/top_song/new')
-}
-
-// ============ Rank ============
-export async function kgRankList() {
-  return kugouGet('/ocean/v6/rank/list')
-}
-
-export async function kgRankAudio(rankId: string, page = 1) {
-  return kugouGet('/ocean/v6/rank/audio', { rankid: rankId, page })
-}
-
-// ============ Recommend ============
-export async function kgRecommendSongs() {
-  return kugouGet('/api/v3/recommend/song')
-}
-
-// ============ FM ============
-export async function kgFmClass() {
-  return kugouGet('/api/v3/fm/class')
-}
-
-export async function kgFmRecommend(classId: string) {
-  return kugouGet('/api/v3/fm/recommend', { classid: classId })
-}
-
-export async function kgFmSongs(classId: string, songId?: string) {
-  const params: any = { classid: classId }
-  if (songId) params.songid = songId
-  return kugouGet('/api/v3/fm/songs', params)
+  return callApi('login_qr_check', { key })
 }
 
 // ============ User ============
 export async function kgUserDetail(uid: string, token: string) {
-  return kugouGet('/ocean/v6/user/info', { userid: uid, token })
+  return callApi('user_detail', { userid: uid, cookie: { userid: uid, token } })
 }
 
 export async function kgUserPlaylist(uid: string, token: string, page = 1) {
-  return kugouGet('/ocean/v6/playlist/mine', { userid: uid, token, page })
+  return callApi('user_playlist', { userid: uid, cookie: { userid: uid, token }, page })
 }
 
 // ============ Playlist ============
 export async function kgPlaylistDetail(id: string) {
-  return kugouGet('/ocean/v6/playlist/info', { playlistid: id })
+  return callApi('playlist_detail', { id })
 }
 
 export async function kgPlaylistTrackAll(id: string, page = 1) {
-  return kugouGet('/ocean/v6/playlist/song', { playlistid: id, page })
+  return callApi('playlist_track_all', { id, page })
+}
+
+// ============ Rank ============
+export async function kgRankList() {
+  return callApi('rank_list')
+}
+
+export async function kgRankAudio(rankId: string, page = 1) {
+  return callApi('rank_audio', { rankid: rankId, page })
+}
+
+// ============ Recommend ============
+export async function kgRecommendSongs() {
+  return callApi('recommend_songs')
+}
+
+export async function kgPersonalFm(token: string) {
+  return callApi('personal_fm', { cookie: { token } })
+}
+
+export async function kgEverydayRecommend(token: string) {
+  return callApi('everyday_recommend', { cookie: { token } })
 }
 
 // ============ Artist ============
 export async function kgArtistDetail(artistId: string) {
-  return kugouGet('/ocean/v6/singer/info', { singerid: artistId })
+  return callApi('artist_detail', { singerid: artistId })
 }
 
 export async function kgArtistAudios(artistId: string, page = 1) {
-  return kugouGet('/ocean/v6/singer/song', { singerid: artistId, page })
+  return callApi('artist_audios', { singerid: artistId, page })
 }
 
 // ============ Album ============
 export async function kgAlbumDetail(albumId: string) {
-  return kugouGet('/ocean/v6/album/info', { albumid: albumId })
+  return callApi('album_detail', { albumid: albumId })
 }
 
 export async function kgAlbumSongs(albumId: string, page = 1) {
-  return kugouGet('/ocean/v6/album/song', { albumid: albumId, page })
+  return callApi('album_songs', { albumid: albumId, page })
 }
 
-// ============ Banner ============
-export async function kgBanner() {
-  return kugouGet('/api/v3/banner')
+// ============ Top / New ============
+export async function kgTopSong() {
+  return callApi('top_song')
 }
 
-// ============ Scene ============
-export async function kgSceneLists() {
-  return kugouGet('/api/v3/scene/list')
+export async function kgTopAlbum() {
+  return callApi('top_album')
 }
 
-export async function kgSceneAudioList(sceneId: string, page = 1) {
-  return kugouGet('/api/v3/scene/audio', { scene_id: sceneId, page })
+export async function kgTopPlaylist(tag?: string, page = 1) {
+  return callApi('top_playlist', { tag, page })
 }
 
-// ============ Radio ============
-export async function kgDiantai() {
-  return kugouGet('/pc/diantai')
+// ============ FM ============
+export async function kgFmClass() {
+  return callApi('fm_class')
+}
+
+export async function kgFmRecommend(classId: string) {
+  return callApi('fm_recommend', { classid: classId })
+}
+
+export async function kgFmSongs(classId: string, songId?: string) {
+  return callApi('fm_songs', { classid: classId, songid: songId })
 }
 
 // ============ Comment ============
 export async function kgCommentMusic(hash: string, page = 1) {
-  return kugouGet('/mcomment/v1/cmtlist', { hash, page })
+  return callApi('comment_music', { hash, page })
 }
 
-// ============ Song Detail ============
+// ============ Banner ============
+export async function kgBanner() {
+  return callApi('yueku_banner')
+}
+
+// ============ Scene ============
+export async function kgSceneLists() {
+  return callApi('scene_lists')
+}
+
+export async function kgSceneAudioList(sceneId: string, page = 1) {
+  return callApi('scene_audio_list', { scene_id: sceneId, page })
+}
+
+// ============ Radio ============
+export async function kgDiantai() {
+  return callApi('pc_diantai')
+}
+
+// ============ Song Detail / Climax ============
 export async function kgSongDetail(hash: string) {
-  return kugouGet('/v3/song/detail', { hash })
+  return callApi('song_url', { hash })
+}
+
+export async function kgSongClimax(hash: string) {
+  return callApi('song_climax', { hash })
 }
 
 // ============ MV ============
 export async function kgAudioMv(hash: string) {
-  return kugouGet('/kmr/audio/mv', { hash })
+  return callApi('kmr_audio_mv', { hash })
 }
 
 export async function kgVideoUrl(videoHash: string) {
-  return kugouGet('/v1/video/url', { videohash: videoHash })
+  return callApi('video_url', { videohash: videoHash })
 }
 
 // ============ Health Check ============
 export async function kgHealthCheck(): Promise<boolean> {
   try {
-    await kgSearchHot()
-    return true
+    // search_hot is a lightweight endpoint that reliably succeeds with device cookies
+    const body = await callApi('search_hot')
+    return body?.status === 1
   } catch {
     return false
   }

@@ -26,21 +26,23 @@ export default function KugouLogin({ onClose, onLoginSuccess }: KugouLoginProps)
     try {
       setStatus('loading')
       setMessage('正在获取登录二维码...')
-      
+
       const keyRes = await kugouQrKey()
-      const key = keyRes?.data?.key || keyRes?.key
+      // Real KuGou API returns the key in data.qrcode
+      const key = keyRes?.data?.qrcode || keyRes?.data?.key || keyRes?.qrcode
       if (!key) throw new Error('Failed to get QR key')
-      
+
       setQrKey(key)
-      
+
       const qrRes = await kugouQrCreate(key)
-      const qrImg = qrRes?.data?.qrcode || qrRes?.qrcode || qrRes?.data?.url
+      // login_qr_create generates a base64 PNG data URL in data.base64
+      const qrImg = qrRes?.data?.base64 || qrRes?.data?.qrcode || qrRes?.data?.url
       if (!qrImg) throw new Error('Failed to create QR code')
-      
+
       setQrImage(qrImg)
       setStatus('waiting')
       setMessage('请使用酷狗音乐APP扫码登录')
-      
+
       // Start polling for scan status
       pollRef.current = setInterval(() => checkQrStatus(key), 2000)
     } catch (error) {
@@ -52,34 +54,30 @@ export default function KugouLogin({ onClose, onLoginSuccess }: KugouLoginProps)
   async function checkQrStatus(key: string) {
     try {
       const res = await kugouQrCheck(key)
-      const statusCode = res?.data?.status || res?.status
-      
-      // Status: 0=waiting, 1=scanned, 2=confirmed, 3=expired, 4=cancelled
-      if (statusCode === 1 || statusCode === '1') {
+      // Real KuGou API status: 0=expired, 1=waiting, 2=scanned, 4=confirmed(returns token)
+      const statusCode = Number(res?.data?.status ?? res?.status)
+
+      if (statusCode === 2) {
         setStatus('scanned')
         setMessage('已扫码，请在手机上确认')
-      } else if (statusCode === 2 || statusCode === '2') {
+      } else if (statusCode === 4) {
         setStatus('success')
         setMessage('登录成功！')
         if (pollRef.current) clearInterval(pollRef.current)
-        
-        // Get user info from response
-        const uid = res?.data?.uid || res?.uid
-        const token = res?.data?.token || res?.token
-        const nickname = res?.data?.nickname || res?.nickname || '酷狗用户'
-        
+
+        // Get user info from response — field is userid (not uid)
+        const uid = String(res?.data?.userid || res?.userid || '')
+        const token = res?.data?.token || res?.token || ''
+        const nickname = res?.data?.nickname || res?.data?.username || '酷狗用户'
+
         if (uid && token) {
           setTimeout(() => {
             onLoginSuccess({ uid, token, nickname })
           }, 500)
         }
-      } else if (statusCode === 3 || statusCode === '3') {
+      } else if (statusCode === 0) {
         setStatus('error')
         setMessage('二维码已过期，请刷新')
-        if (pollRef.current) clearInterval(pollRef.current)
-      } else if (statusCode === 4 || statusCode === '4') {
-        setStatus('error')
-        setMessage('已取消登录')
         if (pollRef.current) clearInterval(pollRef.current)
       }
     } catch (error) {

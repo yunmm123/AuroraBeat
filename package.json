@@ -52,6 +52,27 @@
       "dist",
       "dist-electron"
     ],
+    "extraResources": [
+      {
+        "from": "kugou-api",
+        "to": "kugou-api",
+        "filter": [
+          "**/*",
+          "!**/.git/**",
+          "!**/docs/**",
+          "!**/public/**",
+          "!**/.github/**",
+          "!**/nodemon.json",
+          "!**/.prettierrc.json",
+          "!**/tsconfig.json",
+          "!**/tsdown.config.ts",
+          "!**/Dockerfile",
+          "!**/.dockerignore",
+          "!**/vercel.json",
+          "!**/*.md"
+        ]
+      }
+    ],
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },

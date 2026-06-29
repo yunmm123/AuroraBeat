@@ -358,13 +358,25 @@ ipcMain.handle('kg:healthCheck', async () => {
   return kugouHandler.kgHealthCheck()
 })
 
-// ============ Stubs for KuGou channels not yet implemented in kugouHandler ============
-// These return null so the UI can degrade gracefully instead of throwing
-// "No handler registered" errors. Implement them in kugouHandler.ts when ready.
-ipcMain.handle('kg:personalFm', async () => null)
-ipcMain.handle('kg:topAlbum', async () => null)
-ipcMain.handle('kg:topPlaylist', async () => null)
-ipcMain.handle('kg:everydayRecommend', async () => null)
-ipcMain.handle('kg:searchSuggest', async () => null)
-ipcMain.handle('kg:searchComplex', async () => null)
-ipcMain.handle('kg:songClimax', async () => null)
+// ============ KuGou handlers for functions that were previously stubs ============
+ipcMain.handle('kg:personalFm', async (_e, token: string) => {
+  return kugouHandler.kgPersonalFm(token)
+})
+ipcMain.handle('kg:topAlbum', async () => {
+  return kugouHandler.kgTopAlbum()
+})
+ipcMain.handle('kg:topPlaylist', async (_e, tag?: string, page = 1) => {
+  return kugouHandler.kgTopPlaylist(tag, page)
+})
+ipcMain.handle('kg:everydayRecommend', async (_e, token: string) => {
+  return kugouHandler.kgEverydayRecommend(token)
+})
+ipcMain.handle('kg:searchSuggest', async (_e, keyword: string) => {
+  return kugouHandler.kgSearchSuggest(keyword)
+})
+ipcMain.handle('kg:searchComplex', async (_e, keyword: string, page = 1) => {
+  return kugouHandler.kgSearchComplex(keyword, page)
+})
+ipcMain.handle('kg:songClimax', async (_e, hash: string) => {
+  return kugouHandler.kgSongClimax(hash)
+})

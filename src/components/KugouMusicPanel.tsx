@@ -70,20 +70,25 @@ export default function KugouMusicPanel({
 
       let anySuccess = false
 
-      if (hotRes.status === 'fulfilled' && hotRes.value?.data?.info) {
-        const keywords = hotRes.value.data.info.map((i: any) => i.keyword).filter(Boolean)
+      // Hot search keywords — KuGou hot_tab returns data.info or data.list
+      if (hotRes.status === 'fulfilled') {
+        const hotData = hotRes.value?.data?.info || hotRes.value?.data?.list || []
+        const keywords = hotData.map((i: any) => i.keyword || i.searchword || i.text).filter(Boolean)
         if (keywords.length > 0) { setHotKeywords(keywords.slice(0, 10)); anySuccess = true }
       }
-      if (topRes.status === 'fulfilled' && topRes.value?.data?.info) {
-        const songs = topRes.value.data.info
+      // Top/new songs
+      if (topRes.status === 'fulfilled') {
+        const songs = topRes.value?.data?.info || topRes.value?.data?.list || []
         if (songs.length > 0) { setTopSongs(songs.slice(0, 20)); anySuccess = true }
       }
-      if (rankRes.status === 'fulfilled' && rankRes.value?.data?.list) {
-        const ranks = rankRes.value.data.list
+      // Rank list
+      if (rankRes.status === 'fulfilled') {
+        const ranks = rankRes.value?.data?.list || rankRes.value?.data?.info || []
         if (ranks.length > 0) { setRankList(ranks.slice(0, 12)); anySuccess = true }
       }
-      if (recommendRes.status === 'fulfilled' && recommendRes.value?.data?.info) {
-        const songs = recommendRes.value.data.info
+      // Recommend songs
+      if (recommendRes.status === 'fulfilled') {
+        const songs = recommendRes.value?.data?.info || recommendRes.value?.data?.list || []
         if (songs.length > 0) { setRecommendSongs(songs.slice(0, 20)); anySuccess = true }
       }
 
@@ -101,7 +106,7 @@ export default function KugouMusicPanel({
     setLoading(true)
     try {
       const res = await kugouUserPlaylist(userInfo.uid, userInfo.token)
-      const playlists = res?.data?.data || []
+      const playlists = res?.data?.data || res?.data?.list || res?.data?.info || []
       setUserPlaylists(playlists)
     } catch {
       // ignore
@@ -142,7 +147,7 @@ export default function KugouMusicPanel({
     setPlayingHash(song.Hash)
     try {
       const urlRes = await kugouSongUrl(song.Hash, song.AlbumID)
-      const playUrl = urlRes?.data?.play_url || urlRes?.data?.play_backup_url
+      const playUrl = urlRes?.data?.play_url || urlRes?.data?.play_backup_url || urlRes?.data?.url
       if (playUrl) {
         const kugouSong: Song = {
           id: song.Hash,
@@ -166,7 +171,7 @@ export default function KugouMusicPanel({
     setCurrentPlaylistName(playlist.specialname || playlist.playlistname || '歌单')
     try {
       const res = await kugouPlaylistTrackAll(playlist.id || playlist.specialid)
-      const songs = res?.data?.data || []
+      const songs = res?.data?.data || res?.data?.list || res?.data?.info || []
       setPlaylistTracks(songs)
     } catch {
       // ignore
