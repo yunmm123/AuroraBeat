@@ -5,8 +5,8 @@ import { AudioAnalyzer } from '@/audio/AudioAnalyzer'
 import TitleBar from '@/components/TitleBar'
 import PlaylistSidebar from '@/components/PlaylistSidebar'
 import PlayControlBar from '@/components/PlayControlBar'
-import LyricsPanel from '@/components/LyricsPanel'
 import LyricsVisual from '@/components/LyricsVisual'
+import SongListPanel from '@/components/SongListPanel'
 import QueuePanel from '@/components/QueuePanel'
 import SettingsPanel from '@/components/SettingsPanel'
 import SearchPanel from '@/components/SearchPanel'
@@ -32,6 +32,7 @@ function App() {
     isMuted,
     setIsPlaying,
     currentSong,
+    currentPlaylist,
     renderQuality,
     loadFromDB,
   } = usePlayerStore()
@@ -45,6 +46,7 @@ function App() {
     applyTheme(currentTheme)
   }, [currentTheme])
   
+  // Initialize visual engine
   useEffect(() => {
     if (!visualContainerRef.current) return
     
@@ -103,79 +105,6 @@ function App() {
     }
   }, [visualEffect])
   
-  // Demo animation for visual effect
-  useEffect(() => {
-    let time = 0
-    const demoAnimation = () => {
-      if (!visualEngineRef.current) {
-        animationFrameRef.current = requestAnimationFrame(demoAnimation)
-        return
-      }
-      
-      time += 0.016
-      
-      const simulatedSpectrum = new Float32Array(1024)
-      const simulatedWaveform = new Float32Array(2048)
-      
-      const baseBass = 0.5 + Math.sin(time * 2) * 0.3 + Math.sin(time * 0.5) * 0.2
-      const beat = Math.sin(time * 4 * Math.PI) > 0.9 ? 1 : 0
-      const bass = Math.min(1, baseBass + beat * 0.5)
-      
-      const mid = 0.4 + Math.sin(time * 1.5 + 1) * 0.3 + Math.sin(time * 3) * 0.1
-      const treble = 0.3 + Math.sin(time * 2.5 + 2) * 0.3 + Math.random() * 0.1
-      
-      for (let i = 0; i < 1024; i++) {
-        const freq = i / 1024
-        let value = 0
-        
-        if (freq < 0.1) {
-          value = bass * (1 - freq * 5)
-        } else if (freq < 0.5) {
-          value = mid * (0.5 + Math.sin(freq * 20 + time) * 0.5)
-        } else {
-          value = treble * (0.3 + Math.random() * 0.7) * (1 - (freq - 0.5) * 2)
-        }
-        
-        simulatedSpectrum[i] = (value * 80 - 100) as number
-      }
-      
-      for (let i = 0; i < 2048; i++) {
-        const t = i / 2048
-        simulatedWaveform[i] = Math.sin(t * Math.PI * 20 + time * 10) * 0.3 * bass
-          + Math.sin(t * Math.PI * 50 + time * 15) * 0.2 * mid
-          + Math.sin(t * Math.PI * 100 + time * 20) * 0.1 * treble
-      }
-      
-      const features = {
-        bpm: 120,
-        beatIntensity: beat * 0.8 + bass * 0.2,
-        lowFrequency: bass,
-        midFrequency: mid,
-        highFrequency: treble,
-        spectrum: simulatedSpectrum,
-        waveform: simulatedWaveform,
-        isBeat: beat > 0.5,
-        mood: 'electronic' as const,
-      }
-      
-      setAudioFeatures(features)
-      
-      if (visualEngineRef.current) {
-        visualEngineRef.current.updateAudio(features)
-      }
-      
-      animationFrameRef.current = requestAnimationFrame(demoAnimation)
-    }
-    
-    animationFrameRef.current = requestAnimationFrame(demoAnimation)
-    
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current)
-      }
-    }
-  }, [setAudioFeatures])
-  
   // Audio element setup
   useEffect(() => {
     const audio = new Audio()
@@ -192,18 +121,71 @@ function App() {
     }
     initAudio()
     
-    const updateAnalysis = () => {
-      if (audioAnalyzerRef.current && isPlaying) {
-        const features = audioAnalyzerRef.current.analyze()
-        setAudioFeatures(features)
+    // Main animation loop - uses REAL audio data when playing, demo when idle
+    let time = 0
+    const animationLoop = () => {
+      if (!visualEngineRef.current) {
+        animationFrameRef.current = requestAnimationFrame(animationLoop)
+        return
+      }
+      
+      time += 0.016
+      
+      let features
+      
+      // When playing and analyzer is ready, use real audio data
+      if (audioAnalyzerRef.current && isPlaying && currentSong?.url) {
+        features = audioAnalyzerRef.current.analyze()
+      } else {
+        // Demo/idle animation with gentle movement
+        const simulatedSpectrum = new Float32Array(1024)
+        const simulatedWaveform = new Float32Array(2048)
         
-        if (visualEngineRef.current) {
-          visualEngineRef.current.updateAudio(features)
+        const baseBass = 0.3 + Math.sin(time * 1.5) * 0.15
+        const beat = Math.sin(time * 3 * Math.PI) > 0.95 ? 1 : 0
+        const bass = Math.min(1, baseBass + beat * 0.3)
+        
+        const mid = 0.25 + Math.sin(time * 1.2 + 1) * 0.15
+        const treble = 0.15 + Math.sin(time * 2 + 2) * 0.1 + Math.random() * 0.05
+        
+        for (let i = 0; i < 1024; i++) {
+          const freq = i / 1024
+          let value = 0
+          if (freq < 0.1) {
+            value = bass * (1 - freq * 5)
+          } else if (freq < 0.5) {
+            value = mid * (0.5 + Math.sin(freq * 20 + time) * 0.5)
+          } else {
+            value = treble * (0.3 + Math.random() * 0.7) * (1 - (freq - 0.5) * 2)
+          }
+          simulatedSpectrum[i] = (value * 80 - 100) as number
+        }
+        
+        for (let i = 0; i < 2048; i++) {
+          const t = i / 2048
+          simulatedWaveform[i] = Math.sin(t * Math.PI * 20 + time * 10) * 0.2 * bass
+            + Math.sin(t * Math.PI * 50 + time * 15) * 0.1 * mid
+        }
+        
+        features = {
+          bpm: 80,
+          beatIntensity: beat * 0.5 + bass * 0.2,
+          lowFrequency: bass,
+          midFrequency: mid,
+          highFrequency: treble,
+          spectrum: simulatedSpectrum,
+          waveform: simulatedWaveform,
+          isBeat: beat > 0.5,
+          mood: 'electronic' as const,
         }
       }
-      animationFrameRef.current = requestAnimationFrame(updateAnalysis)
+      
+      setAudioFeatures(features)
+      visualEngineRef.current.updateAudio(features)
+      
+      animationFrameRef.current = requestAnimationFrame(animationLoop)
     }
-    animationFrameRef.current = requestAnimationFrame(updateAnalysis)
+    animationFrameRef.current = requestAnimationFrame(animationLoop)
     
     return () => {
       audio.pause()
@@ -291,7 +273,7 @@ function App() {
           <PlaylistSidebar />
           
           <div className="flex-1 relative pointer-events-auto">
-            <LyricsVisual />
+            {currentPlaylist ? <SongListPanel /> : <LyricsVisual />}
           </div>
           
           <QueuePanel />
@@ -300,7 +282,6 @@ function App() {
         <PlayControlBar onPlayToggle={handlePlayToggle} />
       </div>
       
-      <LyricsPanel />
       <SettingsPanel />
       <SearchPanel />
     </div>
