@@ -30,6 +30,67 @@ interface KugouSongItem {
   Duration?: number
 }
 
+function normalizePlaylist(raw: any): { id: string; name: string; songCount: number; intro?: string; cover?: string } {
+  const id = String(raw.id || raw.specialid || raw.rankid || raw.listid || raw.global_collection_id || '')
+  const name = raw.specialname || raw.playlist_name || raw.playlistname || raw.rankname ||
+    raw.title || raw.name || raw.list_name || ''
+  const songCount = Number(raw.songcount || raw.song_count || raw.play_count || raw.count ||
+    raw.song_num || raw.total || raw.songlist_size || 0)
+  const intro = raw.intro || raw.desc || raw.description || ''
+  const cover = raw.imgurl || raw.cover || raw.pic || raw.album_img_9 || raw.img_9 || ''
+  return { id, name, songCount, intro, cover }
+}
+
+function extractPlaylistList(body: any): any[] {
+  const d = body?.data
+  if (!d) return []
+  if (Array.isArray(d.info)) return d.info
+  if (Array.isArray(d.list)) return d.list
+  if (Array.isArray(d.entries)) return d.entries
+  if (Array.isArray(d.special_list)) return d.special_list
+  if (Array.isArray(d.theme_list)) return d.theme_list
+  if (Array.isArray(d)) return d
+  // try data.data
+  if (Array.isArray(d.data)) return d.data
+  if (d.data && Array.isArray(d.data.info)) return d.data.info
+  if (d.data && Array.isArray(d.data.list)) return d.data.list
+  return []
+}
+
+function extractSongList(body: any): any[] {
+  const d = body?.data
+  if (!d) return []
+  if (Array.isArray(d.lists)) return d.lists
+  if (Array.isArray(d.songlist)) return d.songlist
+  if (Array.isArray(d.song_list)) return d.song_list
+  if (Array.isArray(d.list)) return d.list
+  if (Array.isArray(d.info)) return d.info
+  if (Array.isArray(d)) return d
+  // data.data nested
+  if (d.data && Array.isArray(d.data.lists)) return d.data.lists
+  if (d.data && Array.isArray(d.data.songlist)) return d.data.songlist
+  if (d.data && Array.isArray(d.data.list)) return d.data.list
+  return []
+}
+
+function normalizeSong(raw: any): KugouSongItem {
+  const hash = raw.Hash || raw.hash || raw.audio_id || ''
+  const songName = raw.SongName || raw.songname || raw.song_name || raw.name || ''
+  const singer = raw.SingerName || raw.singername || raw.author_name || raw.artist || raw.singer ||
+    (raw.authors?.[0]?.author_name) || ''
+  const albumName = raw.AlbumName || raw.album_name || raw.albumname || ''
+  const albumId = String(raw.AlbumID || raw.album_id || raw.albumid || '')
+  const duration = raw.Duration || raw.duration || raw.timelength || 0
+  return {
+    Hash: String(hash),
+    SongName: songName,
+    SingerName: singer,
+    AlbumName: albumName,
+    AlbumID: albumId,
+    Duration: duration,
+  }
+}
+
 export default function KugouMusicPanel({
   onClose, onPlaySong, userInfo, onLoginClick, onLogout
 }: KugouMusicPanelProps) {
@@ -70,26 +131,39 @@ export default function KugouMusicPanel({
 
       let anySuccess = false
 
-      // Hot search keywords — KuGou hot_tab returns data.info or data.list
+      // Hot search keywords — structure: data.list[].keywords[].keyword
       if (hotRes.status === 'fulfilled') {
-        const hotData = hotRes.value?.data?.info || hotRes.value?.data?.list || []
-        const keywords = hotData.map((i: any) => i.keyword || i.searchword || i.text).filter(Boolean)
-        if (keywords.length > 0) { setHotKeywords(keywords.slice(0, 10)); anySuccess = true }
+        const list = hotRes.value?.data?.list || []
+        const tab = list[0] || {}
+        const keywords = (tab.keywords || []).map((k: any) => k.keyword || k.word || '').filter(Boolean)
+        if (keywords.length > 0) {
+          setHotKeywords(keywords.slice(0, 10))
+          anySuccess = true
+        }
       }
-      // Top/new songs
+      // Top/new songs — structure: data is a direct array (data[0].songname)
       if (topRes.status === 'fulfilled') {
-        const songs = topRes.value?.data?.info || topRes.value?.data?.list || []
-        if (songs.length > 0) { setTopSongs(songs.slice(0, 20)); anySuccess = true }
+        const rawList = extractSongList(topRes.value)
+        if (rawList.length > 0) {
+          setTopSongs(rawList.map(normalizeSong).slice(0, 20))
+          anySuccess = true
+        }
       }
-      // Rank list
+      // Rank list — structure: data.info[] with rankid, rankname, intro
       if (rankRes.status === 'fulfilled') {
-        const ranks = rankRes.value?.data?.list || rankRes.value?.data?.info || []
-        if (ranks.length > 0) { setRankList(ranks.slice(0, 12)); anySuccess = true }
+        const ranks = rankRes.value?.data?.info || rankRes.value?.data?.list || []
+        if (ranks.length > 0) {
+          setRankList(ranks.slice(0, 12))
+          anySuccess = true
+        }
       }
-      // Recommend songs
+      // Recommend songs — structure: data.song_list[]
       if (recommendRes.status === 'fulfilled') {
-        const songs = recommendRes.value?.data?.info || recommendRes.value?.data?.list || []
-        if (songs.length > 0) { setRecommendSongs(songs.slice(0, 20)); anySuccess = true }
+        const songList = extractSongList(recommendRes.value)
+        if (songList.length > 0) {
+          setRecommendSongs(songList.map(normalizeSong).slice(0, 20))
+          anySuccess = true
+        }
       }
 
       if (!anySuccess) {
@@ -106,8 +180,9 @@ export default function KugouMusicPanel({
     setLoading(true)
     try {
       const res = await kugouUserPlaylist(userInfo.uid, userInfo.token)
-      const playlists = res?.data?.data || res?.data?.list || res?.data?.info || []
-      setUserPlaylists(playlists)
+      const rawList = extractPlaylistList(res)
+      // Keep raw objects for handleOpenPlaylist, but normalize for display
+      setUserPlaylists(rawList)
     } catch {
       // ignore
     }
@@ -120,9 +195,11 @@ export default function KugouMusicPanel({
     setApiError(false)
     try {
       const res = await kugouSearch(searchQuery.trim())
-      const songs = res?.data?.lists || []
-      if (songs.length === 0) setApiError(true)
-      setSearchResults(songs)
+      const rawList = extractSongList(res)
+      if (rawList.length === 0 && (res?.error_code || res?.errcode)) {
+        setApiError(true)
+      }
+      setSearchResults(rawList.map(normalizeSong))
     } catch {
       setApiError(true)
     }
@@ -135,8 +212,8 @@ export default function KugouMusicPanel({
     setApiError(false)
     try {
       const res = await kugouSearch(keyword)
-      const songs = res?.data?.lists || []
-      setSearchResults(songs)
+      const rawList = extractSongList(res)
+      setSearchResults(rawList.map(normalizeSong))
     } catch {
       setApiError(true)
     }
@@ -168,11 +245,12 @@ export default function KugouMusicPanel({
 
   async function handleOpenPlaylist(playlist: any) {
     setLoading(true)
-    setCurrentPlaylistName(playlist.specialname || playlist.playlistname || '歌单')
+    const n = normalizePlaylist(playlist)
+    setCurrentPlaylistName(n.name || '歌单')
     try {
-      const res = await kugouPlaylistTrackAll(playlist.id || playlist.specialid)
-      const songs = res?.data?.data || res?.data?.list || res?.data?.info || []
-      setPlaylistTracks(songs)
+      const res = await kugouPlaylistTrackAll(String(n.id))
+      const rawList = extractSongList(res)
+      setPlaylistTracks(rawList.map(normalizeSong))
     } catch {
       // ignore
     }
@@ -434,18 +512,21 @@ export default function KugouMusicPanel({
                       <div className="text-white/40 text-center py-8">暂无歌单</div>
                     ) : (
                       <div className="space-y-2">
-                        {userPlaylists.map((pl: any) => (
-                          <div key={pl.id || pl.specialid} onClick={() => handleOpenPlaylist(pl)} className="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-colors" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
-                            onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
-                            onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'}>
-                            <ListMusic size={18} className="text-purple-400" />
-                            <div className="flex-1 min-w-0">
-                              <div className="text-white text-sm font-medium truncate">{pl.specialname || pl.playlistname}</div>
-                              <div className="text-white/40 text-xs">{pl.songcount || 0} 首歌曲</div>
+                        {userPlaylists.map((pl: any) => {
+                          const n = normalizePlaylist(pl)
+                          return (
+                            <div key={n.id || pl.specialid || Math.random()} onClick={() => handleOpenPlaylist(pl)} className="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-colors" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+                              onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
+                              onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'}>
+                              <ListMusic size={18} className="text-purple-400" />
+                              <div className="flex-1 min-w-0">
+                                <div className="text-white text-sm font-medium truncate">{n.name || '未命名歌单'}</div>
+                                <div className="text-white/40 text-xs">{n.songCount || 0} 首歌曲</div>
+                              </div>
+                              <ChevronRight size={16} className="text-white/30" />
                             </div>
-                            <ChevronRight size={16} className="text-white/30" />
-                          </div>
-                        ))}
+                          )
+                        })}
                       </div>
                     )}
                     {playlistTracks.length > 0 && (
