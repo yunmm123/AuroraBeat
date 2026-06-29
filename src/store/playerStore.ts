@@ -34,6 +34,12 @@ interface PlayerState {
   bassBoost: number
   surroundEnabled: boolean
   
+  renderQuality: 'low' | 'medium' | 'high' | 'ultra'
+  showSearch: boolean
+  localSongs: Song[]
+  searchQuery: string
+  searchResults: Song[]
+  
   setCurrentSong: (song: Song | null) => void
   setIsPlaying: (playing: boolean) => void
   togglePlay: () => void
@@ -61,11 +67,16 @@ interface PlayerState {
   togglePlaylist: () => void
   toggleQueue: () => void
   toggleSettings: () => void
+  toggleSearch: () => void
   
   setEqualizerGains: (gains: number[]) => void
   setEqualizerEnabled: (enabled: boolean) => void
   setBassBoost: (value: number) => void
   setSurroundEnabled: (enabled: boolean) => void
+  setRenderQuality: (quality: 'low' | 'medium' | 'high' | 'ultra') => void
+  addLocalSongs: (songs: Song[]) => void
+  setSearchQuery: (query: string) => void
+  playSong: (song: Song) => void
 }
 
 const mockSong: Song = {
@@ -107,6 +118,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       songs: [mockSong],
       source: 'local',
     },
+    {
+      id: 'local',
+      name: '本地音乐',
+      cover: '',
+      songs: [],
+      source: 'local',
+    },
   ],
   currentPlaylist: null,
   
@@ -126,6 +144,12 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   equalizerEnabled: false,
   bassBoost: 0,
   surroundEnabled: false,
+  
+  renderQuality: 'high',
+  showSearch: false,
+  localSongs: [],
+  searchQuery: '',
+  searchResults: [],
   
   setCurrentSong: (song) => set({ currentSong: song }),
   setIsPlaying: (playing) => set({ isPlaying: playing }),
@@ -174,9 +198,38 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   togglePlaylist: () => set({ showPlaylist: !get().showPlaylist }),
   toggleQueue: () => set({ showQueue: !get().showQueue }),
   toggleSettings: () => set({ showSettings: !get().showSettings }),
+  toggleSearch: () => set({ showSearch: !get().showSearch }),
   
   setEqualizerGains: (gains) => set({ equalizerGains: gains }),
   setEqualizerEnabled: (enabled) => set({ equalizerEnabled: enabled }),
   setBassBoost: (value) => set({ bassBoost: value }),
   setSurroundEnabled: (enabled) => set({ surroundEnabled: enabled }),
+  setRenderQuality: (quality) => set({ renderQuality: quality }),
+  addLocalSongs: (songs) => set((state) => ({
+    localSongs: [...state.localSongs, ...songs],
+    playlists: state.playlists.map(p =>
+      p.id === 'local' ? { ...p, songs: [...p.songs, ...songs] } : p
+    ),
+  })),
+  setSearchQuery: (query) => {
+    const q = query.toLowerCase()
+    const allSongs = [
+      ...get().queue,
+      ...get().localSongs,
+      ...get().playlists.flatMap(p => p.songs),
+    ]
+    const unique = new Map<string, Song>()
+    allSongs.forEach(s => {
+      if (!unique.has(s.id)) unique.set(s.id, s)
+    })
+    const results = q
+      ? Array.from(unique.values()).filter(s =>
+          s.title.toLowerCase().includes(q) || s.artist.toLowerCase().includes(q) || s.album.toLowerCase().includes(q)
+        )
+      : []
+    set({ searchQuery: query, searchResults: results })
+  },
+  playSong: (song) => {
+    set({ currentSong: song, isPlaying: true, currentTime: 0 })
+  },
 }))

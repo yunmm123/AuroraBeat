@@ -4,7 +4,7 @@ import { usePlayerStore } from '@/store/playerStore'
 import { useState } from 'react'
 
 export default function TitleBar() {
-  const { currentSong, toggleSettings } = usePlayerStore()
+  const { currentSong, toggleSettings, toggleSearch, showSearch } = usePlayerStore()
   const [isMaximized, setIsMaximized] = useState(false)
   
   const handleMinimize = () => {
@@ -58,7 +58,12 @@ export default function TitleBar() {
       </div>
       
       <div className="flex items-center gap-2 title-bar-no-drag">
-        <button className="w-9 h-9 rounded-full glass-button flex items-center justify-center text-white/70 hover:text-white">
+        <button
+          onClick={toggleSearch}
+          className={`w-9 h-9 rounded-full glass-button flex items-center justify-center transition-colors ${
+            showSearch ? 'text-purple-400' : 'text-white/70 hover:text-white'
+          }`}
+        >
           <Search size={18} />
         </button>
         

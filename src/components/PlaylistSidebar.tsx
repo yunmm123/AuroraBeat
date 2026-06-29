@@ -1,9 +1,37 @@
 import { motion } from 'framer-motion'
-import { Heart, Clock, Music3, Folder, Plus, ChevronLeft } from 'lucide-react'
+import { Heart, Clock, Music3, Folder, Plus, ChevronLeft, Upload } from 'lucide-react'
 import { usePlayerStore } from '@/store/playerStore'
+import { useRef } from 'react'
+import type { Song } from '@/types'
 
 export default function PlaylistSidebar() {
-  const { playlists, showPlaylist, togglePlaylist, setCurrentPlaylist, currentPlaylist } = usePlayerStore()
+  const { playlists, showPlaylist, togglePlaylist, setCurrentPlaylist, currentPlaylist, addLocalSongs, playSong } = usePlayerStore()
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (!files) return
+    
+    const songs: Song[] = Array.from(files).map((file, i) => ({
+      id: `local-${Date.now()}-${i}`,
+      title: file.name.replace(/\.[^.]+$/, ''),
+      artist: '未知艺术家',
+      album: '本地音乐',
+      cover: '',
+      duration: 0,
+      url: URL.createObjectURL(file),
+      source: 'local' as const,
+    }))
+    
+    addLocalSongs(songs)
+    if (songs.length > 0) {
+      playSong(songs[0])
+    }
+    
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+  }
   
   if (!showPlaylist) {
     return (
@@ -30,16 +58,28 @@ export default function PlaylistSidebar() {
     >
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-white font-semibold text-lg">音乐库</h2>
-        <button className="w-8 h-8 rounded-lg glass-button flex items-center justify-center text-white/60 hover:text-white">
-          <Plus size={18} />
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="w-8 h-8 rounded-lg glass-button flex items-center justify-center text-white/60 hover:text-white"
+          title="添加本地音乐"
+        >
+          <Upload size={18} />
         </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="audio/*"
+          multiple
+          onChange={handleFileUpload}
+          className="hidden"
+        />
       </div>
       
       <div className="space-y-1 mb-6">
         <SidebarItem icon={<Heart size={18} />} label="我喜欢" count={128} active />
         <SidebarItem icon={<Clock size={18} />} label="最近播放" count={50} />
         <SidebarItem icon={<Music3 size={18} />} label="全部音乐" count={1024} />
-        <SidebarItem icon={<Folder size={18} />} label="本地音乐" count={256} />
+        <SidebarItem icon={<Folder size={18} />} label="本地音乐" count={playlists.find(p => p.id === 'local')?.songs.length || 0} />
       </div>
       
       <div className="flex-1 overflow-hidden flex flex-col">

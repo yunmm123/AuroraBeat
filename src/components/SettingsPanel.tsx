@@ -23,6 +23,8 @@ export default function SettingsPanel() {
     setSurroundEnabled,
     equalizerGains,
     setEqualizerGains,
+    renderQuality,
+    setRenderQuality,
   } = usePlayerStore()
   
   const [activeTab, setActiveTab] = useState<'visual' | 'audio' | 'general'>('visual')
@@ -139,18 +141,22 @@ export default function SettingsPanel() {
                   <div>
                     <h3 className="text-white font-semibold mb-4">渲染质量</h3>
                     <div className="grid grid-cols-4 gap-2">
-                      {['低', '中', '高', '极致'].map((quality, i) => (
-                        <button
-                          key={quality}
-                          className={`py-2 rounded-xl text-sm transition-all ${
-                            i === 2
-                              ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
-                              : 'glass-button text-white/70'
-                          }`}
-                        >
-                          {quality}
-                        </button>
-                      ))}
+                      {(['low', 'medium', 'high', 'ultra'] as const).map((quality) => {
+                        const labels: Record<string, string> = { low: '低', medium: '中', high: '高', ultra: '极致' }
+                        return (
+                          <button
+                            key={quality}
+                            onClick={() => setRenderQuality(quality)}
+                            className={`py-2 rounded-xl text-sm transition-all ${
+                              renderQuality === quality
+                                ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white'
+                                : 'glass-button text-white/70'
+                            }`}
+                          >
+                            {labels[quality]}
+                          </button>
+                        )
+                      })}
                     </div>
                   </div>
                 </div>

@@ -9,6 +9,7 @@ import LyricsPanel from '@/components/LyricsPanel'
 import QueuePanel from '@/components/QueuePanel'
 import SettingsPanel from '@/components/SettingsPanel'
 import VisualEffectSelector from '@/components/VisualEffectSelector'
+import SearchPanel from '@/components/SearchPanel'
 import { applyTheme } from '@/utils/themes'
 
 function App() {
@@ -32,6 +33,7 @@ function App() {
     volume,
     isMuted,
     setIsPlaying,
+    currentSong,
   } = usePlayerStore()
   
   useEffect(() => {
@@ -221,6 +223,16 @@ function App() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (!audioElementRef.current || !currentSong?.url) return
+    const audio = audioElementRef.current
+    audio.src = currentSong.url
+    audio.load()
+    if (isPlaying) {
+      audio.play().catch(() => {})
+    }
+  }, [currentSong?.url])
   
   const handlePlayToggle = async () => {
     if (demoMode) {
@@ -289,6 +301,7 @@ function App() {
       
       <LyricsPanel />
       <SettingsPanel />
+      <SearchPanel />
     </div>
   )
 }
