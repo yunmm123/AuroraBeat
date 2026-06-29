@@ -1,0 +1,158 @@
+name: Build AuroraBeat
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm install
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+          
+      - name: Build
+        run: npm run build:win
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+          
+      - name: Upload Windows Installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuroraBeat-Windows-Installer
+          path: release/AuroraBeat Setup*.exe
+          
+      - name: Upload Windows Portable
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuroraBeat-Windows-Portable
+          path: release/AuroraBeat *-portable.exe
+          
+      - name: Upload Windows Unpacked
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuroraBeat-Windows-Unpacked
+          path: release/win-unpacked/
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm install
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+          
+      - name: Build
+        run: npm run build:mac
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+          
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuroraBeat-macOS-DMG
+          path: release/*.dmg
+          
+      - name: Upload macOS App
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuroraBeat-macOS-App
+          path: release/mac/
+
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm install
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+          
+      - name: Build
+        run: npx electron-builder --linux
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+          
+      - name: Upload Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuroraBeat-Linux-AppImage
+          path: release/*.AppImage
+          
+      - name: Upload Linux DEB
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuroraBeat-Linux-DEB
+          path: release/*.deb
+
+  release:
+    name: Create Release
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            AuroraBeat-Windows-Installer/*
+            AuroraBeat-Windows-Portable/*
+            AuroraBeat-macOS-DMG/*
+            AuroraBeat-Linux-AppImage/*
+            AuroraBeat-Linux-DEB/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
