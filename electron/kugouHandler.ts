@@ -49,21 +49,18 @@ function loadKugouApi(): any {
  * rejects requests with "Parameter Error" (error_code: 152).
  */
 let deviceCookies: Record<string, string> | null = null
+let deviceRegistered = false
 
 function getDeviceCookies(): Record<string, string> {
   if (deviceCookies) return deviceCookies
 
-  // Generate a GUID (UUID v4 format) and hash it — matches kugou-api server.js
   const guidRaw = crypto.randomUUID()
   const guidHash = crypto.createHash('md5').update(guidRaw).digest('hex')
-  // Calculate MID: convert the MD5 hex to a decimal string (base-16 → base-10)
   const mid = BigInt('0x' + guidHash).toString()
-  // Generate random 10-char uppercase DEV ID — matches kugou-api's randomString(10)
   const chars = '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ'
   const dev = Array.from({ length: 10 }, () =>
     chars[Math.floor(Math.random() * chars.length)]
   ).join('')
-  // Random WebGL hash (uint64 as decimal string)
   const webglHash = BigInt('0x' + crypto.randomBytes(8).toString('hex')).toString()
 
   deviceCookies = {
@@ -77,6 +74,24 @@ function getDeviceCookies(): Record<string, string> {
   return deviceCookies
 }
 
+async function ensureDeviceRegistered(): Promise<void> {
+  if (deviceRegistered) return
+  
+  try {
+    const api = loadKugouApi()
+    const cookies = getDeviceCookies()
+    const result = await api['register_dev']({ cookie: cookies })
+    const dfid = result?.body?.data?.dfid
+    if (dfid && deviceCookies) {
+      deviceCookies.dfid = dfid
+      deviceRegistered = true
+      console.log('[KuGouAPI] Device registered, dfid:', dfid.substring(0, 8) + '...')
+    }
+  } catch (e) {
+    console.warn('[KuGouAPI] Device registration failed, continuing anyway')
+  }
+}
+
 /**
  * Call a kugou-api module function and return its response body.
  *
@@ -87,24 +102,27 @@ function getDeviceCookies(): Record<string, string> {
  * show a friendly message instead of an unhandled IPC error.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+const SONG_URL_ENDPOINTS = new Set(['song_url', 'song_url_new', 'song_climax', 'kmr_audio_mv', 'video_url'])
+
 async function callApi(fnName: string, params: Record<string, any> = {}): Promise<any> {
   const api = loadKugouApi()
   if (typeof api[fnName] !== 'function') {
     throw new Error(`KuGou API function not found: ${fnName}`)
   }
-  // Inject device cookies (merged with any user-provided cookies like token/userid)
+  
+  if (SONG_URL_ENDPOINTS.has(fnName)) {
+    await ensureDeviceRegistered()
+  }
+  
   const userCookie = params.cookie || {}
   params.cookie = { ...getDeviceCookies(), ...userCookie }
 
   try {
     const result = await api[fnName](params)
-    // result = { status, body, cookie, headers }
     return result?.body ?? result
   } catch (err: any) {
-    // Library rejects with { status: 502, body, cookie, headers } on API errors.
-    // Return body so the caller can inspect error_code / data.
     if (err && typeof err === 'object' && 'body' in err) {
-      console.warn(`[KuGouAPI] ${fnName} returned error:`, err.body?.error_code, err.body?.error_msg)
+      console.warn(`[KuGouAPI] ${fnName} returned error:`, err.body?.error_code || err.body?.errcode, err.body?.error_msg || '')
       return err.body
     }
     throw err
@@ -137,22 +155,31 @@ export async function kgSearchComplex(keyword: string, page = 1) {
 }
 
 // ============ Song URL ============
-export async function kgSongUrl(hash: string, albumId?: string) {
-  let body = await callApi('song_url', { hash, album_id: albumId || 0 })
-  if (body?.errcode && body.errcode !== 0) {
-    body = await callApi('song_url_new', { hash, album_id: albumId || 0 })
-    if (body?.data) {
-      const data = body.data
-      const cand = data.candidates?.[0] || data.track_urls?.[0] || data.pur_url_info || data
-      if (cand) {
-        body = { ...body, data: cand }
-      }
+export async function kgSongUrl(hash: string, albumId?: string, albumAudioId?: string) {
+  const body = await callApi('song_url', { 
+    hash, 
+    album_id: albumId || 0,
+    album_audio_id: albumAudioId || 0,
+  })
+  
+  let playUrl = ''
+  if (Array.isArray(body?.url) && body.url.length > 0) {
+    playUrl = body.url[0]
+  } else if (Array.isArray(body?.backupUrl) && body.backupUrl.length > 0) {
+    playUrl = body.backupUrl[0]
+  }
+  
+  return {
+    ...body,
+    play_url: playUrl,
+    data: {
+      play_url: playUrl,
+      hash: body?.hash || hash,
+      file_name: body?.fileName || '',
+      time_length: body?.timeLength || 0,
+      bit_rate: body?.bitRate || 0,
     }
   }
-  if (Array.isArray(body?.data) && body.data.length > 0) {
-    return { ...body, data: body.data[0] }
-  }
-  return body
 }
 
 // ============ Lyrics ============

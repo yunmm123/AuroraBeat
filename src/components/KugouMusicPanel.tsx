@@ -27,6 +27,7 @@ interface KugouSongItem {
   SingerName: string
   AlbumName?: string
   AlbumID?: string
+  AlbumAudioID?: string
   Duration?: number
 }
 
@@ -60,37 +61,74 @@ function extractPlaylistList(body: any): any[] {
 function extractSongList(body: any): any[] {
   const d = body?.data
   if (!d) return []
+  
+  if (Array.isArray(d)) return d
   if (Array.isArray(d.lists)) return d.lists
   if (Array.isArray(d.songlist)) return d.songlist
   if (Array.isArray(d.song_list)) return d.song_list
   if (Array.isArray(d.list)) return d.list
   if (Array.isArray(d.info)) return d.info
-  if (Array.isArray(d)) return d
   if (d.audios && Array.isArray(d.audios)) return d.audios
   if (d.songs && Array.isArray(d.songs)) return d.songs
-  if (d.data && d.data.lists && Array.isArray(d.data.lists)) return d.data.lists
-  if (d.data && d.data.songlist && Array.isArray(d.data.songlist)) return d.data.songlist
-  if (d.data && d.data.list && Array.isArray(d.data.list)) return d.data.list
-  if (d.data && Array.isArray(d.data)) return d.data
   if (d.rank_songs && Array.isArray(d.rank_songs)) return d.rank_songs
   if (d.rank_audio && Array.isArray(d.rank_audio)) return d.rank_audio
+  
+  const keys = Object.keys(d)
+  if (keys.length > 0 && keys.every(k => !isNaN(Number(k)))) {
+    const arr: any[] = []
+    for (const k of keys) {
+      if (d[k] && typeof d[k] === 'object') {
+        arr.push(d[k])
+      }
+    }
+    if (arr.length > 0) return arr
+  }
+  
+  if (d.data) {
+    if (Array.isArray(d.data)) return d.data
+    if (Array.isArray(d.data.lists)) return d.data.lists
+    if (Array.isArray(d.data.songlist)) return d.data.songlist
+    if (Array.isArray(d.data.list)) return d.data.list
+  }
+  
   return []
 }
 
 function normalizeSong(raw: any): KugouSongItem {
-  const hash = raw.Hash || raw.hash || raw.audio_id || raw.id || ''
-  const songName = raw.SongName || raw.songname || raw.song_name || raw.name || raw.filename || raw.title || ''
+  const audioInfo = raw.audio_info || raw.audioInfo || {}
+  
+  let hash = raw.Hash || raw.hash || raw.audio_id || raw.id || ''
+  if (!hash && audioInfo.hash_128) hash = audioInfo.hash_128
+  if (!hash && audioInfo.hash) hash = audioInfo.hash
+  if (!hash && raw.hash_128) hash = raw.hash_128
+  
+  const songName = raw.SongName || raw.songname || raw.song_name || raw.name || 
+    raw.filename || raw.title || audioInfo.songname || ''
+  
   const singer = raw.SingerName || raw.singername || raw.author_name || raw.artist || raw.singer ||
-    (raw.authors?.[0]?.author_name) || raw.artists?.[0]?.name || ''
-  const albumName = raw.AlbumName || raw.album_name || raw.albumname || raw.album_name || raw.album || ''
-  const albumId = String(raw.AlbumID || raw.album_id || raw.albumid || raw.album_audio_id || '')
-  const duration = raw.Duration || raw.duration || raw.timelength || raw.length || 0
+    (raw.authors?.[0]?.author_name) || raw.artists?.[0]?.name || 
+    raw.show_author_name || ''
+  
+  const albumName = raw.AlbumName || raw.album_name || raw.albumname || raw.album || 
+    raw.album_info?.album_name || ''
+  
+  const albumId = String(raw.AlbumID || raw.album_id || raw.albumid || 
+    raw.album_audio_id || raw.album_info?.album_id || '')
+  
+  const albumAudioId = String(raw.album_audio_id || raw.albumAudioId || 
+    raw.album_info?.album_audio_id || '')
+  
+  let duration = raw.Duration || raw.duration || raw.timelength || raw.length || 0
+  if (!duration && audioInfo.duration_128) duration = Math.floor(audioInfo.duration_128 / 1000)
+  if (!duration && audioInfo.duration) duration = Math.floor(audioInfo.duration / 1000)
+  
   return {
     Hash: String(hash),
     SongName: songName,
     SingerName: singer,
     AlbumName: albumName,
     AlbumID: albumId,
+    AlbumAudioID: albumAudioId,
     Duration: duration,
   }
 }
@@ -236,17 +274,18 @@ export default function KugouMusicPanel({
   async function handlePlaySong(song: KugouSongItem) {
     setPlayingHash(song.Hash)
     try {
-      const urlRes = await kugouSongUrl(song.Hash, song.AlbumID)
-      const data = urlRes?.data
+      const urlRes = await kugouSongUrl(song.Hash, song.AlbumID, song.AlbumAudioID)
       let playUrl = ''
-      if (Array.isArray(data) && data.length > 0) {
-        playUrl = data[0]?.play_url || data[0]?.play_backup_url || data[0]?.url || ''
-      } else if (data && typeof data === 'object') {
-        playUrl = data.play_url || data.play_backup_url || data.url || ''
+      if (urlRes?.play_url) {
+        playUrl = urlRes.play_url
+      } else if (urlRes?.data?.play_url) {
+        playUrl = urlRes.data.play_url
+      } else if (Array.isArray(urlRes?.url) && urlRes.url.length > 0) {
+        playUrl = urlRes.url[0]
+      } else if (Array.isArray(urlRes?.backupUrl) && urlRes.backupUrl.length > 0) {
+        playUrl = urlRes.backupUrl[0]
       }
-      if (!playUrl && urlRes && urlRes.data) {
-        playUrl = urlRes.data.play_url || urlRes.data.play_backup_url || urlRes.data.url || ''
-      }
+      
       if (playUrl) {
         const kugouSong: Song = {
           id: song.Hash,
@@ -261,7 +300,7 @@ export default function KugouMusicPanel({
         onPlaySong(kugouSong)
         onClose()
       } else {
-        console.warn('No play URL found for song:', song.SongName)
+        console.warn('No play URL found for song:', song.SongName, urlRes)
       }
     } catch (e) {
       console.error('Failed to get song URL:', e)

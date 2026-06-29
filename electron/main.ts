@@ -242,8 +242,8 @@ ipcMain.handle('kg:searchDefault', async () => {
   return kugouHandler.kgSearchDefault()
 })
 
-ipcMain.handle('kg:songUrl', async (_e, hash: string, albumId?: string) => {
-  return kugouHandler.kgSongUrl(hash, albumId)
+ipcMain.handle('kg:songUrl', async (_e, hash: string, albumId?: string, albumAudioId?: string) => {
+  return kugouHandler.kgSongUrl(hash, albumId, albumAudioId)
 })
 
 ipcMain.handle('kg:lyric', async (_e, hash: string, albumId?: string) => {
