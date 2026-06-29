@@ -102,7 +102,7 @@ async function ensureDeviceRegistered(): Promise<void> {
  * show a friendly message instead of an unhandled IPC error.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const SONG_URL_ENDPOINTS = new Set(['song_url', 'song_url_new', 'song_climax', 'kmr_audio_mv', 'video_url'])
+const SONG_URL_ENDPOINTS = new Set(['song_url', 'song_url_new', 'song_climax', 'kmr_audio_mv', 'video_url', 'lyric', 'search_lyric'])
 
 async function callApi(fnName: string, params: Record<string, any> = {}): Promise<any> {
   const api = loadKugouApi()
@@ -133,7 +133,27 @@ async function callApi(fnName: string, params: Record<string, any> = {}): Promis
 export async function kgSearch(keyword: string, page = 1, pageSize = 30) {
   let body = await callApi('search', { keywords: keyword, page, pagesize: pageSize })
   if (body?.error_code && body.error_code !== 0) {
-    body = await callApi('search_complex', { keywords: keyword, page, pagesize: pageSize })
+    let complex = await callApi('search_complex', { keywords: keyword, page, pagesize: pageSize })
+    if (typeof complex === 'string') {
+      try {
+        const jsonStr = complex.replace(/<!--KG_TAG_RES_START-->/, '').replace(/<!--KG_TAG_RES_END-->/, '')
+        complex = JSON.parse(jsonStr)
+      } catch {
+        complex = { error_code: -1, data: { lists: [] } }
+      }
+    }
+    if (complex?.data?.lists && Array.isArray(complex.data.lists)) {
+      const songBlock = complex.data.lists.find((b: any) => b.type === 'song')
+      if (songBlock) {
+        body = {
+          ...complex,
+          data: {
+            ...complex.data,
+            lists: songBlock.lists || [],
+          },
+        }
+      }
+    }
   }
   return body
 }

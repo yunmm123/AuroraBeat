@@ -153,6 +153,9 @@ export default function KugouMusicPanel({
   const [selectedRankId, setSelectedRankId] = useState('')
   const [selectedRankName, setSelectedRankName] = useState('')
   const [rankSongs, setRankSongs] = useState<KugouSongItem[]>([])
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState('')
+  const [selectedPlaylistName, setSelectedPlaylistName] = useState('')
+  const [playErrorMsg, setPlayErrorMsg] = useState('')
 
   useEffect(() => {
     loadDiscoverData()
@@ -273,6 +276,7 @@ export default function KugouMusicPanel({
 
   async function handlePlaySong(song: KugouSongItem) {
     setPlayingHash(song.Hash)
+    setPlayErrorMsg('')
     try {
       const urlRes = await kugouSongUrl(song.Hash, song.AlbumID, song.AlbumAudioID)
       let playUrl = ''
@@ -301,9 +305,13 @@ export default function KugouMusicPanel({
         onClose()
       } else {
         console.warn('No play URL found for song:', song.SongName, urlRes)
+        setPlayErrorMsg('无法获取播放地址，请稍后重试')
+        setTimeout(() => setPlayErrorMsg(''), 3000)
       }
     } catch (e) {
       console.error('Failed to get song URL:', e)
+      setPlayErrorMsg('播放失败，请稍后重试')
+      setTimeout(() => setPlayErrorMsg(''), 3000)
     } finally {
       setPlayingHash('')
     }
@@ -335,10 +343,11 @@ export default function KugouMusicPanel({
   async function handleOpenPlaylist(playlist: any) {
     setLoading(true)
     const n = normalizePlaylist(playlist)
-    setCurrentPlaylistName(n.name || '歌单')
+    const listId = String(playlist.listid || playlist.specialid || playlist.id || n.id || '')
+    setSelectedPlaylistId(listId)
+    setSelectedPlaylistName(n.name || '歌单')
     setPlaylistTracks([])
     try {
-      const listId = String(playlist.listid || playlist.specialid || playlist.id || n.id || '')
       const uid = userInfo?.uid
       const token = userInfo?.token
       const res = await kugouPlaylistTrackAllNew(listId, 1, uid, token)
@@ -348,6 +357,12 @@ export default function KugouMusicPanel({
       // ignore
     }
     setLoading(false)
+  }
+
+  function handlePlaylistBack() {
+    setSelectedPlaylistId('')
+    setSelectedPlaylistName('')
+    setPlaylistTracks([])
   }
 
   function formatDuration(seconds: number): string {
@@ -438,7 +453,12 @@ export default function KugouMusicPanel({
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto px-6 py-4" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.2) transparent' }}>
+        <div className="flex-1 overflow-y-auto px-6 py-4 relative" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.2) transparent' }}>
+          {playErrorMsg && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 px-4 py-2 rounded-lg text-white text-sm shadow-lg" style={{ background: 'rgba(239,68,68,0.9)' }}>
+              {playErrorMsg}
+            </div>
+          )}
           <AnimatePresence mode="wait">
             {/* API Error */}
             {apiError && searchResults.length === 0 && (
@@ -635,48 +655,20 @@ export default function KugouMusicPanel({
                   </div>
                 ) : (
                   <div>
-                    <div className="flex items-center gap-3 mb-6 p-4 rounded-xl" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-                      <div className="w-12 h-12 rounded-full flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #a855f7, #3b82f6)' }}>
-                        <User size={24} className="text-white" />
-                      </div>
+                    {selectedPlaylistId ? (
                       <div>
-                        <div className="text-white font-medium">{userInfo.nickname}</div>
-                        <div className="text-white/40 text-sm">酷狗音乐用户</div>
-                      </div>
-                    </div>
-                    <h3 className="text-white/80 font-medium mb-3">我的歌单</h3>
-                    {userPlaylists.length === 0 ? (
-                      <div className="text-white/40 text-center py-8">暂无歌单</div>
-                    ) : (
-                      <div className="space-y-2">
-                        {userPlaylists.map((pl: any) => {
-                          const n = normalizePlaylist(pl)
-                          return (
-                            <div key={n.id || pl.specialid || Math.random()} onClick={() => handleOpenPlaylist(pl)} className="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-colors" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
-                              onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
-                              onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'}>
-                              <ListMusic size={18} className="text-purple-400" />
-                              <div className="flex-1 min-w-0">
-                                <div className="text-white text-sm font-medium truncate">{n.name || '未命名歌单'}</div>
-                                <div className="text-white/40 text-xs">{n.songCount || 0} 首歌曲</div>
-                              </div>
-                              <ChevronRight size={16} className="text-white/30" />
-                            </div>
-                          )
-                        })}
-                      </div>
-                    )}
-                    {playlistTracks.length > 0 && (
-                      <div className="mt-6">
-                        <h3 className="text-white/80 font-medium mb-3">{currentPlaylistName}</h3>
-                        <div className="space-y-1">
+                        <button onClick={handlePlaylistBack} className="flex items-center gap-2 text-white/60 hover:text-white mb-4 text-sm">
+                          <ChevronLeft size={16} />返回歌单列表
+                        </button>
+                        <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><ListMusic size={16} className="text-purple-400" />{selectedPlaylistName}</h3>
+                        <div className="space-y-1 max-h-[55vh] overflow-y-auto pr-2">
                           {playlistTracks.map((song, i) => (
                             <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors" style={{ background: playingHash === song.Hash ? 'rgba(168,85,247,0.2)' : 'transparent' }}
                               onMouseEnter={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.06)' }}
                               onMouseLeave={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'transparent' }}>
                               <span className="w-6 text-center text-white/40 text-sm">{i + 1}</span>
                               <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                                <Play size={14} className="text-white/60" />
+                                {playingHash === song.Hash ? <Loader2 size={14} className="text-purple-400 animate-spin" /> : <Play size={14} className="text-white/60" />}
                               </div>
                               <div className="flex-1 min-w-0">
                                 <div className="text-white text-sm font-medium truncate">{song.SongName}</div>
@@ -684,7 +676,45 @@ export default function KugouMusicPanel({
                               </div>
                             </div>
                           ))}
+                          {playlistTracks.length === 0 && (
+                            <div className="text-white/40 text-center py-8">该歌单暂无歌曲</div>
+                          )}
                         </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="flex items-center gap-3 mb-6 p-4 rounded-xl" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                          <div className="w-12 h-12 rounded-full flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #a855f7, #3b82f6)' }}>
+                            <User size={24} className="text-white" />
+                          </div>
+                          <div>
+                            <div className="text-white font-medium">{userInfo.nickname}</div>
+                            <div className="text-white/40 text-sm">酷狗音乐用户</div>
+                          </div>
+                        </div>
+                        <h3 className="text-white/80 font-medium mb-3">我的歌单</h3>
+                        {userPlaylists.length === 0 ? (
+                          <div className="text-white/40 text-center py-8">暂无歌单</div>
+                        ) : (
+                          <div className="space-y-2 max-h-[55vh] overflow-y-auto pr-2">
+                            {userPlaylists.map((pl: any, idx: number) => {
+                              const n = normalizePlaylist(pl)
+                              const keyId = n.id || pl.listid || pl.specialid || `pl-${idx}`
+                              return (
+                                <div key={keyId} onClick={() => handleOpenPlaylist(pl)} className="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-colors" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+                                  onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
+                                  onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'}>
+                                  <ListMusic size={18} className="text-purple-400" />
+                                  <div className="flex-1 min-w-0">
+                                    <div className="text-white text-sm font-medium truncate">{n.name || '未命名歌单'}</div>
+                                    <div className="text-white/40 text-xs">{n.songCount || 0} 首歌曲</div>
+                                  </div>
+                                  <ChevronRight size={16} className="text-white/30" />
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
