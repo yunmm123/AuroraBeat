@@ -1,58 +1,10 @@
-// Lyrics API - uses lrclib.net as primary, ufanv.cn as fallback via Electron IPC
-const LRCLIB_API = 'https://lrclib.net/api'
-
-export interface LyricsResult {
-  id: number
-  name: string
-  trackName: string
-  artistName: string
-  albumName: string
-  duration: number
-  syncedLyrics: string | null
-  plainLyrics: string | null
-}
-
+// Lyrics API - uses ufanv.cn via Electron IPC
 export interface LyricLine {
   time: number  // seconds
   text: string
 }
 
-// Primary: lrclib.net
-export async function searchLyrics(
-  trackName: string,
-  artistName: string,
-  albumName?: string,
-  duration?: number
-): Promise<LyricsResult | null> {
-  try {
-    const params = new URLSearchParams()
-    params.set('track_name', trackName)
-    params.set('artist_name', artistName)
-    if (albumName) params.set('album_name', albumName)
-    if (duration) params.set('duration', String(Math.round(duration)))
-
-    const res = await fetch(`${LRCLIB_API}/get?${params.toString()}`)
-    if (!res.ok) return null
-    const data = await res.json()
-    return data
-  } catch {
-    return null
-  }
-}
-
-export async function searchLyricsByQuery(query: string): Promise<LyricsResult[]> {
-  try {
-    const params = new URLSearchParams()
-    params.set('q', query)
-    const res = await fetch(`${LRCLIB_API}/search?${params.toString()}`)
-    if (!res.ok) return []
-    return await res.json()
-  } catch {
-    return []
-  }
-}
-
-// Fallback: ufanv.cn via Electron IPC (scrapes the website)
+// Search lyrics from ufanv.cn via Electron IPC (scrapes the website)
 export async function searchLyricsFromUfanv(
   trackName: string,
   artistName: string
@@ -89,10 +41,6 @@ export function parseLrc(lrcText: string): LyricLine[] {
   }
   
   return lines.sort((a, b) => a.time - b.time)
-}
-
-export function parseSyncedLyrics(syncedLyrics: string): LyricLine[] {
-  return parseLrc(syncedLyrics)
 }
 
 // Parse filename like "张靓颖 - 野心家" or "张靓颖-野心家" into artist + title

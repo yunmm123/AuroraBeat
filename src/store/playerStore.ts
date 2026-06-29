@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import type { Song, Playlist, PlayMode, AudioFeatures, VisualEffectType, Theme } from '@/types'
 import { themes } from '@/utils/themes'
 import { getAllAudioFiles, saveAudioFile, deleteAudioFile, type StoredAudio } from '@/utils/audioDB'
-import { searchLyrics, searchLyricsFromUfanv, parseSyncedLyrics, parseLrc, parseSongFilename, type LyricLine } from '@/services/lyricsApi'
+import { searchLyricsFromUfanv, parseLrc, parseSongFilename, type LyricLine } from '@/services/lyricsApi'
 
 interface PlayerState {
   currentSong: Song | null
@@ -284,35 +284,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     
     const trackName = song.title.replace(/\.[^.]+$/, '')
     const artistName = song.artist !== '未知艺术家' ? song.artist : ''
-    const albumName = song.album !== '本地音乐' ? song.album : ''
     
-    // Primary: lrclib.net
-    searchLyrics(trackName, artistName, albumName, song.duration).then((result) => {
-      if (result?.syncedLyrics) {
-        const lines = parseSyncedLyrics(result.syncedLyrics)
-        set({ lyrics: lines, lyricsLoading: false })
-      } else if (result?.plainLyrics) {
-        const lines = result.plainLyrics.split('\n').filter(l => l.trim()).map((text, i) => ({
-          time: i * 3,
-          text: text.trim(),
-        }))
-        set({ lyrics: lines, lyricsLoading: false })
-      } else {
-        // Fallback: ufanv.cn
-        searchLyricsFromUfanv(trackName, artistName).then((lrcText) => {
-          if (lrcText) {
-            const lines = parseLrc(lrcText)
-            if (lines.length > 0) {
-              set({ lyrics: lines, lyricsLoading: false })
-            } else {
-              set({ lyricsLoading: false })
-            }
-          } else {
-            set({ lyricsLoading: false })
-          }
-        }).catch(() => {
+    // Search lyrics from ufanv.cn
+    searchLyricsFromUfanv(trackName, artistName).then((lrcText) => {
+      if (lrcText) {
+        const lines = parseLrc(lrcText)
+        if (lines.length > 0) {
+          set({ lyrics: lines, lyricsLoading: false })
+        } else {
           set({ lyricsLoading: false })
-        })
+        }
+      } else {
+        set({ lyricsLoading: false })
       }
     }).catch(() => {
       set({ lyricsLoading: false })
