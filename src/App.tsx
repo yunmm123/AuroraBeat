@@ -98,9 +98,10 @@ function useVisualEngine(
     const ripples: { x: number; y: number; age: number; str: number }[] = [];
     for (let i = 0; i < RIPPLE_MAX; i++) ripples.push({ x: 0, y: 0, age: 999, str: 0 });
 
-    // 粒子几何 — 大量自由粒子，3D 体积内均匀随机分布（非固定形状）
-    const GRID = 160;
-    const PCOUNT = GRID * GRID;
+    // 粒子几何 — 自由粒子，环形/光晕分布（不遮挡中心图片视频）
+    // 设计：粒子分布在屏幕边缘的环形带 + 少量散落星点，中心留空给用户图片/视频
+    // 数量适中（~6000），足够卡点视觉冲击，又不会糊成一片
+    const PCOUNT = 6000;
     const positions = new Float32Array(PCOUNT * 3);
     const uvs = new Float32Array(PCOUNT * 2);
     const rand = new Float32Array(PCOUNT);
@@ -110,20 +111,32 @@ function useVisualEngine(
       return s - Math.floor(s);
     };
     for (let i = 0; i < PCOUNT; i++) {
-      // 3D 球形体积分布（均匀）：球内随机点
       const r1 = hhash(i * 3 + 1);
       const r2 = hhash(i * 3 + 2);
       const r3 = hhash(i * 3 + 3);
-      const radius = Math.cbrt(r1) * 3.2; // 立方根保证体积均匀
+      // 环形带分布：大部分粒子在半径 2.8~5.2 的环形带（屏幕边缘光晕）
+      // 少量粒子在 1.8~2.8 内圈，极少量在 5.2~6.5 外圈散落
+      let radius: number;
+      const band = r3;
+      if (band < 0.68) {
+        // 主光晕带（边缘）
+        radius = 2.8 + r1 * 2.4;
+      } else if (band < 0.90) {
+        // 内圈（靠近中心但不遮挡）
+        radius = 1.8 + r1 * 1.0;
+      } else {
+        // 外圈散落星点
+        radius = 5.2 + r1 * 1.3;
+      }
       const theta = r2 * Math.PI * 2;
-      const phi = Math.acos(2 * r3 - 1);
-      positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
-      positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
-      positions[i * 3 + 2] = radius * Math.cos(phi);
-      // aUv 仍用于封面采样（基于 xy 投影归一化）
-      const u = (positions[i * 3] / 3.2) * 0.5 + 0.5;
-      const v = (positions[i * 3 + 1] / 3.2) * 0.5 + 0.5;
-      uvs[i * 2] = u; uvs[i * 2 + 1] = v;
+      // 略带 z 厚度（薄环，非纯平面），增加纵深感
+      const zSpread = (hhash(i * 5 + 7) - 0.5) * 0.8;
+      positions[i * 3] = radius * Math.cos(theta);
+      positions[i * 3 + 1] = radius * Math.sin(theta);
+      positions[i * 3 + 2] = zSpread;
+      // aUv 基于角度归一化（用于封面采样时的方位映射）
+      uvs[i * 2] = (Math.cos(theta) + 1) * 0.5;
+      uvs[i * 2 + 1] = (Math.sin(theta) + 1) * 0.5;
       rand[i] = r1;
     }
     const geo = new THREE.BufferGeometry();
@@ -466,22 +479,13 @@ function useVisualEngine(
     let bassPeak = 0.030;
     let prevTime = performance.now();
     let rippleWriteIdx = 0;
-    let beatCooldown = 0;
-    // === Spectral Flux 节拍检测（参考 beat-detection npm / librosa onset / Joe Sullivan 算法）===
-    // 关键：fftSize=2048 @ 44100Hz → 每 bin ≈ 21.5Hz
-    //   kick 区 50-150Hz → bin 2~7（只用这段算 flux，避免人声/乐器污染）
-    // 上一帧节拍频谱（用于计算帧间正变化 = spectral flux）
-    let prevBeatSpectrum: Float32Array | null = null;
-    // 滚动历史窗口（约 200ms @ 60fps，用于自适应阈值 mean * delta）
-    const FLUX_HISTORY_LEN = 12;
-    const fluxHistory: number[] = new Array(FLUX_HISTORY_LEN).fill(0);
-    let fluxHistoryIdx = 0;
-    // 上一帧 flux 值（用于局部最大值检测：当前帧必须 > 上一帧才算峰值）
-    let prevFlux = 0;
-    // 节拍后不应期（refractory），避免单一击打重复触发
-    let beatRefractory = 0;
-    // 调试：节流输出节拍触发情况
-    let beatDebugTimer = 0;
+    // === 离线节拍查表触发（参考 Mineradio tickBeatMap）===
+    // beatMap.beats[] 是预先分析好的节拍时间点数组，播放时按 currentTime 查表
+    let currentBeatMap: { beats: number[]; tempo: number } | null = null;
+    let beatMapNextIdx = 0;      // 下一个待触发的节拍索引
+    let beatMapSongId: string | null = null;  // 当前 beatMap 对应的歌曲 id
+    let beatAnalysisToken = 0;   // 取消旧分析
+    let beatAnalysisStarted = false;
     // 电影级缓慢相机漂移（替代抖动），呼吸感而非晃动
     let camDriftX = 0, camDriftY = 0;
     // 鼠标追踪状态（屏幕像素坐标 + 平滑速度）
@@ -518,8 +522,44 @@ function useVisualEngine(
     player.setAnalyserReadyHandler?.(setupAnalysers);
     setTimeout(setupAnalysers, 500);
 
+    // === 离线节拍分析触发（切歌时启动）===
+    // 当 currentSong 变化时，获取音频 URL 并启动 analyzeBeats
+    // 分析在 Web Worker 中进行，不阻塞主线程
+    const startBeatAnalysis = async (songId: string, audioUrl: string, duration: number) => {
+      const token = ++beatAnalysisToken;
+      try {
+        const { analyzeBeats } = await import('./core/beatAnalyzer');
+        const map = await analyzeBeats(audioUrl, songId, duration);
+        if (token !== beatAnalysisToken) return; // 已切歌，放弃
+        if (map && map.beats.length > 0) {
+          currentBeatMap = { beats: map.beats, tempo: map.tempo };
+          beatMapSongId = songId;
+          // 对齐游标到当前播放时间（处理分析期间已经播放的情况）
+          const ct = player.getCurrentTime();
+          beatMapNextIdx = 0;
+          while (beatMapNextIdx < currentBeatMap.beats.length && currentBeatMap.beats[beatMapNextIdx] < ct) {
+            beatMapNextIdx++;
+          }
+          console.log('[beatAnalysis] 节拍表就绪:', songId, '节拍数:', map.beats.length, 'BPM:', map.tempo.toFixed(1));
+        } else {
+          console.warn('[beatAnalysis] 未得到节拍表，将无卡点效果');
+        }
+      } catch (e) {
+        console.warn('[beatAnalysis] error:', e);
+      }
+    };
+
     const presetIdx = { silk: 0, tunnel: 1, orbit: 2, void: 3, nebula: 4, wallpulse: 5 };
     uniforms.uPreset.value = presetIdx[preset];
+
+    // 暴露节拍分析触发函数（供外部 useEffect 调用，必须在 startBeatAnalysis 定义之后）
+    (window as any).__startBeatAnalysis = startBeatAnalysis;
+    (window as any).__resetBeatMap = () => {
+      currentBeatMap = null;
+      beatMapSongId = null;
+      beatMapNextIdx = 0;
+      beatAnalysisToken++; // 取消正在进行的分析
+    };
 
     const animate = () => {
       animId = requestAnimationFrame(animate);
@@ -527,7 +567,31 @@ function useVisualEngine(
       const dt = Math.min((now - prevTime) / 1000, 0.05);
       prevTime = now;
       uniforms.uTime.value += dt;
-      beatCooldown = Math.max(0, beatCooldown - dt);
+
+      // === 离线节拍查表触发（参考 Mineradio tickBeatMap）===
+      // currentBeatMap.beats[] 是预先分析好的节拍时间点数组
+      // 每帧检查 audio.currentTime 是否到达下一个节拍时间点，到达就触发卡点行为
+      const t = player.getCurrentTime();
+      if (currentBeatMap && currentBeatMap.beats.length > 0 && player.isPlaying) {
+        // 查表：处理所有 <= 当前时间的节拍（通常每帧最多 1 个，seek 时可能多个）
+        while (beatMapNextIdx < currentBeatMap.beats.length && currentBeatMap.beats[beatMapNextIdx] <= t) {
+          const beatTime = currentBeatMap.beats[beatMapNextIdx];
+          // 触发节拍卡点行为
+          uniforms.uBeatAge.value = 0;
+          uniforms.uBeatCount.value += 1;
+          // 节拍强度：基于节拍间隔估算（间隔短的鼓点更密集，强度适中）
+          // 这里用固定 0.7 基础强度 + 低频能量微调，让卡点视觉稳定
+          const strength = 0.6 + smoothBass * 0.3;
+          uniforms.uBeatStrength.value = Math.min(1, strength);
+          // beatPulse 用于涟漪/相机等次级效果
+          beatPulse = Math.max(beatPulse, 0.15);
+          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, Math.min(1, strength));
+          beatMapNextIdx++;
+        }
+      }
+      // 节拍龄每帧累加（shader 用它计算 exp(-beatT * 4) 包络衰减）
+      uniforms.uBeatAge.value += dt;
+      beatPulse *= Math.pow(0.36, dt);
 
       if (analyser && freqData && beatAnalyser && beatData && player.isPlaying) {
         analyser.getByteFrequencyData(freqData as any);
@@ -557,99 +621,6 @@ function useVisualEngine(
         smoothTreb = env(smoothTreb, Math.min(0.56, tHigh * 0.54), 0.18, 0.055);
         smoothEnergy = env(smoothEnergy, Math.min(0.72, (bassNorm + mInst + tHigh) / 3), 0.16, 0.055);
 
-        const bassOnset = Math.max(0, bKick - smoothBass * 0.9);
-
-        // === Spectral Flux 节拍检测（生产级实现，参考 beat-detection/librosa）===
-        // 算法：flux = Σ max(0, cur-bin - prev-bin) over kick 区(50-150Hz)
-        //       threshold = mean(flux history) * delta(1.4)  ← 标准自适应阈值
-        //       触发条件：flux > threshold && flux > prevFlux(局部峰值) && refractory 结束
-        // 关键修复：bin 范围收窄到 kick 区，避免人声污染（之前用 7-280 太大）
-        let flux = 0;
-        // fftSize=2048 @ 44100Hz → bin 2≈43Hz, bin 7≈150Hz（kick 主能量区）
-        const FLUX_BIN_LO = 2;
-        const FLUX_BIN_HI = Math.min(7, beatData.length - 1);
-        if (prevBeatSpectrum) {
-          for (let i = FLUX_BIN_LO; i <= FLUX_BIN_HI; i++) {
-            const cur = beatData[i] / 255;
-            const prev = prevBeatSpectrum[i];
-            const diff = cur - prev;
-            if (diff > 0) flux += diff; // 只累加正变化（onset）
-          }
-          // 归一化到 bin 数量
-          flux /= Math.max(1, FLUX_BIN_HI - FLUX_BIN_LO + 1);
-        }
-
-        // 更新历史窗口（用于自适应阈值）
-        fluxHistory[fluxHistoryIdx] = flux;
-        fluxHistoryIdx = (fluxHistoryIdx + 1) % FLUX_HISTORY_LEN;
-        // 计算 flux 均值（标准做法：threshold = mean * delta）
-        let fluxMean = 0;
-        for (let i = 0; i < FLUX_HISTORY_LEN; i++) fluxMean += fluxHistory[i];
-        fluxMean /= FLUX_HISTORY_LEN;
-        // delta=1.4：文献推荐 1.3-1.5，1.4 在大多数歌曲上平衡
-        const fluxThreshold = fluxMean * 1.4;
-
-        // 复制当前频谱供下一帧使用
-        if (beatData) {
-          if (!prevBeatSpectrum || prevBeatSpectrum.length !== beatData.length) {
-            prevBeatSpectrum = new Float32Array(beatData.length);
-          }
-          for (let i = 0; i < beatData.length; i++) prevBeatSpectrum[i] = beatData[i] / 255;
-        }
-
-        // 不应期倒计时（220ms，对应最快 ~270BPM，过滤单次击打回响）
-        beatRefractory = Math.max(0, beatRefractory - dt);
-
-        // 节拍触发判定（下降沿峰值检测）：
-        //   当 flux 开始下降(flux < prevFlux)时，prevFlux 就是局部峰值
-        //   用 prevFlux 判断是否超阈值，这样触发的是真正的峰值时刻（仅 1 帧延迟~16ms）
-        //   配合 refractory 防止单次击打重复触发
-        const isPeak = flux < prevFlux; // 下降沿 → 上一帧是峰值
-        const peakFlux = prevFlux;
-        const overThreshold = peakFlux > fluxThreshold;
-        if (overThreshold && isPeak && beatRefractory <= 0 && peakFlux > 0.01) {
-          // 触发节拍卡点行为
-          uniforms.uBeatAge.value = 0;
-          uniforms.uBeatCount.value += 1;
-          // 节拍强度 = peakFlux 相对阈值的倍率（自适应，不同歌曲可比）
-          const strength = Math.min(1, Math.max(0.35, peakFlux / Math.max(0.001, fluxThreshold) * 0.5));
-          uniforms.uBeatStrength.value = strength;
-          // 不应期 220ms
-          beatRefractory = 0.22;
-          // beatPulse 用于涟漪/相机等次级效果
-          beatPulse = Math.max(beatPulse, Math.min(0.2, strength * 0.18));
-          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, strength);
-          beatCooldown = 0.18;
-          // 调试日志（节流 500ms 一次，验证节拍是否触发）
-          beatDebugTimer += dt;
-          if (beatDebugTimer > 0.5) {
-            beatDebugTimer = 0;
-            console.log('[BEAT]', {
-              peakFlux: peakFlux.toFixed(4),
-              threshold: fluxThreshold.toFixed(4),
-              mean: fluxMean.toFixed(4),
-              strength: strength.toFixed(2),
-              count: uniforms.uBeatCount.value,
-              bass: bKick.toFixed(3),
-            });
-          }
-        } else {
-          // 非节拍帧：uBeatStrength 不衰减（保持上次触发值）
-          // 衰减完全由 shader 内 beatEnv = exp(-beatT * 4) * uBeatStrength 负责
-          // beatT 随 uBeatAge 增大会自动让 beatEnv → 0，无需在 JS 端再衰减
-        }
-        // 节拍龄每帧累加（shader 用它计算 exp(-beatT * 4) 包络）
-        uniforms.uBeatAge.value += dt;
-        // 记录本帧 flux 供下一帧峰值比较
-        prevFlux = flux;
-
-        // 兼容旧逻辑：bassOnset 备份 beatPulse（弱化，主节拍源是 spectral flux）
-        if (bassOnset > 0.075 && bKick > 0.32 && beatCooldown <= 0) {
-          beatPulse = Math.max(beatPulse, Math.min(0.1, bassOnset * 0.1));
-          beatCooldown = 0.18;
-        }
-        beatPulse *= Math.pow(0.36, dt);
-
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
         uniforms.uTreble.value = smoothTreb;
@@ -659,17 +630,19 @@ function useVisualEngine(
         // 写入调试信息供 BeatDebugOverlay 显示
         (window as any).__beatDebug = {
           count: uniforms.uBeatCount.value,
-          flux: prevFlux,
-          threshold: fluxThreshold,
+          flux: 0,
+          threshold: 0,
           strength: uniforms.uBeatStrength.value,
           age: uniforms.uBeatAge.value,
           beat: beatPulse,
+          beatMapReady: currentBeatMap ? currentBeatMap.beats.length : 0,
+          tempo: currentBeatMap ? currentBeatMap.tempo : 0,
+          nextBeatIn: currentBeatMap && beatMapNextIdx < currentBeatMap.beats.length
+            ? Math.max(0, currentBeatMap.beats[beatMapNextIdx] - t) : -1,
         };
       } else {
         smoothBass *= 0.91; smoothMid *= 0.91; smoothTreb *= 0.91; smoothEnergy *= 0.91; beatPulse *= 0.82;
         bassPeak *= 0.99;
-        // 未播放/无分析器时：节拍龄继续累加（让粒子回归静止）
-        uniforms.uBeatAge.value += dt;
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
         uniforms.uTreble.value = smoothTreb;
@@ -838,6 +811,8 @@ function useVisualEngine(
       renderer.dispose();
       delete (window as any).__updateCover;
       delete (window as any).__triggerRipple;
+      delete (window as any).__startBeatAnalysis;
+      delete (window as any).__resetBeatMap;
     };
   }, []);
 
@@ -863,6 +838,23 @@ function useVisualEngine(
       (window as any).__updateCover(coverUrl);
     }
   }, [player.currentSong?.cover]);
+
+  // === 离线节拍分析触发（切歌时启动）===
+  // 当歌曲变化时，重置旧 beatMap 并启动新分析
+  useEffect(() => {
+    const song = player.currentSong;
+    if (!song || !player.isPlaying) return;
+    // 重置旧节拍表
+    (window as any).__resetBeatMap?.();
+    // 延迟一点获取音频 URL（playerCore 需要 time 设置 src）
+    const timer = setTimeout(async () => {
+      const audioUrl = player.getCurrentAudioUrl?.();
+      if (!audioUrl) return;
+      const duration = player.duration || 0;
+      (window as any).__startBeatAnalysis?.(song.id, audioUrl, duration);
+    }, 800); // 等音频加载 0.8s 后再启动分析
+    return () => clearTimeout(timer);
+  }, [player.currentSong?.id, player.isPlaying]);
 }
 
 // ====================================================================
@@ -882,7 +874,7 @@ function detectMood(song: Song | null): Mood {
 // 临时节拍调试显示（验证节拍检测是否工作）
 // ====================================================================
 const BeatDebugOverlay: React.FC = () => {
-  const [info, setInfo] = React.useState({ count: 0, flux: 0, threshold: 0, strength: 0, age: 0, beat: 0 });
+  const [info, setInfo] = React.useState<any>({ count: 0, strength: 0, age: 0, beat: 0, beatMapReady: 0, tempo: 0, nextBeatIn: -1 });
   React.useEffect(() => {
     const id = setInterval(() => {
       const d = (window as any).__beatDebug;
@@ -893,11 +885,14 @@ const BeatDebugOverlay: React.FC = () => {
   return (
     <div className="absolute top-16 left-4 z-50 bg-black/70 text-green-400 font-mono text-xs px-3 py-2 rounded pointer-events-none">
       <div>BEAT COUNT: {info.count}</div>
-      <div>FLUX: {info.flux.toFixed(4)} / THRESH: {info.threshold.toFixed(4)}</div>
-      <div>STRENGTH: {info.strength.toFixed(2)} / AGE: {info.age.toFixed(3)}</div>
-      <div>BEAT PULSE: {info.beat.toFixed(3)}</div>
-      <div style={{ color: info.count > 0 ? '#0f0' : '#f00' }}>
-        {info.count > 0 ? '✓ 节拍检测工作中' : '✗ 等待节拍触发...'}
+      <div>BPM: {(info.tempo || 0).toFixed(1)} / 节拍表: {info.beatMapReady || 0} 个</div>
+      <div>STRENGTH: {(info.strength || 0).toFixed(2)} / AGE: {(info.age || 0).toFixed(3)}</div>
+      <div>NEXT BEAT IN: {info.nextBeatIn >= 0 ? (info.nextBeatIn).toFixed(3) + 's' : '—'}</div>
+      <div style={{ color: (info.beatMapReady || 0) > 0 ? '#0f0' : '#f4d28a' }}>
+        {(info.beatMapReady || 0) > 0 ? '✓ 节拍表就绪' : '⏳ 正在分析节拍...'}
+      </div>
+      <div style={{ color: info.count > 0 ? '#0f0' : '#888' }}>
+        {info.count > 0 ? '✓ 卡点触发中' : '— 等待卡点'}
       </div>
     </div>
   );
@@ -945,6 +940,8 @@ const App: React.FC = () => {
     electron?.getServerPort?.().then((port: number) => {
       setServerPort(port);
       player.setServerPort?.(port);
+      // 暴露给 beatAnalyzer 用于加载 music-tempo 库
+      (window as any).__serverPort = port;
     });
   }, []);
 

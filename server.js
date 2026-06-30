@@ -270,6 +270,35 @@ const server = http.createServer(async (req, res) => {
   const pn = url.pathname;
 
   try {
+    // ========== 静态文件服务（vendor 目录，用于 music-tempo 库加载）==========
+    if (pn.startsWith('/vendor/')) {
+      // 打包后 vendor 在 dist/vendor（与 server.js 同级或上级），开发时在 public/vendor
+      const candidates = [
+        path.join(__dirname, 'dist', pn),              // 打包后（server.js 与 dist 同级）
+        path.join(__dirname, 'public', pn),            // 开发时
+        path.join(__dirname, '..', 'dist', pn),        // 备选
+      ];
+      let filePath = null;
+      for (const c of candidates) {
+        try { if (fs.existsSync(c) && fs.statSync(c).isFile()) { filePath = c; break; } } catch {}
+      }
+      if (!filePath) { res.writeHead(404); res.end('Not found'); return; }
+      try {
+        const ext = path.extname(filePath).toLowerCase();
+        const mime = ext === '.js' ? 'application/javascript' : 'application/octet-stream';
+        const data = fs.readFileSync(filePath);
+        res.writeHead(200, {
+          'Content-Type': mime,
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'public, max-age=86400',
+        });
+        res.end(data);
+        return;
+      } catch (e) {
+        res.writeHead(500); res.end('Server error'); return;
+      }
+    }
+
     // ========== 搜索 ==========
     if (pn === '/api/search') {
       const kw = url.searchParams.get('keywords') || '';

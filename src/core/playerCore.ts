@@ -51,6 +51,8 @@ class PlayerCore {
   private progressRaf: number | null = null;
   private onTimeUpdate: ((time: number) => void) | null = null;
   private onAnalyserReady: ((analyser: AnalyserNode) => void) | null = null;
+  // 当前音频 URL（用于离线节拍分析）
+  private currentAudioUrl: string | null = null;
 
   constructor() {
     this.initAudio();
@@ -147,6 +149,16 @@ class PlayerCore {
 
   getBeatAnalyser(): AnalyserNode | null {
     return this.beatAnalyser;
+  }
+
+  // 获取当前音频 URL（用于离线节拍分析）
+  getCurrentAudioUrl(): string | null {
+    return this.currentAudioUrl;
+  }
+
+  // 获取当前播放时间（直接从 audio 元素读取，比 state 更精确）
+  getCurrentTime(): number {
+    return this.audio?.currentTime || 0;
   }
 
   private startProgressLoop() {
@@ -345,6 +357,7 @@ class PlayerCore {
 
       this.audio.src = url;
       this.audio.load();
+      this.currentAudioUrl = url;
 
       this.audio.onended = () => {
         if (token !== this.trackSwitchToken) return;

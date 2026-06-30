@@ -85,6 +85,9 @@ export function usePlayer() {
     playerCore.setAnalyserReadyHandler(fn);
   }, []);
 
+  const getCurrentAudioUrl = useCallback(() => playerCore.getCurrentAudioUrl(), []);
+  const getCurrentTime = useCallback(() => playerCore.getCurrentTime(), []);
+
   const setServerPort = useCallback((port: number) => {
     playerCore.setServerPort(port);
   }, []);
@@ -114,6 +117,8 @@ export function usePlayer() {
     clearQueue,
     getAnalyser,
     setAnalyserReadyHandler,
+    getCurrentAudioUrl,
+    getCurrentTime,
     setServerPort,
     isLiked,
     toggleLike,
