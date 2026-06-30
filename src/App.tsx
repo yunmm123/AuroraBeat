@@ -18,11 +18,11 @@ const QUALITY_OPTIONS = [
 const QUALITY_LABELS: Record<string, string> = { standard: '标准', exhigh: '极高', lossless: '无损', hires: 'Hi-Res' };
 
 const PRESETS: { id: Preset; name: string; icon: string }[] = [
-  { id: 'silk', name: '丝绸', icon: '≈' },
-  { id: 'tunnel', name: '隧道', icon: '◎' },
-  { id: 'orbit', name: '星球', icon: '◉' },
-  { id: 'void', name: '虚空', icon: '◇' },
-  { id: 'nebula', name: '星云', icon: '✶' },
+  { id: 'silk', name: '流光', icon: '~' },
+  { id: 'tunnel', name: '星河', icon: '✧' },
+  { id: 'orbit', name: '星系', icon: '◉' },
+  { id: 'void', name: '深海', icon: '◈' },
+  { id: 'nebula', name: '绽放', icon: '✺' },
   { id: 'wallpulse', name: '极光', icon: '✦' },
 ];
 
@@ -140,12 +140,18 @@ function useVisualEngine(
       uIntensity: { value: intensity },
       uPreset: { value: 0 },
       uTintColor: { value: new THREE.Color('#9db8cf') },
+      // 鼠标交互 uniform（世界坐标 + 速度 + 按下状态）
+      uMouse: { value: new THREE.Vector2(0, 0) },
+      uMouseVel: { value: new THREE.Vector2(0, 0) },
+      uMouseDown: { value: 0 },
     };
 
     const vertexShader = `
       uniform float uTime, uBass, uMid, uTreble, uBeat, uEnergy, uPixel, uAlpha, uIntensity, uPreset;
       uniform sampler2D uCoverTex, uPrevCoverTex, uEdgeTex, uRippleTex;
       uniform float uHasCover, uHasEdge, uColorMixT, uRippleCount;
+      uniform vec2 uMouse, uMouseVel;
+      uniform float uMouseDown;
       attribute vec2 aUv;
       attribute float aRand;
       varying float vBright;
@@ -159,22 +165,54 @@ function useVisualEngine(
 
       vec2 safeCoverUv(vec2 uv) { return clamp(uv, vec2(0.001), vec2(0.999)); }
 
+      // 哈希噪声（稳定，基于 aRand）
+      float hash21(vec2 p) {
+        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+      }
+      // 2D 值噪声（用于流场）
+      float vnoise(vec2 p) {
+        vec2 i = floor(p), f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        float a = hash21(i);
+        float b = hash21(i + vec2(1.0, 0.0));
+        float c = hash21(i + vec2(0.0, 1.0));
+        float d = hash21(i + vec2(1.0, 1.0));
+        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+      }
+      // 简化 curl 流场方向（用于流光/深海预设）
+      vec2 curlField(vec2 p, float t) {
+        float n1 = vnoise(p * 0.5 + vec2(t * 0.1, 0.0));
+        float n2 = vnoise(p * 0.5 + vec2(0.0, t * 0.1) + 10.0);
+        // 旋度：旋转梯度 90 度，得到无散度流场
+        return vec2(n2 - 0.5, -(n1 - 0.5)) * 2.0;
+      }
+
       // 联觉配色：低频→深海蓝绿(冷)，高频→暖金粉(暖)，中频过渡
       // 应用 60-30-10 规则：主色暗冷调，副色封面色，点缀色节拍暖光
       vec3 synestheticColor(float bass, float mid, float treble, vec3 coverCol, float hasCover) {
-        // 深海基底（60%）：低饱和冷调，画面不刺眼
         vec3 deepOcean = vec3(0.04, 0.18, 0.28);
-        // 中频过渡（30%）：青蓝
         vec3 midTone = vec3(0.10, 0.55, 0.72);
-        // 高频暖光（10%）：金粉点缀
         vec3 warmHigh = vec3(1.0, 0.62, 0.38);
         vec3 audio = mix(deepOcean, midTone, smoothstep(0.0, 0.5, mid));
         audio = mix(audio, warmHigh, smoothstep(0.3, 0.8, treble) * 0.55);
-        // 封面色融合（保持音乐身份感）
         vec3 blended = mix(audio, coverCol, hasCover * 0.45);
-        // 节拍瞬间注入暖光，制造"心跳"感
         blended += warmHigh * uBeat * 0.18;
         return blended;
+      }
+
+      // 鼠标排斥力：粒子被鼠标推开（按下时变吸引）
+      // mpos=粒子世界xy，返回 xy 偏移
+      vec2 mouseForce(vec2 mpos) {
+        vec2 toMouse = mpos - uMouse;
+        float md = length(toMouse);
+        float radius = 1.6;
+        if (md > radius || md < 0.001) return vec2(0.0);
+        float falloff = 1.0 - md / radius;
+        falloff = falloff * falloff;
+        vec2 dir = toMouse / md;
+        // 默认排斥；按下时吸引
+        float sign = uMouseDown > 0.5 ? -1.0 : 1.0;
+        return dir * falloff * 0.9 * sign;
       }
 
       void main() {
@@ -198,119 +236,176 @@ function useVisualEngine(
         // 封面深度/边缘纹理（Mineradio同款启发式 depth+edge）
         vec4 edge = texture2D(uEdgeTex, cuv);
         float depthVal = edge.r;
-        float edgeVal = edge.g;
 
         int preset = int(uPreset + 0.5);
 
         // 涟漪系统（Mineradio同款，循环采样涟漪纹理）
         float rippleZ = 0.0;
+        vec2 rippleXY = vec2(0.0);
         for (int ri = 0; ri < 8; ri++) {
           if (float(ri) >= uRippleCount) break;
           vec4 rp = texture2D(uRippleTex, vec2((float(ri) + 0.5) / 8.0, 0.5));
           float rAge = rp.z;
           float rStr = rp.w * exp(-rAge * 2.0);
           if (rStr < 0.01) continue;
-          float rdx = aUv.x - rp.x;
-          float rdy = aUv.y - rp.y;
+          // uv 空间距离 → 世界距离（缩放）
+          float rdx = (aUv.x - rp.x) * 4.8;
+          float rdy = (aUv.y - rp.y) * 4.8;
           float rDist = sqrt(rdx * rdx + rdy * rdy);
-          float rRing = exp(-pow((rDist - rAge * 0.35) * 12.0, 2.0));
-          float rBulge = exp(-rDist * 6.0) * (1.0 - smoothstep(0.0, 0.3, rAge));
-          rippleZ += (rRing * 0.8 + rBulge * 0.4) * rStr;
+          float rRing = exp(-pow((rDist - rAge * 1.6) * 2.5, 2.0));
+          float rBulge = exp(-rDist * 1.5) * (1.0 - smoothstep(0.0, 0.6, rAge));
+          float amp = (rRing * 0.7 + rBulge * 0.4) * rStr;
+          rippleZ += amp;
+          // 涟漪环的切向位移（水平方向推开）
+          if (rDist > 0.01) {
+            vec2 rdir = vec2(rdx, rdy) / rDist;
+            rippleXY += rdir * rRing * rStr * 0.5;
+          }
         }
 
         // 默认应用联觉配色
         vColor = synestheticColor(uBass, uMid, uTreble, coverCol, uHasCover);
 
         if (preset == 0) {
-          // SILK 丝绸 — 流动的丝绸平面，多层正弦叠加，封面深度凸起
-          // 大幅度低频驱动主波，中频叠加细密涟漪，高频添加微抖动
-          float bassWave = sin(pos.x * 1.6 + t * 0.55) * cos(pos.y * 1.4 + t * 0.42) * uBass * 1.4;
-          float midWave = sin(pos.x * 3.6 + t * 1.1) * cos(pos.y * 3.2 + t * 0.85) * uMid * 0.55;
-          float trebleRipple = sin(pos.x * 7.5 + t * 1.9) * cos(pos.y * 6.8 + t * 1.5) * uTreble * 0.22;
-          // 封面深度：中心凸起，营造3D丝绸覆盖感
-          float depthBoost = (depthVal - 0.5) * uHasEdge * 1.4;
-          // 缓慢呼吸漂移，避免静止
-          float breathe = sin(t * 0.28 + r1 * 6.28) * uBass * 0.12;
-          pos.z = bassWave + midWave + trebleRipple + depthBoost + breathe + rippleZ * 1.6;
+          // === SILK 流光 === Curl Noise 流体场，粒子沿无散度流场漂移
+          // 鼠标移动注入额外流速，形成"搅动液体"质感
+          vec2 worldUv = pos.xy;
+          vec2 flow = curlField(worldUv * 0.6, t);
+          // 低频驱动流速，高频添加湍流
+          flow *= 0.6 + uBass * 1.5;
+          flow += curlField(worldUv * 1.8, t * 1.7) * uTreble * 0.4;
+          // 鼠标速度直接注入流场（搅动）
+          flow += uMouseVel * 2.5;
+          // 缓慢累积位移（基于稳定 aRand 错相位，避免整体平移）
+          pos.x += flow.x * (0.3 + r1 * 0.7);
+          pos.y += flow.y * (0.3 + r2 * 0.7);
+          // z 方向波浪 + 封面深度
+          float depthBoost = (depthVal - 0.5) * uHasEdge * 1.2;
+          pos.z = sin(pos.x * 1.5 + t * 0.6) * cos(pos.y * 1.3 + t * 0.5) * uBass * 1.1
+                + depthBoost + rippleZ * 1.3;
+          // 鼠标排斥力
+          vec2 mf = mouseForce(pos.xy);
+          pos.x += mf.x; pos.y += mf.y;
+          // 鼠标附近高亮
+          float mouseGlow = exp(-length(pos.xy - uMouse) * 0.8);
+          vBright *= 1.0 + mouseGlow * 0.6;
+          vColor = mix(vColor, vColor + vec3(0.3, 0.5, 0.6), mouseGlow * 0.5);
           vDepth = clamp(pos.z * 0.3 + 0.5, 0.0, 1.0);
         } else if (preset == 1) {
-          // TUNNEL 隧道 — 优雅圆柱隧道，粒子沿管道流动穿越
-          float spin = t * 0.10;
-          float angle = aUv.x * 2.0 * PI + spin;
-          // 沿z方向流动，节奏驱动速度
-          float flow = fract(aUv.y + t * (0.04 + uEnergy * 0.06) + r1 * 0.08);
-          float zPos = (flow - 0.5) * 11.0;
-          // 半径随低频呼吸，节拍扩张
-          float radius = 2.6 + uBass * 0.55 + sin(t * 0.6 + r1 * 4.0) * 0.08;
+          // === TUNNEL 星河 === 沿 z 轴流动的星河粒子，鼠标控制偏转方向
+          // 粒子从远端流向近端，鼠标位置改变流场中心，形成"穿越星河"
+          float flow = fract(aUv.y + t * (0.05 + uEnergy * 0.08) + r1 * 0.1);
+          float zPos = (flow - 0.5) * 12.0;
+          // 螺旋角，鼠标 x 偏移控制扭转
+          float angle = aUv.x * PI * 2.0 + t * 0.15 + uMouse.x * 0.8;
+          // 半径：低频呼吸 + 随机分层（星河有粗细）
+          float radius = (1.5 + r1 * 2.5) * (1.0 + uBass * 0.4);
+          // 鼠标 y 控制半径整体偏移（上下推动星河粗细）
+          radius *= 1.0 + uMouse.y * 0.3;
           pos.x = cos(angle) * radius;
           pos.y = sin(angle) * radius;
           pos.z = zPos;
-          // 近端粒子更亮，远端淡出，营造纵深
-          float depthFade = smoothstep(0.0, 0.4, flow) * smoothstep(1.0, 0.6, flow);
+          // 近端亮、远端淡，营造纵深
+          float depthFade = smoothstep(0.0, 0.35, flow) * smoothstep(1.0, 0.55, flow);
           vAlpha = depthFade;
+          // 鼠标附近粒子加亮（"擦过"星河）
+          float mouseGlow = exp(-length(pos.xy - uMouse) * 0.6);
+          vBright *= 1.0 + mouseGlow * 0.8;
           vDepth = flow;
         } else if (preset == 2) {
-          // ORBIT 星球 — 球面粒子壳，低频呼吸膨胀，高频闪烁
-          float theta = aUv.x * PI * 2.0 + t * 0.07;
-          float phi = aUv.y * PI;
-          float baseR = 2.4;
-          // 节拍呼吸：球体整体随低频脉动
-          float breathe = uBass * 0.65 + sin(t * 0.5) * 0.04;
-          // 高频表面闪烁，模拟大气扰动
-          float surfaceFlare = sin(t * 2.5 + r1 * 12.0) * uTreble * 0.22;
-          float r = baseR * (1.0 + breathe) + surfaceFlare;
-          pos.x = r * sin(phi) * cos(theta);
-          pos.y = r * sin(phi) * sin(theta);
-          pos.z = r * cos(phi) - 2.2;
-          // 封面色作为星球主色，联觉色作为大气光晕
-          vColor = mix(coverCol, vColor, 0.4 * (1.0 - uHasCover * 0.5));
-          vDepth = (phi / PI);
+          // === ORBIT 星系 === 螺旋星系盘，多臂结构，鼠标位置扰动旋臂
+          // 中心明亮，外缘淡出，节拍呼吸膨胀
+          float armCount = 3.0;
+          float armIdx = floor(r1 * armCount);
+          float armAngle = aUv.x * PI * 2.0 + armIdx * (PI * 2.0 / armCount);
+          // 半径分层：内密外疏
+          float radius = 0.3 + aUv.y * 3.2;
+          // 旋臂扭曲：随半径增加扭转，节拍增强
+          float twist = radius * 1.2 + t * 0.08 + uBass * 0.5;
+          // 鼠标 x 扰动旋臂角度（"拨动"星系）
+          twist += (uMouse.x) * radius * 0.8;
+          float a = armAngle + twist;
+          pos.x = cos(a) * radius;
+          pos.y = sin(a) * radius;
+          // 盘厚度：z 方向高斯分布（薄盘）
+          pos.z = (r2 - 0.5) * 0.4 * (1.0 + uBass * 0.5) + sin(t * 0.5 + r1 * 6.0) * 0.05;
+          // 中心核球更亮
+          float coreGlow = exp(-radius * 0.8);
+          vBright *= 0.4 + coreGlow * 1.3;
+          // 封面色染星系
+          vColor = mix(vColor, coverCol, uHasCover * (0.3 + coreGlow * 0.4));
+          // 鼠标排斥力（拨开星系）
+          vec2 mf = mouseForce(pos.xy);
+          pos.x += mf.x * 1.5; pos.y += mf.y * 1.5;
+          vAlpha = 0.5 + coreGlow * 0.5;
+          vDepth = radius / 3.5;
         } else if (preset == 3) {
-          // VOID 虚空 — 深空星场，多层视差，慢速漂移
-          // 三层深度：近(r3<0.3) 中(0.3-0.6) 远(>0.6)
+          // === VOID 深海 === 水下粒子群，缓慢上浮气泡 + 鼠标产生涡流
+          // 气泡从底部生成上浮，鼠标移动产生涡流扰动
           float layer = r3;
-          float spread = 14.0 + layer * 18.0;
-          // 稳定位置（基于aRand哈希），非每帧随机
-          pos.x = (r1 - 0.5) * spread + sin(t * 0.05 + r1 * 6.0) * 0.3;
-          pos.y = (r2 - 0.5) * spread + cos(t * 0.04 + r2 * 6.0) * 0.3;
-          pos.z = -(layer * 16.0 + 1.5);
-          // 慢速闪烁，模拟恒星
-          float twinkle = 0.45 + 0.55 * sin(t * (0.6 + r1 * 2.5) + r1 * 18.0);
-          // 远层更暗更小，近层更亮
-          float layerBright = mix(0.9, 0.25, layer);
-          vBright *= twinkle * layerBright * (0.4 + uEnergy * 0.6);
-          vAlpha = smoothstep(0.0, 0.15, 1.0 - layer) * 0.85 + 0.15;
+          float spread = 8.0 + layer * 4.0;
+          // 稳定基础位置
+          float baseX = (r1 - 0.5) * spread;
+          float baseY = (r2 - 0.5) * spread;
+          // 上浮：y 随时间增加，循环重置（气泡感）
+          float rise = mod(t * (0.2 + r1 * 0.4) + r1 * 10.0, 6.0) - 3.0;
+          pos.y = baseY + rise;
+          // 水平摆动（气泡左右晃）
+          pos.x = baseX + sin(t * 0.8 + r1 * 8.0) * 0.3;
+          // z 分层
+          pos.z = -layer * 4.0 - 1.0;
+          // 涡流：鼠标移动产生旋转扰动
+          vec2 toMouse = pos.xy - uMouse;
+          float md = length(toMouse);
+          if (md < 2.5 && md > 0.01) {
+            float falloff = 1.0 - md / 2.5;
+            // 切向力（垂直于到鼠标的方向）= 涡流
+            vec2 tangent = vec2(-toMouse.y, toMouse.x) / md;
+            pos.x += tangent.x * falloff * 0.8 + uMouseVel.x * falloff * 1.5;
+            pos.y += tangent.y * falloff * 0.8 + uMouseVel.y * falloff * 1.5;
+          }
+          // 气泡大小随机，亮度和低频联动
+          float bubble = 0.5 + 0.5 * sin(t * 1.5 + r1 * 10.0);
+          vBright *= (0.4 + bubble * 0.6) * (0.5 + uEnergy * 0.5);
+          vAlpha = 0.3 + (1.0 - layer) * 0.5;
           vDepth = layer;
         } else if (preset == 4) {
-          // NEBULA 星云 — 体积感云团，粒子绕中心螺旋，封面色染云
-          float angle = aUv.x * PI * 2.0 * 3.0 + t * 0.15;
-          float radius = (0.4 + aUv.y * 2.8) * (1.0 + uBass * 0.25);
-          // 螺旋臂结构
-          float armOffset = sin(aUv.y * PI * 4.0 + t * 0.3) * 0.4;
-          pos.x = cos(angle + armOffset) * radius;
-          pos.y = sin(angle + armOffset) * radius;
-          // z方向云团厚度，低频驱动
-          pos.z = (aUv.y - 0.5) * 3.0 + sin(t * 0.4 + r1 * 8.0) * uBass * 0.6 + rippleZ * 0.8;
-          // 云团中心更亮，边缘淡出
-          float coreGlow = 1.0 - smoothstep(0.0, 2.8, radius);
-          vBright *= 0.5 + coreGlow * 0.8;
-          // 封面色染云团，联觉色补光
-          vColor = mix(vColor, coverCol, uHasCover * (0.4 + coreGlow * 0.3));
-          vAlpha = 0.4 + coreGlow * 0.6;
-          vDepth = 1.0 - coreGlow;
+          // === NEBULA 绽放 === 烟花式放射粒子，从中心向外绽放，鼠标位置=绽放中心
+          // 鼠标点击触发额外爆发，节拍驱动绽放速度
+          float angle = aUv.x * PI * 2.0;
+          // 半径随时间脉动（节拍呼吸）
+          float baseR = aUv.y * 3.5;
+          float pulse = sin(t * 0.8 + r1 * 3.0) * 0.3 + uBass * 0.6 + uBeat * 1.2;
+          float radius = baseR * (1.0 + pulse * 0.4);
+          // 鼠标作为绽放中心
+          vec2 center = uMouse * 1.2;
+          pos.x = center.x + cos(angle) * radius;
+          pos.y = center.y + sin(angle) * radius;
+          // z 方向厚度
+          pos.z = (r2 - 0.5) * 0.5 + sin(t * 0.6 + r1 * 6.0) * uBass * 0.3;
+          // 内圈亮，外圈淡
+          float coreGlow = 1.0 - smoothstep(0.0, 3.5, radius);
+          vBright *= 0.5 + coreGlow * 1.2;
+          // 节拍时颜色变暖
+          vColor = mix(vColor, vec3(1.0, 0.7, 0.4), uBeat * 0.5);
+          vColor = mix(vColor, coverCol, uHasCover * (0.3 + coreGlow * 0.4));
+          vAlpha = 0.3 + coreGlow * 0.7;
+          vDepth = radius / 3.5;
         } else {
-          // WALLPULSE 极光 — 水平流动光带，垂直分层
-          float band = sin(aUv.y * 5.0 + t * 0.45) * 0.5 + 0.5;
-          // 极光主波：水平流动 + 垂直调制
-          float aurora = sin(aUv.x * 2.5 + t * 0.28 + band * 2.2) * uBass * 0.9;
-          float aurora2 = cos(aUv.x * 4.0 - t * 0.4 + band * 1.5) * uMid * 0.4;
-          pos.z = aurora + aurora2 + sin(t * 0.35 + r1 * 8.0) * uEnergy * 0.18;
-          // 垂直缓慢漂移
-          pos.y += sin(t * 0.18 + r1 * 5.0) * uMid * 0.25;
+          // === WALLPULSE 极光 === 垂直流动的极光帘幕，鼠标拖动改变波动方向
+          float band = sin(aUv.y * 4.0 + t * 0.4) * 0.5 + 0.5;
+          // 极光主波：水平波动 + 垂直调制，鼠标 x 偏移相位
+          float aurora = sin(aUv.x * 2.5 + t * 0.3 + band * 2.0 + uMouse.x * 3.0) * uBass * 0.9;
+          float aurora2 = cos(aUv.x * 4.0 - t * 0.4 + band * 1.5 + uMouse.y * 2.0) * uMid * 0.4;
+          pos.z = aurora + aurora2 + sin(t * 0.35 + r1 * 8.0) * uEnergy * 0.2;
+          // 鼠标速度推动极光水平流动
+          pos.x += uMouseVel.x * (0.5 + band) * 2.0;
+          pos.y += uMouseVel.y * (0.5 + band) * 2.0;
+          // 涟漪扭曲极光
+          pos.z += rippleZ * 0.6;
           // 极光配色：底部冷绿，顶部紫蓝，封面色点缀
           vec3 auroraCol = mix(vec3(0.0, 0.65, 0.55), vec3(0.35, 0.18, 0.78), aUv.y);
           auroraCol = mix(auroraCol, coverCol, uHasCover * 0.4);
-          // 高频注入顶部暖光
           auroraCol = mix(auroraCol, vec3(1.0, 0.7, 0.45), uTreble * 0.3 * aUv.y);
           vColor = auroraCol;
           vDepth = band;
@@ -319,8 +414,8 @@ function useVisualEngine(
         // 节拍冲击 — 柔和径向脉冲（非抖动），所有预设统一
         float beatKick = uBeat * (0.25 + r2 * 0.35);
         vec2 beatDir = normalize(aUv - 0.5 + vec2(0.001));
-        pos.x += beatDir.x * beatKick * 0.6;
-        pos.y += beatDir.y * beatKick * 0.6;
+        pos.x += beatDir.x * beatKick * 0.4;
+        pos.y += beatDir.y * beatKick * 0.4;
 
         // 边缘能量增强（克制，避免溢出）
         float edgeDist = length(aUv - 0.5);
@@ -424,6 +519,21 @@ function useVisualEngine(
     let beatCooldown = 0;
     // 电影级缓慢相机漂移（替代抖动），呼吸感而非晃动
     let camDriftX = 0, camDriftY = 0;
+    // 鼠标追踪状态（屏幕像素坐标 + 平滑速度）
+    let mouseTargetX = window.innerWidth / 2;
+    let mouseTargetY = window.innerHeight / 2;
+    let smoothMouseVx = 0, smoothMouseVy = 0;
+
+    // 全局鼠标事件：更新目标位置 + 按下状态
+    const onMouseMove = (e: PointerEvent) => {
+      mouseTargetX = e.clientX;
+      mouseTargetY = e.clientY;
+    };
+    const onMouseDown = () => { uniforms.uMouseDown.value = 1; };
+    const onMouseUp = () => { uniforms.uMouseDown.value = 0; };
+    window.addEventListener('pointermove', onMouseMove);
+    window.addEventListener('pointerdown', onMouseDown);
+    window.addEventListener('pointerup', onMouseUp);
 
     // 触发一次涟漪（点击或强节拍）。u=0.5,v=0.5 为画面中心
     const triggerRipple = (u: number, v: number, str: number) => {
@@ -517,18 +627,33 @@ function useVisualEngine(
       }
       rippleTex.needsUpdate = true;
 
-      // 缓慢整体旋转，营造流体感（克制速度，避免眩晕）
-      particles.rotation.y += dt * 0.04;
-      particles.rotation.x += dt * 0.015;
-      bloomParticles.rotation.copy(particles.rotation);
+      // 鼠标平滑追踪 + 速度计算（用于 shader 中的鼠标交互力）
+      // 目标：鼠标在屏幕上的位置映射到世界坐标（z=0 平面，约 ±2.4 范围）
+      const targetMx = (mouseTargetX / window.innerWidth) * 2.0 - 1.0;
+      const targetMy = -((mouseTargetY / window.innerHeight) * 2.0 - 1.0);
+      const prevMx = uniforms.uMouse.value.x;
+      const prevMy = uniforms.uMouse.value.y;
+      // 平滑跟随，避免抖动
+      const mouseLerp = Math.min(1, dt * 8);
+      const newMx = prevMx + (targetMx * 2.4 - prevMx) * mouseLerp;
+      const newMy = prevMy + (targetMy * 2.4 - prevMy) * mouseLerp;
+      uniforms.uMouse.value.set(newMx, newMy);
+      // 速度 = 位置差 / dt（归一化），用于流场注入
+      const vx = (newMx - prevMx) / Math.max(dt, 0.001);
+      const vy = (newMy - prevMy) / Math.max(dt, 0.001);
+      // 限幅 + 平滑
+      smoothMouseVx = smoothMouseVx * 0.7 + Math.max(-3, Math.min(3, vx)) * 0.3;
+      smoothMouseVy = smoothMouseVy * 0.7 + Math.max(-3, Math.min(3, vy)) * 0.3;
+      uniforms.uMouseVel.value.set(smoothMouseVx, smoothMouseVy);
 
-      // 电影级相机漂移：极慢正弦摆动 + 节拍微推（非抖动）
-      const driftTargetX = Math.sin(now * 0.00012) * 0.35 + beatPulse * 0.12;
-      const driftTargetY = Math.cos(now * 0.00009) * 0.25 + beatPulse * 0.08;
+      // 电影级相机漂移：缓慢跟随鼠标（视差感），+ 节拍微推
+      const driftTargetX = uniforms.uMouse.value.x * 0.25 + Math.sin(now * 0.0001) * 0.15 + beatPulse * 0.1;
+      const driftTargetY = uniforms.uMouse.value.y * 0.18 + Math.cos(now * 0.00008) * 0.1 + beatPulse * 0.06;
       camDriftX += (driftTargetX - camDriftX) * Math.min(1, dt * 1.5);
       camDriftY += (driftTargetY - camDriftY) * Math.min(1, dt * 1.5);
       camera.position.x = camDriftX;
       camera.position.y = camDriftY;
+      camera.position.z = 6.2 - beatPulse * 0.4;
 
       camera.lookAt(0, 0, 0);
       renderer.render(scene, camera);
@@ -643,6 +768,9 @@ function useVisualEngine(
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', onResize);
+      window.removeEventListener('pointermove', onMouseMove);
+      window.removeEventListener('pointerdown', onMouseDown);
+      window.removeEventListener('pointerup', onMouseUp);
       geo.dispose(); material.dispose(); bloomMaterial.dispose();
       coverTex.dispose(); dotTexture.dispose();
       prevCoverTex.dispose(); edgeTex.dispose(); rippleTex.dispose();
