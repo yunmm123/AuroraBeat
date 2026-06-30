@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut, s
 import path from 'path'
 import * as kugouHandler from './kugouHandler'
 import { registerNeteaseHandlers } from './neteaseHandler'
+import { loadAuthData, saveKugouAuth, saveNeteaseAuth } from './authPersistence'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -109,6 +110,13 @@ app.whenReady().then(async () => {
   // Netease Cloud Music API
   registerNeteaseHandlers()
   console.log('[NeteaseAPI] Ready')
+  
+  // Load persisted auth data and send to renderer
+  const authData = loadAuthData()
+  if (authData.kugou || authData.netease) {
+    mainWindow?.webContents.send('auth:restored', authData)
+    console.log('[Auth] Restored auth data:', authData.kugou ? 'Kugou' : '', authData.netease ? 'Netease' : '')
+  }
   
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -396,4 +404,15 @@ ipcMain.handle('kg:searchComplex', async (_e, keyword: string, page = 1) => {
 })
 ipcMain.handle('kg:songClimax', async (_e, hash: string) => {
   return kugouHandler.kgSongClimax(hash)
+})
+
+// ============ Auth Persistence ============
+ipcMain.handle('auth:saveKugou', async (_e, uid: string, token: string, nickname: string) => {
+  saveKugouAuth(uid, token, nickname)
+  return true
+})
+
+ipcMain.handle('auth:saveNetease', async (_e, userId: string, nickname: string, avatarUrl: string) => {
+  saveNeteaseAuth(userId, nickname, avatarUrl)
+  return true
 })

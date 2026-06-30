@@ -1,9 +1,52 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Music } from 'lucide-react'
+import { X, Music, Play } from 'lucide-react'
 import { usePlayerStore } from '@/store/playerStore'
 
 export default function QueuePanel() {
   const { showQueue, toggleQueue, queue, queueIndex, currentSong } = usePlayerStore()
+  
+  const handlePlaySong = (index: number) => {
+    const song = queue[index]
+    if (!song) return
+    
+    const { playSong } = usePlayerStore.getState()
+    // If the song has no URL, we need to pass the full queue
+    // and the store will resolve the URL via the effect chain
+    if (song.url || song.source === 'local') {
+      usePlayerStore.setState({
+        currentSong: song,
+        queueIndex: index,
+        isPlaying: true,
+        currentTime: 0,
+        lyrics: [],
+        lyricsLoading: true,
+      })
+      // Load lyrics for the selected song
+      const trackName = song.title.replace(/\.[^.]+$/, '')
+      const artistName = song.artist !== '未知艺术家' ? song.artist : ''
+      const songHash = (song as any).hash || ''
+      // Trigger lyrics loading
+      const { loadLyricsForSong } = usePlayerStore.getState() as any
+      if (typeof loadLyricsForSong === 'function') {
+        loadLyricsForSong(trackName, artistName, song.duration, songHash)
+      }
+    } else {
+      // For cloud songs without URL, set the song and let the resolveSongUrl handle it
+      usePlayerStore.setState({
+        currentSong: song,
+        queueIndex: index,
+        isPlaying: true,
+        currentTime: 0,
+        lyrics: [],
+        lyricsLoading: true,
+      })
+      // Trigger URL resolution
+      const { resolveSongUrl } = (usePlayerStore as any).getState?.()
+      if (typeof resolveSongUrl === 'function') {
+        resolveSongUrl(song, index)
+      }
+    }
+  }
   
   if (!showQueue) return null
   
@@ -37,6 +80,7 @@ export default function QueuePanel() {
               initial={{ x: 20, opacity: 0 }}
               animate={{ x: 0, opacity: 1 }}
               transition={{ delay: index * 0.02 }}
+              onClick={() => handlePlaySong(index)}
               className={`p-2 rounded-xl cursor-pointer transition-all ${
                 index === queueIndex
                   ? 'bg-gradient-to-r from-purple-500/20 to-pink-500/10'

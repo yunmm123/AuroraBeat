@@ -33,6 +33,11 @@ declare global {
         artistTopSongs: (artistId: string) => Promise<{ ok: boolean; songs: any[] }>
         songDetail: (ids: string[]) => Promise<{ ok: boolean; songs: any[] }>
       }
+      auth: {
+        saveKugou: (uid: string, token: string, nickname: string) => Promise<boolean>
+        saveNetease: (userId: string, nickname: string, avatarUrl: string) => Promise<boolean>
+      }
+      onAuthRestored: (callback: (data: any) => void) => void
       onKugouReady: (callback: () => void) => void
       onPlaybackToggle: (callback: () => void) => void
       onPlaybackNext: (callback: () => void) => void

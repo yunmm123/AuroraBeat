@@ -182,63 +182,35 @@ function isPureMusic(trackName: string, artistName: string): boolean {
   return keywords.some(k => combined.includes(k))
 }
 
-// Resolve the actual play URL for cloud songs (kugou/netease) when they
-// are navigated to via prev/next. Only cloud songs in the queue don't have URL yet.
-async function resolveSongUrl(song: Song, queueIndex: number) {
-  // For kugou songs: use hash / albumId / albumAudioId to get URL
+// Resolve the actual play URL for cloud songs. Returns the URL string or empty string.
+// Used by nextSong/prevSong to resolve URL before setting state.
+async function resolveSongUrlSync(song: Song): Promise<string> {
   if (song.source === 'kugou') {
     const hash = (song as any).hash
     const albumId = (song as any).albumId
     const albumAudioId = (song as any).albumAudioId
     if (hash) {
       try {
-        const urlRes = await window.electronAPI?.kugou?.invoke(
-          'kg:songUrl',
-          hash,
-          albumId,
-          albumAudioId
-        )
+        const urlRes = await window.electronAPI?.kugou?.invoke('kg:songUrl', hash, albumId, albumAudioId)
         let playUrl = ''
-        if (urlRes?.play_url) {
-          playUrl = urlRes.play_url
-        } else if (urlRes?.data?.play_url) {
-          playUrl = urlRes.data.play_url
-        } else if (Array.isArray(urlRes?.url) && urlRes.url.length > 0) {
-          playUrl = urlRes.url[0]
-        }
-        if (playUrl) {
-          const state = usePlayerStore.getState()
-          const updatedQueue = [...state.queue]
-          updatedQueue[queueIndex] = { ...updatedQueue[queueIndex], url: playUrl }
-          const updatedSong = { ...song, url: playUrl }
-          usePlayerStore.setState({
-            queue: updatedQueue,
-            currentSong: state.currentSong?.id === song.id ? updatedSong : state.currentSong
-          })
-        }
+        if (urlRes?.play_url) playUrl = urlRes.play_url
+        else if (urlRes?.data?.play_url) playUrl = urlRes.data.play_url
+        else if (Array.isArray(urlRes?.url) && urlRes.url.length > 0) playUrl = urlRes.url[0]
+        if (playUrl) return playUrl
       } catch (e) {
         console.error('Failed to resolve kugou song URL:', e)
       }
     }
   }
-  // For netease songs: resolve the URL
   if (song.source === 'netease') {
     try {
       const urlRes = await window.electronAPI?.netease?.songUrl(song.id, song.quality || 'standard')
-      if (urlRes?.ok && urlRes.url) {
-        const state = usePlayerStore.getState()
-        const updatedQueue = [...state.queue]
-        updatedQueue[queueIndex] = { ...updatedQueue[queueIndex], url: urlRes.url }
-        const updatedSong = { ...song, url: urlRes.url }
-        usePlayerStore.setState({
-          queue: updatedQueue,
-          currentSong: state.currentSong?.id === song.id ? updatedSong : state.currentSong
-        })
-      }
+      if (urlRes?.ok && urlRes.url) return urlRes.url
     } catch (e) {
       console.error('Failed to resolve netease song URL:', e)
     }
   }
+  return ''
 }
 
 async function loadLyricsForSong(trackName: string, artistName: string, duration?: number, hash?: string) {
@@ -376,39 +348,57 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   toggleMute: () => set({ isMuted: !get().isMuted }),
   setPlayMode: (mode) => set({ playMode: mode }),
   setPlaybackRate: (rate) => set({ playbackRate: rate }),
-  nextSong: () => {
+  nextSong: async () => {
     const { queue, queueIndex, playMode } = get()
     if (queue.length === 0) return
     let nextIndex = queueIndex
     if (playMode === 'shuffle') {
       nextIndex = Math.floor(Math.random() * queue.length)
     } else if (playMode === 'single') {
-      // single mode: replay same song, don't change index
       set({ currentTime: 0 })
       return
     } else {
       nextIndex = (queueIndex + 1) % queue.length
     }
-    const nextSong = queue[nextIndex]
-    set({ queueIndex: nextIndex, currentSong: nextSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
-    // Resolve URL for kugou/netease songs that don't have URL yet
+    let nextSong = queue[nextIndex]
+    
+    // Resolve URL before setting state to avoid race conditions
     if (!nextSong.url && (nextSong.source === 'kugou' || nextSong.source === 'netease')) {
-      resolveSongUrl(nextSong, nextIndex)
+      const resolvedUrl = await resolveSongUrlSync(nextSong)
+      if (resolvedUrl) {
+        nextSong = { ...nextSong, url: resolvedUrl }
+        const updatedQueue = [...queue]
+        updatedQueue[nextIndex] = nextSong
+        set({ queue: updatedQueue })
+      }
     }
+    
+    set({ queueIndex: nextIndex, currentSong: nextSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
+    
     const trackName = nextSong.title.replace(/\.[^.]+$/, '')
     const artistName = nextSong.artist !== '未知艺术家' ? nextSong.artist : ''
     const songHash = (nextSong as any).hash || ''
     loadLyricsForSong(trackName, artistName, nextSong.duration, songHash)
   },
-  prevSong: () => {
+  prevSong: async () => {
     const { queue, queueIndex } = get()
     if (queue.length === 0) return
     const prevIndex = queueIndex === 0 ? queue.length - 1 : queueIndex - 1
-    const prevSong = queue[prevIndex]
-    set({ queueIndex: prevIndex, currentSong: prevSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
+    let prevSong = queue[prevIndex]
+    
+    // Resolve URL before setting state to avoid race conditions
     if (!prevSong.url && (prevSong.source === 'kugou' || prevSong.source === 'netease')) {
-      resolveSongUrl(prevSong, prevIndex)
+      const resolvedUrl = await resolveSongUrlSync(prevSong)
+      if (resolvedUrl) {
+        prevSong = { ...prevSong, url: resolvedUrl }
+        const updatedQueue = [...queue]
+        updatedQueue[prevIndex] = prevSong
+        set({ queue: updatedQueue })
+      }
     }
+    
+    set({ queueIndex: prevIndex, currentSong: prevSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
+    
     const trackName = prevSong.title.replace(/\.[^.]+$/, '')
     const artistName = prevSong.artist !== '未知艺术家' ? prevSong.artist : ''
     const songHash = (prevSong as any).hash || ''

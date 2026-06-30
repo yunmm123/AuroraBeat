@@ -93,6 +93,12 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
       const res = await window.electronAPI?.netease?.loginStatus()
       if (res?.ok && res.loggedIn && res.user) {
         setUserInfo(res.user)
+        // Save auth data for persistence
+        window.electronAPI?.auth?.saveNetease(
+          res.user.userId,
+          res.user.nickname,
+          res.user.avatarUrl
+        )
       }
     } catch {
       // ignore
@@ -328,7 +334,7 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         className="fixed inset-0 z-50 flex items-center justify-center"
-        style={{ background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(15px)' }}
+        style={{ background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(16px)' }}
         onClick={onClose}
       >
         <motion.div
@@ -339,25 +345,26 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
           onClick={(e) => e.stopPropagation()}
           className="w-[900px] h-[650px] rounded-2xl flex flex-col overflow-hidden relative"
           style={{
-            background: 'linear-gradient(135deg, rgba(20,20,40,0.95), rgba(15,15,30,0.98))',
-            border: '1px solid rgba(255,255,255,0.12)',
-            boxShadow: '0 30px 80px rgba(0,0,0,0.6), 0 0 120px rgba(236,65,65,0.08), inset 0 1px 0 rgba(255,255,255,0.05)',
+            background: 'linear-gradient(145deg, rgba(26,26,46,0.97) 0%, rgba(22,33,62,0.98) 40%, rgba(15,15,35,0.99) 100%)',
+            border: '1px solid rgba(255,255,255,0.1)',
+            boxShadow: '0 30px 80px rgba(0,0,0,0.7), 0 0 150px rgba(236,65,65,0.12), 0 0 60px rgba(236,65,65,0.06), inset 0 1px 0 rgba(255,255,255,0.04)',
           }}
         >
           {/* Ambient glow decorations */}
-          <div className="absolute -top-20 -left-20 w-60 h-60 rounded-full blur-3xl opacity-20 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(236,65,65,0.5), transparent)' }} />
-          <div className="absolute -bottom-20 -right-20 w-60 h-60 rounded-full blur-3xl opacity-15 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(236,65,65,0.4), transparent)' }} />
+          <div className="absolute -top-20 -left-20 w-72 h-72 rounded-full blur-3xl opacity-25 pointer-events-none animate-pulse" style={{ background: 'radial-gradient(circle, rgba(236,65,65,0.4), transparent 70%)', animationDuration: '4s' }} />
+          <div className="absolute top-1/3 -right-16 w-64 h-64 rounded-full blur-3xl opacity-20 pointer-events-none animate-pulse" style={{ background: 'radial-gradient(circle, rgba(236,72,153,0.35), transparent 70%)', animationDuration: '5s', animationDelay: '1s' }} />
+          <div className="absolute -bottom-16 left-1/4 w-56 h-56 rounded-full blur-3xl opacity-15 pointer-events-none animate-pulse" style={{ background: 'radial-gradient(circle, rgba(236,65,65,0.3), transparent 70%)', animationDuration: '6s', animationDelay: '2s' }} />
           {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+          <div className="flex items-center justify-between px-6 py-4 flex-shrink-0 relative z-10" style={{ background: 'linear-gradient(180deg, rgba(236,65,65,0.15), rgba(236,65,65,0.04), rgba(15,15,30,0))', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #ec4141, #c62f2f)' }}>
+                <div className="w-9 h-9 rounded-xl flex items-center justify-center shadow-lg" style={{ background: 'linear-gradient(135deg, #ec4141, #e83030, #c62f2f)', boxShadow: '0 4px 25px rgba(236,65,65,0.5), 0 0 30px rgba(236,65,65,0.2)' }}>
                   <Music size={18} className="text-white" />
                 </div>
-                <span className="text-white font-semibold text-lg">网易云音乐</span>
+                <span className="text-white font-semibold text-lg tracking-tight">网易云音乐</span>
               </div>
               {/* Tabs */}
-              <div className="flex items-center gap-1 ml-6 p-1 rounded-lg" style={{ background: 'rgba(255,255,255,0.06)' }}>
+              <div className="flex items-center gap-1 ml-6 p-1 rounded-lg relative" style={{ background: 'rgba(255,255,255,0.05)' }}>
                 {[
                   { key: 'discover' as TabType, label: '发现', icon: Disc3 },
                   { key: 'search' as TabType, label: '搜索', icon: Search },
@@ -366,15 +373,23 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                   <button
                     key={key}
                     onClick={() => setActiveTab(key)}
-                    className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-sm transition-all ${
+                    className={`flex items-center gap-2 px-4 py-1.5 rounded-md text-sm transition-all duration-300 relative ${
                       activeTab === key
                         ? 'text-white'
-                        : 'text-white/50 hover:text-white/80'
+                        : 'text-white/40 hover:text-white/70'
                     }`}
-                    style={activeTab === key ? { background: 'rgba(236,65,65,0.3)' } : {}}
+                    style={activeTab === key ? { background: 'rgba(236,65,65,0.25)' } : {}}
                   >
                     <Icon size={14} />
                     {label}
+                    {activeTab === key && (
+                      <motion.div
+                        layoutId="neteaseActiveTab"
+                        className="absolute bottom-0 left-1 right-1 h-0.5 rounded-full"
+                        style={{ background: 'linear-gradient(90deg, #ec4141, #f472b6)', boxShadow: '0 0 10px rgba(236,65,65,0.5)' }}
+                        transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                      />
+                    )}
                   </button>
                 ))}
               </div>
@@ -388,23 +403,23 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
               ) : (
                 <button
                   onClick={startQrLogin}
-                  className="flex items-center gap-2 px-4 py-1.5 rounded-lg text-white text-sm transition-all hover:opacity-80"
-                  style={{ background: 'linear-gradient(135deg, #ec4141, #c62f2f)' }}
+                  className="flex items-center gap-2 px-4 py-1.5 rounded-lg text-white text-sm transition-all duration-200 hover:scale-105 hover:shadow-xl active:scale-95"
+                  style={{ background: 'linear-gradient(135deg, #ec4141, #e83030)', boxShadow: '0 4px 20px rgba(236,65,65,0.4)' }}
                 >
                   <LogIn size={14} />
                   登录
                 </button>
               )}
-              <button onClick={onClose} className="w-8 h-8 rounded-lg flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-colors">
+              <button onClick={onClose} className="w-9 h-9 rounded-lg flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 transition-all duration-200">
                 <X size={18} />
               </button>
             </div>
           </div>
 
           {/* Content */}
-          <div className="flex-1 overflow-y-auto px-6 py-4" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.2) transparent' }}>
+          <div className="flex-1 overflow-y-auto px-6 py-4" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(236,65,65,0.3) transparent' }}>
             {playErrorMsg && (
-              <div className="mb-4 px-4 py-2 rounded-lg text-white text-sm" style={{ background: 'rgba(239,68,68,0.2)', border: '1px solid rgba(239,68,68,0.3)' }}>
+              <div className="mb-4 px-4 py-2.5 rounded-xl text-white text-sm shadow-lg backdrop-blur-md" style={{ background: 'rgba(239,68,68,0.85)', border: '1px solid rgba(239,68,68,0.3)' }}>
                 {playErrorMsg}
               </div>
             )}
@@ -421,15 +436,15 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                       onChange={(e) => setSearchQuery(e.target.value)}
                       onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                       placeholder="搜索歌曲、歌手..."
-                      className="w-full pl-10 pr-4 py-2.5 rounded-xl text-white text-sm outline-none"
-                      style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}
+                      className="w-full pl-10 pr-4 py-2.5 rounded-xl text-white text-sm outline-none transition-all duration-300"
+                      style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.3)' }}
                     />
                   </div>
                   <button
                     onClick={handleSearch}
                     disabled={searchLoading}
-                    className="px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-all hover:opacity-80 disabled:opacity-50"
-                    style={{ background: 'linear-gradient(135deg, #ec4141, #c62f2f)' }}
+                    className="px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-all duration-200 hover:scale-105 hover:shadow-xl active:scale-95 disabled:opacity-50"
+                    style={{ background: 'linear-gradient(135deg, #ec4141, #e83030)', boxShadow: '0 4px 20px rgba(236,65,65,0.4)' }}
                   >
                     {searchLoading ? <Loader2 size={16} className="animate-spin" /> : '搜索'}
                   </button>
@@ -441,18 +456,34 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                       <div
                         key={song.id}
                         onClick={() => handlePlaySong(song)}
-                        className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors"
-                        style={{ background: playingId === song.id ? 'rgba(236,65,65,0.15)' : 'transparent' }}
-                        onMouseEnter={(e) => {(e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)' }}
-                        onMouseLeave={(e) => {(e.currentTarget as HTMLElement).style.background = playingId === song.id ? 'rgba(236,65,65,0.15)' : 'transparent' }}
+                        className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer group"
+                        style={{ 
+                          background: playingId === song.id ? 'rgba(236,65,65,0.15)' : 'transparent',
+                          borderLeft: playingId === song.id ? '3px solid #ec4141' : '3px solid transparent',
+                          transition: 'all 0.25s ease',
+                        }}
+                        onMouseEnter={(e) => {
+                          if (playingId !== song.id) {
+                            (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)'
+                            ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid #ec4141'
+                            ;(e.currentTarget as HTMLElement).style.backdropFilter = 'blur(8px)'
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (playingId !== song.id) {
+                            (e.currentTarget as HTMLElement).style.background = 'transparent'
+                            ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid transparent'
+                            ;(e.currentTarget as HTMLElement).style.backdropFilter = 'none'
+                          }
+                        }}
                       >
-                        <span className="w-6 text-center text-white/40 text-sm">{i + 1}</span>
+                        <span className="w-6 text-center text-white/30 text-sm">{i + 1}</span>
                         <img src={song.cover} alt="" className="w-10 h-10 rounded-lg object-cover" />
                         <div className="flex-1 min-w-0">
                           <div className="text-white text-sm font-medium truncate">{song.title}</div>
-                          <div className="text-white/50 text-xs truncate">{song.artist}</div>
+                          <div className="text-white/35 text-xs truncate">{song.artist}</div>
                         </div>
-                        <span className="text-white/30 text-xs">{formatDuration(song.duration)}</span>
+                        <span className="text-white/25 text-xs">{formatDuration(song.duration)}</span>
                       </div>
                     ))}
                   </div>
@@ -491,8 +522,8 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                                 playSong(songs[0], songs)
                               }
                             }}
-                            className="flex items-center gap-1 px-3 py-1 rounded-lg text-white/70 text-xs hover:text-white transition-colors"
-                            style={{ background: 'rgba(255,255,255,0.06)' }}
+                            className="flex items-center gap-1 px-3 py-1 rounded-lg text-white text-xs font-medium transition-all duration-200 hover:scale-105 hover:shadow-lg"
+                            style={{ background: 'linear-gradient(135deg, #ec4141, #e83030)', boxShadow: '0 2px 12px rgba(236,65,65,0.3)' }}
                           >
                             <Play size={12} />播放全部
                           </button>
@@ -502,13 +533,27 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                             <div
                               key={song.id}
                               onClick={() => handlePlaySong(song)}
-                              className="flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-colors hover:bg-white/5"
+                              className="flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer group transition-all duration-200"
+                              style={{ 
+                                background: 'transparent',
+                                borderLeft: '3px solid transparent',
+                              }}
+                              onMouseEnter={(e) => {
+                                (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)'
+                                ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid #ec4141'
+                                ;(e.currentTarget as HTMLElement).style.backdropFilter = 'blur(8px)'
+                              }}
+                              onMouseLeave={(e) => {
+                                (e.currentTarget as HTMLElement).style.background = 'transparent'
+                                ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid transparent'
+                                ;(e.currentTarget as HTMLElement).style.backdropFilter = 'none'
+                              }}
                             >
-                              <span className="text-white/30 text-sm w-5">{i + 1}</span>
+                              <span className="text-white/25 text-sm w-5">{i + 1}</span>
                               <img src={song.cover} alt="" className="w-9 h-9 rounded-md object-cover" />
                               <div className="min-w-0 flex-1">
                                 <div className="text-white text-sm truncate">{song.title}</div>
-                                <div className="text-white/40 text-xs truncate">{song.artist}</div>
+                                <div className="text-white/35 text-xs truncate">{song.artist}</div>
                               </div>
                             </div>
                           ))}
@@ -527,16 +572,16 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                             <div
                               key={pl.id}
                               onClick={() => handleOpenPlaylist(pl)}
-                              className="cursor-pointer group"
+                              className="cursor-pointer group transition-all duration-300 hover:scale-[1.03]"
                             >
-                              <div className="relative mb-2 overflow-hidden rounded-xl">
-                                <img src={pl.cover} alt="" className="w-full aspect-square object-cover group-hover:scale-105 transition-transform duration-300" />
-                                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center">
-                                  <Play size={28} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                              <div className="relative mb-2 overflow-hidden rounded-xl" style={{ boxShadow: '0 4px 20px rgba(0,0,0,0.3)' }}>
+                                <img src={pl.cover} alt="" className="w-full aspect-square object-cover group-hover:scale-110 transition-transform duration-500" />
+                                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all duration-300 flex items-center justify-center" style={{ backdropFilter: 'blur(0px)' }}>
+                                  <Play size={32} className="text-white opacity-0 group-hover:opacity-100 transition-all duration-300 transform translate-y-2 group-hover:translate-y-0" />
                                 </div>
                               </div>
-                              <div className="text-white text-sm truncate">{pl.name}</div>
-                              <div className="text-white/40 text-xs">{pl.trackCount}首</div>
+                              <div className="text-white text-sm truncate group-hover:text-red-400 transition-colors">{pl.name}</div>
+                              <div className="text-white/35 text-xs">{pl.trackCount}首</div>
                             </div>
                           ))}
                         </div>
@@ -547,7 +592,7 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                       <div className="flex flex-col items-center justify-center py-20 text-white/30">
                         <Music size={48} className="mb-4 opacity-30" />
                         <p>登录后获取个性化推荐</p>
-                        <button onClick={startQrLogin} className="mt-4 px-6 py-2 rounded-xl text-white text-sm" style={{ background: 'linear-gradient(135deg, #ec4141, #c62f2f)' }}>
+                        <button onClick={startQrLogin} className="mt-4 px-6 py-2 rounded-xl text-white text-sm font-medium transition-all duration-200 hover:scale-105 hover:shadow-xl active:scale-95" style={{ background: 'linear-gradient(135deg, #ec4141, #e83030)', boxShadow: '0 4px 20px rgba(236,65,65,0.4)' }}>
                           立即登录
                         </button>
                       </div>
@@ -560,7 +605,7 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
             {/* Playlist Detail */}
             {selectedPlaylistId && (
               <div>
-                <button onClick={handlePlaylistBack} className="flex items-center gap-2 text-white/60 hover:text-white mb-4 text-sm">
+                <button onClick={handlePlaylistBack} className="flex items-center gap-2 text-white/50 hover:text-white mb-4 text-sm transition-colors duration-200">
                   <ChevronLeft size={16} />返回
                 </button>
                 <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2">
@@ -575,18 +620,34 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                     <div
                       key={song.id + i}
                       onClick={() => handlePlaySong(song)}
-                      className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors"
-                      style={{ background: playingId === song.id ? 'rgba(236,65,65,0.15)' : 'transparent' }}
-                      onMouseEnter={(e) => {(e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)' }}
-                      onMouseLeave={(e) => {(e.currentTarget as HTMLElement).style.background = playingId === song.id ? 'rgba(236,65,65,0.15)' : 'transparent' }}
+                      className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer group"
+                      style={{ 
+                        background: playingId === song.id ? 'rgba(236,65,65,0.15)' : 'transparent',
+                        borderLeft: playingId === song.id ? '3px solid #ec4141' : '3px solid transparent',
+                        transition: 'all 0.25s ease',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (playingId !== song.id) {
+                          (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)'
+                          ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid #ec4141'
+                          ;(e.currentTarget as HTMLElement).style.backdropFilter = 'blur(8px)'
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (playingId !== song.id) {
+                          (e.currentTarget as HTMLElement).style.background = 'transparent'
+                          ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid transparent'
+                          ;(e.currentTarget as HTMLElement).style.backdropFilter = 'none'
+                        }
+                      }}
                     >
-                      <span className="w-6 text-center text-white/40 text-sm">{i + 1}</span>
+                      <span className="w-6 text-center text-white/30 text-sm">{i + 1}</span>
                       <img src={song.cover} alt="" className="w-9 h-9 rounded-lg object-cover" />
                       <div className="flex-1 min-w-0">
                         <div className="text-white text-sm font-medium truncate">{song.title}</div>
-                        <div className="text-white/50 text-xs truncate">{song.artist}</div>
+                        <div className="text-white/35 text-xs truncate">{song.artist}</div>
                       </div>
-                      <span className="text-white/30 text-xs">{formatDuration(song.duration)}</span>
+                      <span className="text-white/25 text-xs">{formatDuration(song.duration)}</span>
                     </div>
                   ))}
                   {loadingMore && (
@@ -608,13 +669,13 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                   <div className="flex flex-col items-center justify-center py-20 text-white/30">
                     <User size={48} className="mb-4 opacity-30" />
                     <p>登录后查看我的歌单</p>
-                    <button onClick={startQrLogin} className="mt-4 px-6 py-2 rounded-xl text-white text-sm" style={{ background: 'linear-gradient(135deg, #ec4141, #c62f2f)' }}>
+                    <button onClick={startQrLogin} className="mt-4 px-6 py-2 rounded-xl text-white text-sm font-medium transition-all duration-200 hover:scale-105 hover:shadow-xl active:scale-95" style={{ background: 'linear-gradient(135deg, #ec4141, #e83030)', boxShadow: '0 4px 20px rgba(236,65,65,0.4)' }}>
                       立即登录
                     </button>
                   </div>
                 ) : (
                   <div>
-                    <div className="flex items-center gap-3 mb-6 p-4 rounded-xl" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+                    <div className="flex items-center gap-3 mb-6 p-4 rounded-xl" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', backdropFilter: 'blur(4px)' }}>
                       <img src={userInfo.avatarUrl} alt="" className="w-12 h-12 rounded-full" />
                       <div>
                         <div className="text-white font-medium">{userInfo.nickname}</div>
@@ -627,16 +688,16 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                           <div
                             key={pl.id}
                             onClick={() => handleOpenPlaylist(pl)}
-                            className="cursor-pointer group"
+                            className="cursor-pointer group transition-all duration-300 hover:scale-[1.03]"
                           >
-                            <div className="relative mb-2 overflow-hidden rounded-xl">
-                              <img src={pl.cover} alt="" className="w-full aspect-square object-cover group-hover:scale-105 transition-transform duration-300" />
-                              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors flex items-center justify-center">
-                                <Play size={28} className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                            <div className="relative mb-2 overflow-hidden rounded-xl" style={{ boxShadow: '0 4px 20px rgba(0,0,0,0.3)' }}>
+                              <img src={pl.cover} alt="" className="w-full aspect-square object-cover group-hover:scale-110 transition-transform duration-500" />
+                              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-all duration-300 flex items-center justify-center">
+                                <Play size={32} className="text-white opacity-0 group-hover:opacity-100 transition-all duration-300 transform translate-y-2 group-hover:translate-y-0" />
                               </div>
                             </div>
-                            <div className="text-white text-sm truncate">{pl.name}</div>
-                            <div className="text-white/40 text-xs">{pl.trackCount}首</div>
+                            <div className="text-white text-sm truncate group-hover:text-red-400 transition-colors">{pl.name}</div>
+                            <div className="text-white/35 text-xs">{pl.trackCount}首</div>
                           </div>
                         ))}
                       </div>
@@ -661,7 +722,7 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
               className="fixed inset-0 z-[60] flex items-center justify-center"
               style={{ background: 'rgba(0,0,0,0.8)' }}
             >
-              <div className="bg-[#1a1a2e] rounded-2xl p-8 w-[380px] text-center" style={{ border: '1px solid rgba(255,255,255,0.1)' }}>
+              <div className="bg-[#1a1a2e] rounded-2xl p-8 w-[380px] text-center" style={{ border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 20px 60px rgba(0,0,0,0.5), 0 0 80px rgba(236,65,65,0.1)' }}>
                 <h3 className="text-white text-lg font-semibold mb-2">网易云音乐扫码登录</h3>
                 <p className="text-white/40 text-sm mb-6">请使用网易云音乐APP扫描二维码</p>
 
@@ -672,7 +733,7 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
                       <div className="absolute inset-0 flex items-center justify-center bg-black/60 rounded-xl">
                         <div className="text-white text-center">
                           <p className="mb-2">二维码已过期</p>
-                          <button onClick={startQrLogin} className="flex items-center gap-2 mx-auto px-4 py-2 rounded-lg text-white text-sm" style={{ background: '#ec4141' }}>
+                          <button onClick={startQrLogin} className="flex items-center gap-2 mx-auto px-4 py-2 rounded-lg text-white text-sm transition-all duration-200 hover:scale-105" style={{ background: 'linear-gradient(135deg, #ec4141, #e83030)', boxShadow: '0 2px 12px rgba(236,65,65,0.3)' }}>
                             <RefreshCw size={14} />刷新
                           </button>
                         </div>

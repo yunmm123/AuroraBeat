@@ -51,6 +51,18 @@ function App() {
   // Load songs from IndexedDB on mount
   useEffect(() => {
     loadFromDB()
+    
+    // Listen for auth restore from main process
+    window.electronAPI?.onAuthRestored((data) => {
+      if (data.kugou) {
+        setKugouUserInfo({
+          uid: data.kugou.uid,
+          token: data.kugou.token,
+          nickname: data.kugou.nickname,
+        })
+      }
+      // Netease auth is restored inside NeteaseMusicPanel via checkLoginStatus
+    })
   }, [])
   
   useEffect(() => {
@@ -337,6 +349,8 @@ function App() {
           onLoginSuccess={(info) => {
             setKugouUserInfo(info)
             setShowKugouLogin(false)
+            // Save auth data for persistence
+            window.electronAPI?.auth?.saveKugou(info.uid, info.token, info.nickname)
           }}
         />
       )}

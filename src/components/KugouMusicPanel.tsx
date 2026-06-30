@@ -1,13 +1,13 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
-  Search, Play, Music, User, ListMusic, Trophy, Radio,
+  Search, Play, Music, User, ListMusic, Radio,
   Disc3, ChevronRight, ChevronLeft, Loader2, LogIn, Heart,
   TrendingUp, Headphones, X, AlertCircle, RefreshCw
 } from 'lucide-react'
 import {
   kugouSearch, kugouSongUrl, kugouSearchHot,
-  kugouTopSong, kugouRankList, kugouRankAudio,
+  kugouTopSong,
   kugouRecommendSongs, kugouUserPlaylist,
   kugouPlaylistTrackAllNew
 } from '@/services/kugouApi'
@@ -95,7 +95,7 @@ function extractSongList(body: any): any[] {
 }
 
 function normalizeSong(raw: any): KugouSongItem {
-  const audioInfo = raw.audio_info || raw.audioInfo || {}
+  const audioInfo = raw.audio_info || raw.audioInfo || raw.audioInfo || {}
   
   let hash = ''
   if (audioInfo.hash_128) hash = audioInfo.hash_128
@@ -103,6 +103,17 @@ function normalizeSong(raw: any): KugouSongItem {
   else if (raw.Hash) hash = raw.Hash
   else if (raw.hash) hash = raw.hash
   else if (raw.hash_128) hash = raw.hash_128
+  else if (raw.SQFileHash) hash = raw.SQFileHash
+  else if (raw.sqfilehash) hash = raw.sqfilehash
+  else if (raw.FileHash) hash = raw.FileHash
+  else if (raw.filehash) hash = raw.filehash
+  else if (raw.HQFileHash) hash = raw.HQFileHash
+  else if (raw.hqfilehash) hash = raw.hqfilehash
+  // For search_complex results, hash might be in a nested structure
+  if (!hash && raw.songData) {
+    hash = raw.songData.Hash || raw.songData.hash || raw.songData.hash_128 || ''
+  }
+  if (!hash && raw.trans_param?.hash) hash = raw.trans_param.hash
   
   const songName = raw.SongName || raw.songname || raw.song_name || raw.name || 
     raw.filename || raw.title || audioInfo.songname || ''
@@ -138,12 +149,11 @@ function normalizeSong(raw: any): KugouSongItem {
 export default function KugouMusicPanel({
   onClose, onPlaySong, userInfo, onLoginClick, onLogout
 }: KugouMusicPanelProps) {
-  const [activeTab, setActiveTab] = useState<'discover' | 'rank' | 'user'>('discover')
+  const [activeTab, setActiveTab] = useState<'discover' | 'user'>('discover')
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<KugouSongItem[]>([])
   const [hotKeywords, setHotKeywords] = useState<string[]>([])
   const [topSongs, setTopSongs] = useState<KugouSongItem[]>([])
-  const [rankList, setRankList] = useState<any[]>([])
   const [recommendSongs, setRecommendSongs] = useState<KugouSongItem[]>([])
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
   const [playlistTracks, setPlaylistTracks] = useState<KugouSongItem[]>([])
@@ -152,11 +162,6 @@ export default function KugouMusicPanel({
   const [playingHash, setPlayingHash] = useState('')
   const [apiError, setApiError] = useState(false)
   const [searchError, setSearchError] = useState(false)
-  const [selectedRankId, setSelectedRankId] = useState('')
-  const [selectedRankName, setSelectedRankName] = useState('')
-  const [rankSongs, setRankSongs] = useState<KugouSongItem[]>([])
-  const [rankPage, setRankPage] = useState(1)
-  const [rankHasMore, setRankHasMore] = useState(true)
   const [selectedPlaylistId, setSelectedPlaylistId] = useState('')
   const [selectedPlaylistName, setSelectedPlaylistName] = useState('')
   const [playlistPage, setPlaylistPage] = useState(1)
@@ -182,10 +187,9 @@ export default function KugouMusicPanel({
     setLoading(true)
     setApiError(false)
     try {
-      const [hotRes, topRes, rankRes, recommendRes] = await Promise.allSettled([
+      const [hotRes, topRes, recommendRes] = await Promise.allSettled([
         kugouSearchHot(),
         kugouTopSong(),
-        kugouRankList(),
         kugouRecommendSongs(),
       ])
 
@@ -206,38 +210,6 @@ export default function KugouMusicPanel({
         const rawList = extractSongList(topRes.value)
         if (rawList.length > 0) {
           setTopSongs(rawList.map(normalizeSong).slice(0, 20))
-          anySuccess = true
-        }
-      }
-      // Rank list — try multiple response shapes
-      if (rankRes.status === 'fulfilled') {
-        let ranks = rankRes.value?.data?.info || rankRes.value?.data?.list || 
-          rankRes.value?.data?.data?.info || rankRes.value?.data?.data?.list ||
-          rankRes.value?.info || rankRes.value?.list || []
-        if (ranks.length === 0 && Array.isArray(rankRes.value?.data)) {
-          ranks = rankRes.value.data
-        }
-        if (ranks.length === 0 && rankRes.value?.data) {
-          // Try to find any array in the response
-          const d = rankRes.value.data
-          for (const key of Object.keys(d)) {
-            const val = d[key]
-            if (Array.isArray(val) && val.length > 0 && val[0]?.rankid) {
-              ranks = val
-              break
-            }
-            if (val && typeof val === 'object' && !Array.isArray(val)) {
-              for (const k2 of Object.keys(val)) {
-                if (Array.isArray(val[k2]) && val[k2].length > 0 && val[k2][0]?.rankid) {
-                  ranks = val[k2]
-                  break
-                }
-              }
-            }
-          }
-        }
-        if (ranks.length > 0) {
-          setRankList(ranks.slice(0, 12))
           anySuccess = true
         }
       }
@@ -386,8 +358,6 @@ export default function KugouMusicPanel({
         let queue: Song[] = []
         if (selectedPlaylistId) {
           queue = playlistTracks.map(s => normalizeToSong(s))
-        } else if (selectedRankId) {
-          queue = rankSongs.map(s => normalizeToSong(s))
         } else if (searchResults.length > 0) {
           queue = searchResults.map(s => normalizeToSong(s))
         } else if (topSongs.length > 0 && topSongs.some(s => s.Hash === song.Hash)) {
@@ -415,89 +385,6 @@ export default function KugouMusicPanel({
     } finally {
       setPlayingHash('')
     }
-  }
-
-  async function handleRankClick(rank: any) {
-    const n = normalizePlaylist(rank)
-    if (!n.id) return
-    setSelectedRankId(n.id)
-    setSelectedRankName(n.name || '榜单')
-    setRankSongs([])
-    setRankPage(1)
-    setRankHasMore(true)
-    setLoading(true)
-    try {
-      const res = await kugouRankAudio(n.id, 1)
-      let rawList = extractSongList(res)
-      // Try additional extraction for rank format
-      if (rawList.length === 0 && res?.data && Array.isArray(res.data.audios)) {
-        rawList = res.data.audios
-      }
-      if (rawList.length === 0 && res?.audios && Array.isArray(res.audios)) {
-        rawList = res.audios
-      }
-      if (rawList.length === 0 && res?.data?.rank_songs && Array.isArray(res.data.rank_songs)) {
-        rawList = res.data.rank_songs
-      }
-      // Extract from info array when in lists format
-      if (rawList.length === 0 && res?.data?.lists && Array.isArray(res.data.lists)) {
-        rawList = []
-        for (const list of res.data.lists) {
-          if (Array.isArray(list.info)) {
-            rawList.push(...list.info)
-          }
-        }
-      }
-      setRankSongs(rawList.map(normalizeSong))
-      if (rawList.length < 30) setRankHasMore(false)
-    } catch {
-      // ignore
-    }
-    setLoading(false)
-  }
-  
-  async function loadMoreRankSongs() {
-    if (!selectedRankId || !rankHasMore || loadingMore) return
-    setLoadingMore(true)
-    try {
-      const nextPage = rankPage + 1
-      const res = await kugouRankAudio(selectedRankId, nextPage)
-      let rawList = extractSongList(res)
-      // Same additional extraction as above
-      if (rawList.length === 0 && res?.data && Array.isArray(res.data.audios)) {
-        rawList = res.data.audios
-      }
-      if (rawList.length === 0 && res?.audios && Array.isArray(res.audios)) {
-        rawList = res.audios
-      }
-      if (rawList.length === 0 && res?.data?.rank_songs && Array.isArray(res.data.rank_songs)) {
-        rawList = res.data.rank_songs
-      }
-      if (rawList.length === 0 && res?.data?.lists && Array.isArray(res.data.lists)) {
-        rawList = []
-        for (const list of res.data.lists) {
-          if (Array.isArray(list.info)) {
-            rawList.push(...list.info)
-          }
-        }
-      }
-      if (rawList.length > 0) {
-        setRankSongs(prev => [...prev, ...rawList.map(normalizeSong)])
-        setRankPage(nextPage)
-      }
-      if (rawList.length < 30) setRankHasMore(false)
-    } catch {
-      // ignore
-    }
-    setLoadingMore(false)
-  }
-
-  function handleRankBack() {
-    setSelectedRankId('')
-    setSelectedRankName('')
-    setRankSongs([])
-    setRankPage(1)
-    setRankHasMore(true)
   }
 
   async function handleOpenPlaylist(playlist: any) {
@@ -575,12 +462,11 @@ export default function KugouMusicPanel({
 
   const tabs = [
     { id: 'discover' as const, label: '发现', icon: Disc3 },
-    { id: 'rank' as const, label: '榜单', icon: Trophy },
     { id: 'user' as const, label: '我的', icon: User },
   ]
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(12px)' }}>
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(16px)' }}>
       <motion.div
         initial={{ scale: 0.92, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
@@ -588,19 +474,20 @@ export default function KugouMusicPanel({
         transition={{ duration: 0.3, ease: 'easeOut' }}
         className="w-[90vw] max-w-[1200px] h-[80vh] rounded-2xl overflow-hidden flex flex-col relative"
         style={{
-          background: 'linear-gradient(135deg, rgba(20,20,40,0.95), rgba(15,15,30,0.98))',
-          border: '1px solid rgba(255,255,255,0.12)',
-          boxShadow: '0 30px 80px rgba(0,0,0,0.7), 0 0 120px rgba(139,92,246,0.08), inset 0 1px 0 rgba(255,255,255,0.05)',
+          background: 'linear-gradient(145deg, rgba(26,26,46,0.97) 0%, rgba(22,33,62,0.98) 40%, rgba(15,15,35,0.99) 100%)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          boxShadow: '0 30px 80px rgba(0,0,0,0.7), 0 0 150px rgba(139,92,246,0.12), 0 0 60px rgba(99,102,241,0.06), inset 0 1px 0 rgba(255,255,255,0.04)',
         }}
       >
         {/* Ambient glow decorations */}
-        <div className="absolute -top-20 -left-20 w-60 h-60 rounded-full blur-3xl opacity-20 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(139,92,246,0.6), transparent)' }} />
-        <div className="absolute -bottom-20 -right-20 w-60 h-60 rounded-full blur-3xl opacity-15 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(236,72,153,0.5), transparent)' }} />
+        <div className="absolute -top-20 -left-20 w-72 h-72 rounded-full blur-3xl opacity-25 pointer-events-none animate-pulse" style={{ background: 'radial-gradient(circle, rgba(139,92,246,0.5), transparent 70%)', animationDuration: '4s' }} />
+        <div className="absolute top-1/3 -right-16 w-64 h-64 rounded-full blur-3xl opacity-20 pointer-events-none animate-pulse" style={{ background: 'radial-gradient(circle, rgba(236,72,153,0.4), transparent 70%)', animationDuration: '5s', animationDelay: '1s' }} />
+        <div className="absolute -bottom-16 left-1/4 w-56 h-56 rounded-full blur-3xl opacity-15 pointer-events-none animate-pulse" style={{ background: 'radial-gradient(circle, rgba(99,102,241,0.4), transparent 70%)', animationDuration: '6s', animationDelay: '2s' }} />
         
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 flex-shrink-0 relative z-10" style={{ background: 'linear-gradient(180deg, rgba(139,92,246,0.12), rgba(15,15,30,0))', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        <div className="flex items-center justify-between px-6 py-4 flex-shrink-0 relative z-10" style={{ background: 'linear-gradient(180deg, rgba(139,92,246,0.18), rgba(99,102,241,0.06), rgba(15,15,30,0))', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center shadow-lg" style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1)', boxShadow: '0 4px 20px rgba(139,92,246,0.4)' }}>
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center shadow-lg" style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1, #a855f7)', boxShadow: '0 4px 25px rgba(139,92,246,0.5), 0 0 40px rgba(99,102,241,0.2)' }}>
               <Music size={20} className="text-white" />
             </div>
             <div>
@@ -618,7 +505,7 @@ export default function KugouMusicPanel({
                 <button onClick={onLogout} className="px-3 py-1 rounded-lg text-white/60 hover:text-white text-xs transition-colors hover:bg-white/10">退出</button>
               </div>
             ) : (
-              <button onClick={onLoginClick} className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-all hover:scale-105" style={{ background: 'linear-gradient(90deg, #3b82f6, #9333ea)', boxShadow: '0 4px 15px rgba(147,51,234,0.4)' }}>
+              <button onClick={onLoginClick} className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-all duration-200 hover:scale-105 hover:shadow-xl active:scale-95" style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6, #a855f7)', boxShadow: '0 4px 20px rgba(139,92,246,0.45)' }}>
                 <LogIn size={16} />
                 <span>扫码登录</span>
               </button>
@@ -641,10 +528,10 @@ export default function KugouMusicPanel({
                 onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                 placeholder="搜索歌曲、歌手、专辑..."
                 className="w-full pl-9 pr-4 py-2.5 rounded-xl text-white text-sm placeholder:text-white/30 focus:outline-none transition-all duration-300"
-                style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.2)' }}
+                style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.3)' }}
               />
             </div>
-            <button onClick={handleSearch} disabled={loading} className="px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-all duration-200 disabled:opacity-50 hover:shadow-lg hover:scale-105 active:scale-95" style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1)', boxShadow: '0 2px 10px rgba(139,92,246,0.3)' }}>
+            <button onClick={handleSearch} disabled={loading} className="px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-all duration-200 disabled:opacity-50 hover:shadow-xl hover:scale-105 active:scale-95" style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1)', boxShadow: '0 4px 20px rgba(139,92,246,0.4)' }}>
               {loading ? <Loader2 size={16} className="animate-spin" /> : '搜索'}
             </button>
           </div>
@@ -656,8 +543,8 @@ export default function KugouMusicPanel({
             <button
               key={tab.id}
               onClick={() => { setActiveTab(tab.id); setSearchResults([]) }}
-              className={`flex items-center gap-1.5 px-5 py-3 text-sm font-medium transition-all duration-200 relative ${
-                activeTab === tab.id ? 'text-purple-300' : 'text-white/40 hover:text-white/70'
+              className={`flex items-center gap-1.5 px-5 py-3 text-sm font-medium transition-all duration-300 relative ${
+                activeTab === tab.id ? 'text-purple-300' : 'text-white/35 hover:text-white/70'
               }`}
             >
               <tab.icon size={15} />
@@ -665,9 +552,9 @@ export default function KugouMusicPanel({
               {activeTab === tab.id && (
                 <motion.div
                   layoutId="activeTab"
-                  className="absolute bottom-0 left-0 right-0 h-0.5 rounded-full"
-                  style={{ background: 'linear-gradient(90deg, #8b5cf6, #6366f1)' }}
-                  transition={{ duration: 0.2 }}
+                  className="absolute bottom-0 left-1 right-1 h-0.5 rounded-full"
+                  style={{ background: 'linear-gradient(90deg, #8b5cf6, #6366f1, #a855f7)', boxShadow: '0 0 12px rgba(139,92,246,0.5)' }}
+                  transition={{ type: 'spring', stiffness: 500, damping: 30 }}
                 />
               )}
             </button>
@@ -675,9 +562,9 @@ export default function KugouMusicPanel({
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto px-6 py-4 relative" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.2) transparent' }}>
+        <div className="flex-1 overflow-y-auto px-6 py-4 relative" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(139,92,246,0.3) transparent' }}>
           {playErrorMsg && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 px-4 py-2 rounded-lg text-white text-sm shadow-lg" style={{ background: 'rgba(239,68,68,0.9)' }}>
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 px-4 py-2.5 rounded-xl text-white text-sm shadow-xl backdrop-blur-md" style={{ background: 'rgba(239,68,68,0.85)', border: '1px solid rgba(239,68,68,0.3)' }}>
               {playErrorMsg}
             </div>
           )}
@@ -727,9 +614,26 @@ export default function KugouMusicPanel({
                 <h3 className="text-white/80 font-medium mb-3">搜索结果 ({searchResults.length})</h3>
                 <div className="space-y-1">
                   {searchResults.map((song, i) => (
-                    <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors" style={{ background: playingHash === song.Hash ? 'rgba(168,85,247,0.2)' : 'transparent' }}
-                      onMouseEnter={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.06)' }}
-                      onMouseLeave={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'transparent' }}>
+                    <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer group"
+                      style={{ 
+                        background: playingHash === song.Hash ? 'rgba(139,92,246,0.2)' : 'transparent',
+                        borderLeft: playingHash === song.Hash ? '3px solid #8b5cf6' : '3px solid transparent',
+                        transition: 'all 0.25s ease',
+                      }}
+                      onMouseEnter={(e) => { 
+                        if (playingHash !== song.Hash) {
+                          (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)'
+                          ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid #8b5cf6'
+                          ;(e.currentTarget as HTMLElement).style.backdropFilter = 'blur(8px)'
+                        }
+                      }}
+                      onMouseLeave={(e) => { 
+                        if (playingHash !== song.Hash) {
+                          (e.currentTarget as HTMLElement).style.background = 'transparent'
+                          ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid transparent'
+                          ;(e.currentTarget as HTMLElement).style.backdropFilter = 'none'
+                        }
+                      }}>
                       <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
                         {playingHash === song.Hash ? (
                           <div className="flex gap-0.5 items-end h-4">
@@ -737,13 +641,13 @@ export default function KugouMusicPanel({
                             <div className="w-1 bg-purple-400 rounded-full animate-pulse" style={{ height: '100%', animationDelay: '0.2s' }} />
                             <div className="w-1 bg-purple-400 rounded-full animate-pulse" style={{ height: '40%', animationDelay: '0.4s' }} />
                           </div>
-                        ) : <Play size={14} className="text-white/60" />}
+                        ) : <Play size={14} className="text-white/40 group-hover:text-purple-400 transition-colors" />}
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-white text-sm font-medium truncate">{song.SongName}</div>
-                        <div className="text-white/50 text-xs truncate">{song.SingerName}</div>
+                        <div className="text-white/35 text-xs truncate">{song.SingerName}</div>
                       </div>
-                      <div className="text-white/40 text-xs">{formatDuration(song.Duration || 0)}</div>
+                      <div className="text-white/25 text-xs">{formatDuration(song.Duration || 0)}</div>
                     </div>
                   ))}
                 </div>
@@ -769,7 +673,7 @@ export default function KugouMusicPanel({
                     <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><TrendingUp size={16} className="text-orange-400" />热搜榜</h3>
                     <div className="flex flex-wrap gap-2">
                       {hotKeywords.map((kw, i) => (
-                        <button key={i} onClick={() => handlePlayHotKeyword(kw)} className="px-3 py-1.5 rounded-lg text-white/80 text-xs transition-colors hover:bg-white/20" style={{ background: 'rgba(255,255,255,0.08)' }}>{kw}</button>
+                        <button key={i} onClick={() => handlePlayHotKeyword(kw)} className="px-3 py-1.5 rounded-lg text-white/70 text-xs transition-all duration-200 hover:bg-white/15 hover:text-white hover:scale-105" style={{ background: 'rgba(255,255,255,0.06)' }}>{kw}</button>
                       ))}
                     </div>
                   </div>
@@ -779,10 +683,27 @@ export default function KugouMusicPanel({
                     <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><Headphones size={16} className="text-blue-400" />新歌速递</h3>
                     <div className="space-y-1">
                       {topSongs.slice(0, 10).map((song, i) => (
-                        <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors" style={{ background: playingHash === song.Hash ? 'rgba(168,85,247,0.2)' : 'transparent' }}
-                          onMouseEnter={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.06)' }}
-                          onMouseLeave={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'transparent' }}>
-                          <span className="w-6 text-center text-white/40 text-sm font-medium">{i + 1}</span>
+                        <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer group"
+                          style={{ 
+                            background: playingHash === song.Hash ? 'rgba(139,92,246,0.2)' : 'transparent',
+                            borderLeft: playingHash === song.Hash ? '3px solid #8b5cf6' : '3px solid transparent',
+                            transition: 'all 0.25s ease',
+                          }}
+                          onMouseEnter={(e) => { 
+                            if (playingHash !== song.Hash) {
+                              (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)'
+                              ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid #8b5cf6'
+                              ;(e.currentTarget as HTMLElement).style.backdropFilter = 'blur(8px)'
+                            }
+                          }}
+                          onMouseLeave={(e) => { 
+                            if (playingHash !== song.Hash) {
+                              (e.currentTarget as HTMLElement).style.background = 'transparent'
+                              ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid transparent'
+                              ;(e.currentTarget as HTMLElement).style.backdropFilter = 'none'
+                            }
+                          }}>
+                          <span className="w-6 text-center text-white/30 text-sm font-medium">{i + 1}</span>
                           <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
                             {playingHash === song.Hash ? (
                               <div className="flex gap-0.5 items-end h-4">
@@ -790,11 +711,11 @@ export default function KugouMusicPanel({
                                 <div className="w-1 bg-purple-400 rounded-full animate-pulse" style={{ height: '100%', animationDelay: '0.2s' }} />
                                 <div className="w-1 bg-purple-400 rounded-full animate-pulse" style={{ height: '40%', animationDelay: '0.4s' }} />
                               </div>
-                            ) : <Play size={14} className="text-white/60" />}
+                            ) : <Play size={14} className="text-white/40 group-hover:text-purple-400 transition-colors" />}
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="text-white text-sm font-medium truncate">{song.SongName}</div>
-                            <div className="text-white/50 text-xs truncate">{song.SingerName}</div>
+                            <div className="text-white/35 text-xs truncate">{song.SingerName}</div>
                           </div>
                         </div>
                       ))}
@@ -806,80 +727,37 @@ export default function KugouMusicPanel({
                     <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><Heart size={16} className="text-pink-400" />每日推荐</h3>
                     <div className="space-y-1">
                       {recommendSongs.slice(0, 10).map((song, i) => (
-                        <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors" style={{ background: playingHash === song.Hash ? 'rgba(168,85,247,0.2)' : 'transparent' }}
-                          onMouseEnter={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.06)' }}
-                          onMouseLeave={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'transparent' }}>
-                          <span className="w-6 text-center text-white/40 text-sm font-medium">{i + 1}</span>
+                        <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer group"
+                          style={{ 
+                            background: playingHash === song.Hash ? 'rgba(139,92,246,0.2)' : 'transparent',
+                            borderLeft: playingHash === song.Hash ? '3px solid #8b5cf6' : '3px solid transparent',
+                            transition: 'all 0.25s ease',
+                          }}
+                          onMouseEnter={(e) => { 
+                            if (playingHash !== song.Hash) {
+                              (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)'
+                              ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid #8b5cf6'
+                              ;(e.currentTarget as HTMLElement).style.backdropFilter = 'blur(8px)'
+                            }
+                          }}
+                          onMouseLeave={(e) => { 
+                            if (playingHash !== song.Hash) {
+                              (e.currentTarget as HTMLElement).style.background = 'transparent'
+                              ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid transparent'
+                              ;(e.currentTarget as HTMLElement).style.backdropFilter = 'none'
+                            }
+                          }}>
+                          <span className="w-6 text-center text-white/30 text-sm font-medium">{i + 1}</span>
                           <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                            <Play size={14} className="text-white/60" />
+                            <Play size={14} className="text-white/40 group-hover:text-pink-400 transition-colors" />
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="text-white text-sm font-medium truncate">{song.SongName}</div>
-                            <div className="text-white/50 text-xs truncate">{song.SingerName}</div>
+                            <div className="text-white/35 text-xs truncate">{song.SingerName}</div>
                           </div>
                         </div>
                       ))}
                     </div>
-                  </div>
-                )}
-              </motion.div>
-            )}
-
-            {/* Rank Tab */}
-            {activeTab === 'rank' && searchResults.length === 0 && !apiError && !loading && (
-              <motion.div key="rank" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-                {selectedRankId ? (
-                  <div>
-                    <button onClick={handleRankBack} className="flex items-center gap-2 text-white/60 hover:text-white mb-4 text-sm">
-                      <ChevronLeft size={16} />返回榜单列表
-                    </button>
-                    <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><Trophy size={16} className="text-yellow-400" />{selectedRankName}</h3>
-                    <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-2" onScroll={(e) => {
-                      const target = e.target as HTMLDivElement
-                      const bottom = target.scrollHeight - target.scrollTop - target.clientHeight
-                      if (bottom < 100) loadMoreRankSongs()
-                    }}>
-                      {rankSongs.map((song: KugouSongItem, idx: number) => (
-                        <div key={song.Hash || idx} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors group" style={{ background: 'rgba(255,255,255,0.03)' }}
-                          onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
-                          onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.03)'}>
-                          <div className="w-6 text-center text-sm text-white/30 flex-shrink-0">{idx + 1}</div>
-                          <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                            {playingHash === song.Hash ? <Loader2 size={14} className="text-purple-400 animate-spin" /> : <Play size={14} className="text-white/60 group-hover:text-purple-400" />}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-white text-sm font-medium truncate">{song.SongName}</div>
-                            <div className="text-white/50 text-xs truncate">{song.SingerName}</div>
-                          </div>
-                        </div>
-                      ))}
-                      {loadingMore && (
-                        <div className="flex items-center justify-center py-4">
-                          <Loader2 size={18} className="text-white/40 animate-spin" />
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><Trophy size={16} className="text-yellow-400" />排行榜</h3>
-                    {rankList.length === 0 ? (
-                      <div className="text-white/40 text-center py-8">暂无榜单数据</div>
-                    ) : (
-                      <div className="grid grid-cols-2 gap-3">
-                        {rankList.map((rank: any) => {
-                          const n = normalizePlaylist(rank)
-                          return (
-                            <div key={n.id || rank.rankid} onClick={() => handleRankClick(rank)} className="p-4 rounded-xl cursor-pointer transition-colors group" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
-                              onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
-                              onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'}>
-                              <div className="text-white text-sm font-medium truncate group-hover:text-purple-400 transition-colors">{rank.rankname}</div>
-                              <div className="text-white/40 text-xs mt-1 truncate">{rank.intro || '热门榜单'}</div>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    )}
                   </div>
                 )}
               </motion.div>
@@ -909,17 +787,35 @@ export default function KugouMusicPanel({
                           if (bottom < 100) loadMorePlaylistSongs()
                         }}>
                           {playlistTracks.map((song, i) => (
-                            <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors" style={{ background: playingHash === song.Hash ? 'rgba(168,85,247,0.2)' : 'transparent' }}
-                              onMouseEnter={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.06)' }}
-                              onMouseLeave={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'transparent' }}>
-                              <span className="w-6 text-center text-white/40 text-sm">{i + 1}</span>
+                            <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer group"
+                              style={{ 
+                                background: playingHash === song.Hash ? 'rgba(139,92,246,0.2)' : 'transparent',
+                                borderLeft: playingHash === song.Hash ? '3px solid #8b5cf6' : '3px solid transparent',
+                                transition: 'all 0.25s ease',
+                              }}
+                              onMouseEnter={(e) => { 
+                                if (playingHash !== song.Hash) {
+                                  (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.05)'
+                                  ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid #8b5cf6'
+                                  ;(e.currentTarget as HTMLElement).style.backdropFilter = 'blur(8px)'
+                                }
+                              }}
+                              onMouseLeave={(e) => { 
+                                if (playingHash !== song.Hash) {
+                                  (e.currentTarget as HTMLElement).style.background = 'transparent'
+                                  ;(e.currentTarget as HTMLElement).style.borderLeft = '3px solid transparent'
+                                  ;(e.currentTarget as HTMLElement).style.backdropFilter = 'none'
+                                }
+                              }}>
+                              <span className="w-6 text-center text-white/30 text-sm">{i + 1}</span>
                               <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                                {playingHash === song.Hash ? <Loader2 size={14} className="text-purple-400 animate-spin" /> : <Play size={14} className="text-white/60" />}
+                                {playingHash === song.Hash ? <Loader2 size={14} className="text-purple-400 animate-spin" /> : <Play size={14} className="text-white/40 group-hover:text-purple-400 transition-colors" />}
                               </div>
                               <div className="flex-1 min-w-0">
                                 <div className="text-white text-sm font-medium truncate">{song.SongName}</div>
-                                <div className="text-white/50 text-xs truncate">{song.SingerName}</div>
+                                <div className="text-white/35 text-xs truncate">{song.SingerName}</div>
                               </div>
+                              <div className="text-white/25 text-xs">{formatDuration(song.Duration || 0)}</div>
                             </div>
                           ))}
                           {loadingMore && (
@@ -934,8 +830,8 @@ export default function KugouMusicPanel({
                       </div>
                     ) : (
                       <div>
-                        <div className="flex items-center gap-3 mb-6 p-4 rounded-xl" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-                          <div className="w-12 h-12 rounded-full flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #a855f7, #3b82f6)' }}>
+                        <div className="flex items-center gap-3 mb-6 p-4 rounded-xl" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', backdropFilter: 'blur(4px)' }}>
+                          <div className="w-12 h-12 rounded-full flex items-center justify-center shadow-lg" style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1, #a855f7)', boxShadow: '0 4px 20px rgba(139,92,246,0.4)' }}>
                             <User size={24} className="text-white" />
                           </div>
                           <div>
@@ -952,9 +848,22 @@ export default function KugouMusicPanel({
                               const n = normalizePlaylist(pl)
                               const keyId = n.id || pl.listid || pl.specialid || `pl-${idx}`
                               return (
-                                <div key={keyId} onClick={() => handleOpenPlaylist(pl)} className="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-colors" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
-                                  onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
-                                  onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'}>
+                                <div key={keyId} onClick={() => handleOpenPlaylist(pl)} className="flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all duration-300 hover:scale-[1.01] group"
+                                  style={{ 
+                                    background: 'rgba(255,255,255,0.04)',
+                                    border: '1px solid rgba(255,255,255,0.06)',
+                                    backdropFilter: 'blur(4px)',
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'
+                                    ;(e.currentTarget as HTMLElement).style.borderColor = 'rgba(139,92,246,0.3)'
+                                    ;(e.currentTarget as HTMLElement).style.boxShadow = '0 4px 20px rgba(139,92,246,0.08)'
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'
+                                    ;(e.currentTarget as HTMLElement).style.borderColor = 'rgba(255,255,255,0.06)'
+                                    ;(e.currentTarget as HTMLElement).style.boxShadow = 'none'
+                                  }}>
                                   <ListMusic size={18} className="text-purple-400" />
                                   <div className="flex-1 min-w-0">
                                     <div className="text-white text-sm font-medium truncate">{n.name || '未命名歌单'}</div>

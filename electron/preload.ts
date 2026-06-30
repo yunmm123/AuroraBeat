@@ -37,6 +37,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     artistTopSongs: (artistId: string) => ipcRenderer.invoke('netease:artistTopSongs', artistId),
     songDetail: (ids: string[]) => ipcRenderer.invoke('netease:songDetail', ids),
   },
+  auth: {
+    saveKugou: (uid: string, token: string, nickname: string) => ipcRenderer.invoke('auth:saveKugou', uid, token, nickname),
+    saveNetease: (userId: string, nickname: string, avatarUrl: string) => ipcRenderer.invoke('auth:saveNetease', userId, nickname, avatarUrl),
+  },
+  onAuthRestored: (callback: (data: any) => void) => {
+    ipcRenderer.on('auth:restored', (_e, data) => callback(data))
+  },
   onKugouReady: (callback: () => void) => {
     ipcRenderer.on('kugou-api:ready', callback)
   },
