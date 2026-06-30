@@ -2,12 +2,24 @@ import { create } from 'zustand'
 import type { Song, Playlist, PlayMode, AudioFeatures, VisualEffectType, Theme } from '@/types'
 import { themes } from '@/utils/themes'
 import { getAllAudioFiles, saveAudioFile, deleteAudioFile, type StoredAudio } from '@/utils/audioDB'
-import { searchLyricsFromUfanv, parseLrc, parseSongFilename, type LyricLine } from '@/services/lyricsApi'
+import { searchLyricsFromUfanv, parseLrc, type LyricLine } from '@/services/lyricsApi'
 import { kugouSearchLyric, kugouGetLyricById } from '@/services/kugouApi'
+
+// Global audio controller - set by App.tsx on mount
+let audioController: {
+  play: () => void
+  pause: () => void
+  loadSong: (url: string, autoplay: boolean) => void
+} | null = null
+
+export function setAudioController(ctrl: typeof audioController) {
+  audioController = ctrl
+}
 
 interface PlayerState {
   currentSong: Song | null
   isPlaying: boolean
+  isLoading: boolean
   currentTime: number
   duration: number
   volume: number
@@ -59,8 +71,10 @@ interface PlayerState {
   // Recent play history
   recentSongs: Song[]
   
+  // Actions - these are called by UI and control audio through the controller
   setCurrentSong: (song: Song | null) => void
-  setIsPlaying: (playing: boolean) => void
+  setIsPlaying: (playing: boolean) => void  // Only called by audio event handlers
+  setIsLoading: (loading: boolean) => void
   togglePlay: () => void
   setCurrentTime: (time: number) => void
   setDuration: (duration: number) => void
@@ -70,7 +84,7 @@ interface PlayerState {
   setPlaybackRate: (rate: number) => void
   nextSong: () => void
   prevSong: () => void
-  setQueue: (songs: Song[], startIndex?: number) => void
+  setQueue: (songs: Song[], startIndex?: number, autoplay?: boolean) => void
   
   setPlaylists: (playlists: Playlist[]) => void
   setCurrentPlaylist: (playlist: Playlist | null) => void
@@ -98,6 +112,7 @@ interface PlayerState {
   removeLocalSong: (id: string) => void
   setSearchQuery: (query: string) => void
   playSong: (song: Song, queue?: Song[]) => void
+  playSongAtIndex: (index: number) => void
   addToRecent: (song: Song) => void
   refreshLyrics: () => void
   loadFromDB: () => Promise<void>
@@ -108,18 +123,6 @@ interface PlayerState {
   
   // Netease Music actions
   toggleNetease: () => void
-}
-
-const mockSong: Song = {
-  id: 'demo-1',
-  title: 'Aurora Dreams',
-  artist: 'Synthwave Orchestra',
-  album: 'Neon Horizons',
-  cover: '',
-  duration: 245,
-  url: '',
-  source: 'local',
-  quality: 'lossless',
 }
 
 function calcSimilarity(a: string, b: string): number {
@@ -182,8 +185,8 @@ function isPureMusic(trackName: string, artistName: string): boolean {
   return keywords.some(k => combined.includes(k))
 }
 
-// Resolve the actual play URL for cloud songs. Returns the URL string or empty string.
-async function resolveSongUrlSync(song: Song): Promise<string> {
+// Resolve the actual play URL for cloud songs
+async function resolveSongUrl(song: Song): Promise<string> {
   if (song.source === 'kugou') {
     const hash = (song as any).hash
     const albumId = (song as any).albumId
@@ -212,24 +215,33 @@ async function resolveSongUrlSync(song: Song): Promise<string> {
   return ''
 }
 
-// Resolve URL and update the queue + currentSong in the store
-async function resolveSongUrlAndUpdate(song: Song, queueIndex: number) {
-  const url = await resolveSongUrlSync(song)
-  if (url) {
-    const state = usePlayerStore.getState()
-    const updatedQueue = [...state.queue]
-    const updatedSong = { ...song, url }
-    updatedQueue[queueIndex] = updatedSong
-    // Only update currentSong if we're still on the same song
-    const isCurrentSong = state.currentSong?.id === song.id
-    usePlayerStore.setState({
-      queue: updatedQueue,
-      currentSong: isCurrentSong ? updatedSong : state.currentSong
-    })
+// Update song URL in queue and currentSong after async resolution
+function updateSongUrl(songId: string, url: string) {
+  const state = usePlayerStore.getState()
+  const updatedQueue = [...state.queue]
+  let foundIndex = -1
+  for (let i = 0; i < updatedQueue.length; i++) {
+    if (updatedQueue[i].id === songId) {
+      updatedQueue[i] = { ...updatedQueue[i], url }
+      foundIndex = i
+      break
+    }
+  }
+  const isCurrent = state.currentSong?.id === songId
+  const updatedCurrent = isCurrent && state.currentSong ? { ...state.currentSong, url } : state.currentSong
+  
+  usePlayerStore.setState({
+    queue: updatedQueue,
+    currentSong: updatedCurrent,
+  })
+  
+  // If this is the current song and audio controller exists, load it
+  if (isCurrent && audioController && url) {
+    audioController.loadSong(url, true)
   }
 }
 
-async function loadLyricsForSong(trackName: string, artistName: string, duration?: number, hash?: string) {
+async function loadLyricsForSong(trackName: string, artistName: string, duration?: number, hash?: string, songId?: string, source?: string) {
   if (isPureMusic(trackName, artistName)) {
     usePlayerStore.setState({ 
       lyrics: [{ time: 0, text: '♪ 纯音乐 ♪' }], 
@@ -239,6 +251,22 @@ async function loadLyricsForSong(trackName: string, artistName: string, duration
   }
   
   const keyword = artistName ? `${trackName} ${artistName}` : trackName
+  
+  // Try netease lyric first if it's a netease song
+  if (source === 'netease' && songId) {
+    try {
+      const neteaseLyric = await window.electronAPI?.netease?.lyric(songId)
+      if (neteaseLyric?.ok && neteaseLyric.lrc) {
+        const lines = parseLrc(neteaseLyric.lrc)
+        if (lines.length > 0) {
+          usePlayerStore.setState({ lyrics: lines, lyricsLoading: false })
+          return
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
   
   try {
     const ufanvText = await searchLyricsFromUfanv(trackName, artistName)
@@ -250,7 +278,7 @@ async function loadLyricsForSong(trackName: string, artistName: string, duration
       }
     }
   } catch {
-    // ufanv failed, try kugou
+    // ufanv failed
   }
   
   try {
@@ -271,11 +299,11 @@ async function loadLyricsForSong(trackName: string, artistName: string, duration
       }
     }
   } catch {
-    // kugou failed too
+    // kugou failed
   }
   
-  // Try netease lyric if we have netease song id
-  if ((window as any).currentNeteaseSongId) {
+  // Fallback: try netease even for non-netease songs
+  if (source !== 'netease' && (window as any).currentNeteaseSongId) {
     try {
       const neteaseLyric = await window.electronAPI?.netease?.lyric((window as any).currentNeteaseSongId)
       if (neteaseLyric?.ok && neteaseLyric.lrc) {
@@ -293,9 +321,67 @@ async function loadLyricsForSong(trackName: string, artistName: string, duration
   usePlayerStore.setState({ lyrics: [], lyricsLoading: false })
 }
 
+// Switch to a song - sets state and initiates loading
+function switchToSong(song: Song, queue: Song[], index: number) {
+  const { addToRecent } = usePlayerStore.getState()
+  addToRecent(song)
+  
+  // Store netease song id for lyric fallback
+  if (song.source === 'netease') {
+    (window as any).currentNeteaseSongId = song.id
+  } else {
+    (window as any).currentNeteaseSongId = undefined
+  }
+  
+  // Update queue with current song's URL if available
+  let newQueue = [...queue]
+  if (song.url && newQueue[index] && !newQueue[index].url) {
+    newQueue[index] = { ...newQueue[index], url: song.url }
+  }
+  
+  // Set state - but DON'T set isPlaying directly! Let audio events handle it.
+  usePlayerStore.setState({
+    queue: newQueue,
+    queueIndex: index,
+    currentSong: song,
+    isLoading: true,
+    currentTime: 0,
+    duration: 0,
+    lyrics: [],
+    lyricsLoading: true,
+  })
+  
+  // Load lyrics
+  const trackName = song.title.replace(/\.[^.]+$/, '')
+  const artistName = song.artist !== '未知艺术家' ? song.artist : ''
+  const songHash = (song as any).hash || ''
+  loadLyricsForSong(trackName, artistName, song.duration, songHash, song.id, song.source)
+  
+  // Load and play the song
+  if (song.url) {
+    audioController?.loadSong(song.url, true)
+  } else if (song.source === 'kugou' || song.source === 'netease') {
+    // Need to resolve URL first
+    resolveSongUrl(song).then(url => {
+      if (url) {
+        // Verify we're still on the same song
+        const currentId = usePlayerStore.getState().currentSong?.id
+        if (currentId === song.id) {
+          updateSongUrl(song.id, url)
+        }
+      } else {
+        usePlayerStore.setState({ isLoading: false })
+      }
+    }).catch(() => {
+      usePlayerStore.setState({ isLoading: false })
+    })
+  }
+}
+
 export const usePlayerStore = create<PlayerState>((set, get) => ({
   currentSong: null,
   isPlaying: false,
+  isLoading: false,
   currentTime: 0,
   duration: 0,
   volume: 0.75,
@@ -341,29 +427,39 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   searchResults: [],
   dbLoading: true,
   
-  // Lyrics
   lyrics: [],
   lyricsLoading: false,
   
-  // KuGou Music
   showKugou: false,
   kugouUserInfo: null,
   
-  // Netease Music
   showNetease: false,
   
-  // Recent play history
   recentSongs: [],
   
+  // These setters are called by AUDIO EVENT HANDLERS ONLY
   setCurrentSong: (song) => set({ currentSong: song }),
   setIsPlaying: (playing) => set({ isPlaying: playing }),
-  togglePlay: () => set({ isPlaying: !get().isPlaying }),
+  setIsLoading: (loading) => set({ isLoading: loading }),
+  
+  togglePlay: () => {
+    const { isPlaying, currentSong } = get()
+    if (!currentSong?.url) return
+    if (audioController) {
+      if (isPlaying) {
+        audioController.pause()
+      } else {
+        audioController.play()
+      }
+    }
+  },
   setCurrentTime: (time) => set({ currentTime: time }),
   setDuration: (duration) => set({ duration }),
   setVolume: (volume) => set({ volume, isMuted: volume === 0 }),
   toggleMute: () => set({ isMuted: !get().isMuted }),
   setPlayMode: (mode) => set({ playMode: mode }),
   setPlaybackRate: (rate) => set({ playbackRate: rate }),
+  
   nextSong: () => {
     const { queue, queueIndex, playMode } = get()
     if (queue.length === 0) return
@@ -371,53 +467,36 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     if (playMode === 'shuffle') {
       nextIndex = Math.floor(Math.random() * queue.length)
     } else if (playMode === 'single') {
-      set({ currentTime: 0 })
+      audioController?.loadSong(get().currentSong?.url || '', true)
       return
     } else {
       nextIndex = (queueIndex + 1) % queue.length
     }
-    const nextSong = queue[nextIndex]
-    
-    set({ queueIndex: nextIndex, currentSong: nextSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
-    
-    // If the song has no URL, resolve it asynchronously
-    if (!nextSong.url && (nextSong.source === 'kugou' || nextSong.source === 'netease')) {
-      resolveSongUrlAndUpdate(nextSong, nextIndex)
-    }
-    
-    const trackName = nextSong.title.replace(/\.[^.]+$/, '')
-    const artistName = nextSong.artist !== '未知艺术家' ? nextSong.artist : ''
-    const songHash = (nextSong as any).hash || ''
-    loadLyricsForSong(trackName, artistName, nextSong.duration, songHash)
+    switchToSong(queue[nextIndex], queue, nextIndex)
   },
+  
   prevSong: () => {
     const { queue, queueIndex } = get()
     if (queue.length === 0) return
     const prevIndex = queueIndex === 0 ? queue.length - 1 : queueIndex - 1
-    const prevSong = queue[prevIndex]
-    
-    set({ queueIndex: prevIndex, currentSong: prevSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
-    
-    if (!prevSong.url && (prevSong.source === 'kugou' || prevSong.source === 'netease')) {
-      resolveSongUrlAndUpdate(prevSong, prevIndex)
-    }
-    
-    const trackName = prevSong.title.replace(/\.[^.]+$/, '')
-    const artistName = prevSong.artist !== '未知艺术家' ? prevSong.artist : ''
-    const songHash = (prevSong as any).hash || ''
-    loadLyricsForSong(trackName, artistName, prevSong.duration, songHash)
+    switchToSong(queue[prevIndex], queue, prevIndex)
   },
-  setQueue: (songs, startIndex = 0) => set({ 
-    queue: songs, 
-    queueIndex: startIndex,
-    currentSong: songs[startIndex] || null,
-    currentTime: 0,
-  }),
+  
+  setQueue: (songs, startIndex = 0, autoplay = false) => {
+    set({ 
+      queue: songs, 
+      queueIndex: startIndex,
+      currentSong: songs[startIndex] || null,
+      currentTime: 0,
+    })
+    if (autoplay && songs[startIndex]) {
+      switchToSong(songs[startIndex], songs, startIndex)
+    }
+  },
   
   setPlaylists: (playlists) => set({ playlists }),
   setCurrentPlaylist: (playlist) => {
     const current = get().currentPlaylist
-    // Toggle: clicking same playlist again closes it
     if (current?.id === playlist?.id) {
       set({ currentPlaylist: null })
     } else {
@@ -468,9 +547,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       playlists: state.playlists.map(p =>
         p.id === 'all' ? { ...p, songs: newSongs } : p
       ),
-      queue: state.queue.length === 0 ? newSongs : state.queue,
-      currentSong: state.currentSong || newSongs[0] || null,
     })
+    // Auto-set queue and play first added song if nothing was playing
+    if (state.queue.length === 0 && newSongs.length > 0) {
+      set({
+        queue: newSongs,
+        currentSong: newSongs[0],
+        queueIndex: 0,
+      })
+    }
   },
   
   removeLocalSong: async (id) => {
@@ -505,9 +590,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   },
   
   playSong: (song, queue) => {
-    const { addToRecent } = get()
-    addToRecent(song)
-    
     let newQueue: Song[] = []
     let newIndex = 0
     
@@ -515,42 +597,18 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       newQueue = queue
       newIndex = Math.max(0, queue.findIndex(s => s.id === song.id))
       if (newIndex === -1) newIndex = 0
-      // Update the current song's URL in the queue if it has one
-      if (song.url && newQueue[newIndex] && !newQueue[newIndex].url) {
-        newQueue[newIndex] = { ...newQueue[newIndex], url: song.url }
-      }
     } else {
       newQueue = [song]
       newIndex = 0
     }
     
-    set({ 
-      queue: newQueue,
-      queueIndex: newIndex,
-      currentSong: song, 
-      isPlaying: true, 
-      currentTime: 0, 
-      lyrics: [], 
-      lyricsLoading: true 
-    })
-    
-    // If the song has no URL (e.g. clicked from queue), resolve it asynchronously
-    if (!song.url && (song.source === 'kugou' || song.source === 'netease')) {
-      resolveSongUrlAndUpdate(song, newIndex)
-    }
-    
-    const trackName = song.title.replace(/\.[^.]+$/, '')
-    const artistName = song.artist !== '未知艺术家' ? song.artist : ''
-    const songHash = (song as any).hash || ''
-    
-    // Store netease song id for lyric fallback
-    if (song.source === 'netease') {
-      (window as any).currentNeteaseSongId = song.id
-    } else {
-      (window as any).currentNeteaseSongId = undefined
-    }
-    
-    loadLyricsForSong(trackName, artistName, song.duration, songHash)
+    switchToSong(song, newQueue, newIndex)
+  },
+  
+  playSongAtIndex: (index) => {
+    const { queue } = get()
+    if (index < 0 || index >= queue.length) return
+    switchToSong(queue[index], queue, index)
   },
   
   addToRecent: (song) => {
@@ -570,7 +628,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     const artistName = currentSong.artist !== '未知艺术家' ? currentSong.artist : ''
     const songHash = (currentSong as any).hash || ''
     
-    loadLyricsForSong(trackName, artistName, currentSong.duration, songHash)
+    loadLyricsForSong(trackName, artistName, currentSong.duration, songHash, currentSong.id, currentSong.source)
   },
   
   loadFromDB: async () => {
@@ -604,10 +662,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     }
   },
   
-  // KuGou Music actions
   toggleKugou: () => set({ showKugou: !get().showKugou }),
   setKugouUserInfo: (info) => set({ kugouUserInfo: info }),
   
-  // Netease Music actions
   toggleNetease: () => set({ showNetease: !get().showNetease }),
 }))

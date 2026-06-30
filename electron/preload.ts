@@ -10,42 +10,41 @@ contextBridge.exposeInMainWorld('electronAPI', {
   app: {
     getPath: (name: string) => ipcRenderer.invoke('app:getPath', name),
   },
-  lyrics: {
-    searchUfanv: (query: string) => ipcRenderer.invoke('lyrics:searchUfanv', query),
-  },
-  kugou: {
-    // Generic, guarded invoke for KuGou channels (kg:*)
-    invoke: (channel: string, ...args: any[]) => {
-      if (typeof channel !== 'string' || !channel.startsWith('kg:')) {
-        return Promise.reject(new Error('Invalid kugou channel: ' + channel))
-      }
-      return ipcRenderer.invoke(channel, ...args)
-    },
-  },
-  netease: {
-    search: (keyword: string, limit?: number, offset?: number) => ipcRenderer.invoke('netease:search', keyword, limit, offset),
-    songUrl: (id: string, quality?: string) => ipcRenderer.invoke('netease:songUrl', id, quality),
-    lyric: (id: string) => ipcRenderer.invoke('netease:lyric', id),
-    qrKey: () => ipcRenderer.invoke('netease:qrKey'),
-    qrCreate: (key: string) => ipcRenderer.invoke('netease:qrCreate', key),
-    qrCheck: (key: string) => ipcRenderer.invoke('netease:qrCheck', key),
-    loginStatus: () => ipcRenderer.invoke('netease:loginStatus'),
-    userPlaylist: (uid: string) => ipcRenderer.invoke('netease:userPlaylist', uid),
-    playlistDetail: (id: string, limit?: number, offset?: number) => ipcRenderer.invoke('netease:playlistDetail', id, limit, offset),
-    recommendSongs: () => ipcRenderer.invoke('netease:recommendSongs'),
-    recommendPlaylists: () => ipcRenderer.invoke('netease:recommendPlaylists'),
-    artistTopSongs: (artistId: string) => ipcRenderer.invoke('netease:artistTopSongs', artistId),
-    songDetail: (ids: string[]) => ipcRenderer.invoke('netease:songDetail', ids),
-  },
-  auth: {
-    saveKugou: (uid: string, token: string, nickname: string) => ipcRenderer.invoke('auth:saveKugou', uid, token, nickname),
-    saveNetease: (userId: string, nickname: string, avatarUrl: string) => ipcRenderer.invoke('auth:saveNetease', userId, nickname, avatarUrl),
-  },
+
+  selectLocalFiles: () => ipcRenderer.invoke('dialog:selectLocalFiles'),
+  readLocalFile: (path: string) => ipcRenderer.invoke('file:readAsBlob', path),
+  searchLyrics: (title: string, artist: string) => ipcRenderer.invoke('lyrics:search', title, artist),
+
+  kugouGetSongUrl: (hash: string, albumId?: string) => ipcRenderer.invoke('kg:songUrl', hash, albumId),
+  kugouGetLyric: (hash: string, albumId?: string) => ipcRenderer.invoke('kg:lyric', hash, albumId),
+  kugouSearch: (keyword: string, page?: number, pageSize?: number) => ipcRenderer.invoke('kg:search', keyword, page, pageSize),
+  kugouPlaylistTrackAllNew: (listId: string, page?: number, pageSize?: number) => ipcRenderer.invoke('kg:playlistTrackAllNew', listId, page, undefined, undefined, pageSize),
+  kugouRankList: () => ipcRenderer.invoke('kg:rankList'),
+  kugouRankAudio: (rankId: string, page?: number) => ipcRenderer.invoke('kg:rankAudio', rankId, page),
+  kugouUserPlaylist: (uid: string, token: string, page?: number) => ipcRenderer.invoke('kg:userPlaylist', uid, token, page),
+  kugouRecommendSongs: () => ipcRenderer.invoke('kg:recommendSongs'),
+  kugouQrKey: () => ipcRenderer.invoke('kg:qrKey'),
+  kugouQrCreate: (key: string) => ipcRenderer.invoke('kg:qrCreate', key),
+  kugouQrCheck: (key: string) => ipcRenderer.invoke('kg:qrCheck', key),
+  kugouLoginStatus: () => ipcRenderer.invoke('kg:loginStatus'),
+
+  neteaseGetSongUrl: (id: string) => ipcRenderer.invoke('netease:songUrl', id),
+  neteaseGetLyric: (id: string) => ipcRenderer.invoke('netease:lyric', id),
+  neteaseSearch: (keyword: string, limit?: number, offset?: number) => ipcRenderer.invoke('netease:search', keyword, limit, offset),
+  neteaseRecommendSongs: () => ipcRenderer.invoke('netease:recommendSongs'),
+  neteaseRecommendPlaylists: () => ipcRenderer.invoke('netease:recommendPlaylists'),
+  neteaseLoginStatus: () => ipcRenderer.invoke('netease:loginStatus'),
+  neteaseUserPlaylist: (uid: string) => ipcRenderer.invoke('netease:userPlaylist', uid),
+  neteasePlaylistDetail: (id: string, limit?: number, offset?: number) => ipcRenderer.invoke('netease:playlistDetail', id, limit, offset),
+  neteaseOpenLoginWindow: () => ipcRenderer.invoke('netease:openLoginWindow'),
+
+  saveKugouAuth: (uid: string, token: string, nickname: string, avatar?: string) => ipcRenderer.invoke('auth:saveKugou', uid, token, nickname, avatar),
+  saveNeteaseAuth: (userId: string, nickname: string, avatarUrl: string, cookie?: string) => ipcRenderer.invoke('auth:saveNetease', userId, nickname, avatarUrl, cookie),
+  getAuth: () => ipcRenderer.invoke('auth:get'),
+  clearAuth: (provider?: string) => ipcRenderer.invoke('auth:clear', provider),
+
   onAuthRestored: (callback: (data: any) => void) => {
     ipcRenderer.on('auth:restored', (_e, data) => callback(data))
-  },
-  onKugouReady: (callback: () => void) => {
-    ipcRenderer.on('kugou-api:ready', callback)
   },
   onPlaybackToggle: (callback: () => void) => {
     ipcRenderer.on('playback:toggle', callback)
@@ -55,11 +54,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   onPlaybackPrev: (callback: () => void) => {
     ipcRenderer.on('playback:prev', callback)
-  },
-  onWindowFocus: (callback: () => void) => {
-    ipcRenderer.on('window:focus', callback)
-  },
-  onWindowBlur: (callback: () => void) => {
-    ipcRenderer.on('window:blur', callback)
   },
 })

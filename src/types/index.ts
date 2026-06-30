@@ -1,6 +1,7 @@
 export interface Song {
   id: string
   title: string
+  name?: string
   artist: string
   album: string
   cover: string
@@ -8,17 +9,21 @@ export interface Song {
   url: string
   source: 'local' | 'kugou' | 'netease'
   quality?: 'standard' | 'high' | 'lossless' | 'hires'
-  lyrics?: LyricLine[]
+  lyrics?: LyricsLine[]
   hash?: string
   albumId?: string
   albumAudioId?: string
+  path?: string
+  size?: number
 }
 
-export interface LyricLine {
+export interface LyricsLine {
   time: number
   text: string
   translation?: string
 }
+
+export type LyricLine = LyricsLine
 
 export interface Playlist {
   id: string
