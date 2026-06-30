@@ -1,12 +1,15 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut, dialog, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut, dialog, shell, session } from 'electron'
 import path from 'path'
 import * as fs from 'fs'
 import * as kugouHandler from './kugouHandler'
 import { registerNeteaseHandlers } from './neteaseHandler'
-import { loadAuthData, saveKugouAuth, saveNeteaseAuth, clearAuthData, getNeteaseCookie } from './authPersistence'
+import { loadAuthData, saveKugouAuth, saveNeteaseAuth, clearAuthData } from './authPersistence'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
+
+const NETEASE_LOGIN_PARTITION = 'persist:aurorabeat-netease'
+const NETEASE_LOGIN_URL = 'https://music.163.com/#/login'
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -98,7 +101,7 @@ app.whenReady().then(async () => {
   createTray()
   registerGlobalShortcuts()
 
-  registerNeteaseHandlers()
+  await registerNeteaseHandlers()
 
   const authData = loadAuthData()
   if (authData.kugou || authData.netease) {
@@ -274,87 +277,148 @@ ipcMain.handle('kg:loginStatus', async () => {
   return { loggedIn: !!auth.kugou, user: auth.kugou || null }
 })
 
-ipcMain.handle('netease:openLoginWindow', async () => {
-  return new Promise((resolve) => {
-    const loginWin = new BrowserWindow({
-      width: 900,
-      height: 700,
-      parent: mainWindow || undefined,
-      modal: true,
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-      },
-      title: '网易云音乐登录',
-    })
-    loginWin.loadURL('https://music.163.com/#/login')
-    loginWin.on('closed', () => resolve({ ok: false }))
+// ============ Netease Login (Mineradio-style: persistent session + cookie polling) ============
 
-    let loginDetected = false
-    const checkLogin = async () => {
-      try {
-        if (loginWin.isDestroyed() || loginDetected) return
-        const url = loginWin.webContents.getURL()
-        // 只检测登录成功后的跳转页面，不匹配登录页本身
-        if (url.includes('#/discover') || url.includes('#/my')) {
-          const cookies = await loginWin.webContents.session.cookies.get({ url: 'https://music.163.com' })
-          const cookieStr = cookies.map((c) => `${c.name}=${c.value}`).join('; ')
-          const hasLoginCookie = cookies.some((c) => c.name === 'MUSIC_U')
-          if (hasLoginCookie && cookieStr) {
-            loginDetected = true
-            const ok = await saveNeteaseAuthFromCookie(cookieStr)
-            loginWin.close()
-            resolve({ ok })
-          }
-        }
-      } catch (e) { /* ignore */ }
+function neteaseCookieHasLogin(cookieText: string): boolean {
+  const parts = cookieText.split(';')
+  for (const p of parts) {
+    const [name, value] = p.trim().split('=')
+    if (name === 'MUSIC_U' && value) return true
+  }
+  return false
+}
+
+async function readNeteaseLoginCookie(cookieSession: Electron.Session): Promise<string> {
+  const cookies = await cookieSession.cookies.get({})
+  return cookies
+    .filter((c) => {
+      const d = (c.domain || '').replace(/^\./, '').toLowerCase()
+      return d === '163.com' || d.endsWith('.163.com') || d === 'music.163.com' || d.endsWith('.music.163.com')
+    })
+    .map((c) => `${c.name}=${c.value}`)
+    .join('; ')
+}
+
+async function openNeteaseLoginWindow(owner: BrowserWindow | null): Promise<{ ok: boolean; cookie?: string; reused?: boolean; cancelled?: boolean }> {
+  const cookieSession = session.fromPartition(NETEASE_LOGIN_PARTITION)
+  const initialCookie = await readNeteaseLoginCookie(cookieSession)
+  if (neteaseCookieHasLogin(initialCookie)) {
+    return { ok: true, cookie: initialCookie, reused: true }
+  }
+
+  return new Promise((resolve) => {
+    let settled = false
+    let pollTimer: ReturnType<typeof setInterval> | null = null
+
+    const loginWindow = new BrowserWindow({
+      width: 940,
+      height: 760,
+      parent: owner || undefined,
+      modal: false,
+      show: false,
+      autoHideMenuBar: true,
+      title: '网易云音乐登录',
+      backgroundColor: '#111111',
+      webPreferences: {
+        partition: NETEASE_LOGIN_PARTITION,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    })
+
+    const finish = async (result: { ok: boolean; cookie?: string; reused?: boolean; cancelled?: boolean }) => {
+      if (settled) return
+      settled = true
+      if (pollTimer) clearInterval(pollTimer)
+      if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close()
+      resolve(result)
     }
-    const interval = setInterval(() => {
-      if (loginWin.isDestroyed()) { clearInterval(interval); return }
-      checkLogin()
-    }, 1500)
+
+    const checkCookies = async () => {
+      try {
+        const cookie = await readNeteaseLoginCookie(cookieSession)
+        if (neteaseCookieHasLogin(cookie)) {
+          finish({ ok: true, cookie })
+        }
+      } catch (e) {
+        console.warn('Netease login cookie check failed:', e)
+      }
+    }
+
+    loginWindow.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\/([^/]+\.)?(163|music\.163|netease)\.com/i.test(url)) {
+        loginWindow.loadURL(url).catch(() => {})
+      } else if (/^https?:\/\//i.test(url)) {
+        shell.openExternal(url).catch(() => {})
+      }
+      return { action: 'deny' }
+    })
+
+    loginWindow.webContents.on('did-finish-load', () => {
+      checkCookies()
+      // Auto-click login button to bring up options
+      loginWindow.webContents.executeJavaScript(`
+        setTimeout(() => {
+          const nodes = Array.from(document.querySelectorAll('a, button, span, div'));
+          const loginNode = nodes.find((node) => {
+            const text = (node.textContent || '').trim();
+            if (!/登录|立即登录/.test(text)) return false;
+            const rect = node.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          });
+          if (loginNode) loginNode.click();
+        }, 900);
+      `, true).catch(() => {})
+    })
+
+    loginWindow.on('ready-to-show', () => loginWindow.show())
+
+    loginWindow.on('closed', async () => {
+      if (settled) return
+      if (pollTimer) clearInterval(pollTimer)
+      try {
+        const cookie = await readNeteaseLoginCookie(cookieSession)
+        resolve(neteaseCookieHasLogin(cookie)
+          ? { ok: true, cookie }
+          : { ok: false, cancelled: true })
+      } catch (e) {
+        resolve({ ok: false, cancelled: true })
+      }
+    })
+
+    pollTimer = setInterval(checkCookies, 1200)
+    loginWindow.loadURL(NETEASE_LOGIN_URL).catch((e) => finish({ ok: false }))
   })
+}
+
+async function clearNeteaseLoginSession() {
+  const cookieSession = session.fromPartition(NETEASE_LOGIN_PARTITION)
+  await cookieSession.clearStorageData({
+    storages: ['cookies', 'localstorage', 'indexdb', 'cachestorage'],
+  })
+  return { ok: true }
+}
+
+ipcMain.handle('netease:openLoginWindow', async () => {
+  return openNeteaseLoginWindow(mainWindow)
 })
 
-async function saveNeteaseAuthFromCookie(cookieStr: string): Promise<boolean> {
+ipcMain.handle('netease:clearLogin', async () => {
+  return clearNeteaseLoginSession()
+})
+
+// Sync login cookie to authPersistence whenever we get a fresh login
+async function syncNeteaseCookieToAuth() {
   try {
-    const neteaseApi = require('NeteaseCloudMusicApi')
-    const result = await neteaseApi.login_status({ cookie: cookieStr, realIP: '' })
-    const profile = result?.body?.profile || result?.body?.data?.profile
-    if (profile) {
-      saveNeteaseAuth(String(profile.userId), profile.nickname, profile.avatarUrl, cookieStr)
-      // 同时同步 cookie 到 neteaseHandler 的 cookie 文件
-      try {
-        const fs = require('fs')
-        const path = require('path')
-        const cookiePath = path.join(process.env.APPDATA || process.env.HOME || __dirname, 'aurorabeat-netease-cookie.txt')
-        fs.writeFileSync(cookiePath, cookieStr, 'utf-8')
-      } catch { /* ignore */ }
-      if (mainWindow) {
-        mainWindow.webContents.send('auth:restored', loadAuthData())
-      }
+    const cookieSession = session.fromPartition(NETEASE_LOGIN_PARTITION)
+    const cookie = await readNeteaseLoginCookie(cookieSession)
+    if (neteaseCookieHasLogin(cookie)) {
+      saveNeteaseAuth('', '网易云用户', '', cookie)
       return true
     }
-    // 如果 login_status 没返回 profile，至少保存 cookie 本身
-    console.warn('[Login] login_status returned no profile, saving cookie only')
-    saveNeteaseAuth('unknown', '网易云用户', '', cookieStr)
-    if (mainWindow) {
-      mainWindow.webContents.send('auth:restored', loadAuthData())
-    }
-    return true
-  } catch (e) {
-    console.warn('[Login] Failed to fetch netease user after login:', e)
-    // fallback: 即使 login_status 失败，也保存 cookie
-    try {
-      saveNeteaseAuth('unknown', '网易云用户', '', cookieStr)
-      if (mainWindow) {
-        mainWindow.webContents.send('auth:restored', loadAuthData())
-      }
-      return true
-    } catch {
-      return false
-    }
-  }
+  } catch { /* ignore */ }
+  return false
 }
 
 ipcMain.handle('auth:saveKugou', async (_e, uid: string, token: string, nickname: string, avatar?: string) => {
@@ -369,31 +433,3 @@ ipcMain.handle('auth:saveNetease', async (_e, userId: string, nickname: string, 
 
 ipcMain.handle('auth:get', async () => loadAuthData())
 ipcMain.handle('auth:clear', async (_e, provider?: string) => { clearAuthData(provider); return true })
-
-ipcMain.handle('netease:songUrl', async (_e, id: string) => {
-  try {
-    const neteaseApi = require('NeteaseCloudMusicApi')
-    const cookie = getNeteaseCookie()
-    let result = await neteaseApi.song_url_v1({ id, cookie })
-    let data = result?.body?.data?.[0]
-    if (!data?.url) {
-      result = await neteaseApi.song_url({ id, cookie })
-      data = result?.body?.data?.[0]
-    }
-    return { ok: !!data?.url, url: data?.url?.replace(/^http:/, 'https:') || '' }
-  } catch (e) {
-    console.error('Netease song URL error:', e)
-    return { ok: false, url: '' }
-  }
-})
-
-ipcMain.handle('netease:lyric', async (_e, id: string) => {
-  try {
-    const neteaseApi = require('NeteaseCloudMusicApi')
-    const cookie = getNeteaseCookie()
-    const result = await neteaseApi.lyric_new({ id, cookie })
-    return { lrc: { lyric: result?.body?.lrc?.lyric || '' } }
-  } catch (e) {
-    return { lrc: { lyric: '' } }
-  }
-})

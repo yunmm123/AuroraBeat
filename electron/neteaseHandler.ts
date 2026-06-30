@@ -5,11 +5,10 @@
 //  - 扫码登录 / cookie持久化
 //  - 用户歌单 / 每日推荐 / 私人FM
 // ====================================================================
-import { ipcMain } from 'electron'
-import * as path from 'path'
-import * as fs from 'fs'
-import * as crypto from 'crypto'
+import { ipcMain, session } from 'electron'
 import { getNeteaseCookie } from './authPersistence'
+
+const NETEASE_LOGIN_PARTITION = 'persist:aurorabeat-netease'
 
 // 网易云API函数（动态导入以支持CJS模块）
 let neteaseApi: any = null
@@ -28,8 +27,25 @@ function getApi() {
   return neteaseApi
 }
 
-function loadCookie(): string {
-  // 优先从 authPersistence 读取
+async function loadCookie(): Promise<string> {
+  // 优先从持久化 session 读取（Electron 自动管理）
+  try {
+    const cookieSession = session.fromPartition(NETEASE_LOGIN_PARTITION)
+    const cookies = await cookieSession.cookies.get({})
+    const cookie = cookies
+      .filter((c) => {
+        const d = (c.domain || '').replace(/^\./, '').toLowerCase()
+        return d === '163.com' || d.endsWith('.163.com') || d === 'music.163.com' || d.endsWith('.music.163.com')
+      })
+      .map((c) => `${c.name}=${c.value}`)
+      .join('; ')
+    if (cookie && cookie.includes('MUSIC_U=')) {
+      currentCookie = cookie
+      return cookie
+    }
+  } catch { /* ignore */ }
+  
+  // fallback 到 authPersistence
   const persisted = getNeteaseCookie()
   if (persisted) {
     currentCookie = persisted
@@ -71,9 +87,9 @@ async function callApi(apiName: string, params: Record<string, any> = {}) {
   }
 }
 
-export function registerNeteaseHandlers() {
+export async function registerNeteaseHandlers() {
   // 加载已有cookie
-  loadCookie()
+  await loadCookie()
 
   // ========== 搜索 ==========
   ipcMain.handle('netease:search', async (_e, keyword: string, limit = 30, offset = 0) => {
@@ -151,10 +167,9 @@ export function registerNeteaseHandlers() {
 
   // ========== 登录状态 ==========
   ipcMain.handle('netease:loginStatus', async () => {
-    const cookie = loadCookie()
-    if (!cookie) return { ok: false, loggedIn: false }
+    const cookie = await loadCookie()
+    if (!cookie || !cookie.includes('MUSIC_U=')) return { ok: false, loggedIn: false }
     const res = await callApi('login_status', {})
-    // 802 = 未登录
     if (res.code === 802 || res.code === 801) {
       return { ok: true, loggedIn: false }
     }

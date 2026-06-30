@@ -205,15 +205,20 @@ const App: React.FC = () => {
 
   const checkAuth = async () => {
     if (!electron) return;
+    // 先检查 auth 持久化
     const auth = await electron.getAuth?.();
     if (auth?.kugou) {
       setKugouLoggedIn(true);
       setUserInfo(auth.kugou);
     }
-    if (auth?.netease) {
-      setNeteaseLoggedIn(true);
-      setUserInfo(auth.netease);
-    }
+    // 检查网易云登录状态（从持久化 session 读取）
+    try {
+      const status = await electron.neteaseLoginStatus?.();
+      if (status?.loggedIn && status?.user) {
+        setNeteaseLoggedIn(true);
+        setUserInfo(status.user);
+      }
+    } catch { /* ignore */ }
     electron.onAuthRestored?.((data: any) => {
       if (data.kugou) { setKugouLoggedIn(true); setUserInfo(data.kugou); }
       if (data.netease) { setNeteaseLoggedIn(true); setUserInfo(data.netease); }
@@ -362,20 +367,15 @@ const App: React.FC = () => {
     if (!electron?.neteaseOpenLoginWindow) return;
     const result = await electron.neteaseOpenLoginWindow();
     if (!result?.ok) return;
-    // 等待 auth:restored 事件写入完成
-    await new Promise(r => setTimeout(r, 500));
-    const auth = await electron.getAuth?.();
-    if (auth?.netease) {
+    // 登录成功后保存 cookie 到 authPersistence
+    if (result.cookie) {
+      await electron.saveNeteaseAuth?.('', '网易云用户', '', result.cookie);
+    }
+    // 通过 loginStatus 获取用户信息
+    const status = await electron.neteaseLoginStatus?.();
+    if (status?.loggedIn) {
       setNeteaseLoggedIn(true);
-      setUserInfo(auth.netease);
-    } else {
-      // 再试一次（可能事件还没写完）
-      await new Promise(r => setTimeout(r, 1000));
-      const auth2 = await electron.getAuth?.();
-      if (auth2?.netease) {
-        setNeteaseLoggedIn(true);
-        setUserInfo(auth2.netease);
-      }
+      setUserInfo(status.user || { nickname: '网易云用户' });
     }
   };
 

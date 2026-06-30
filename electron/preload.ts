@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   neteaseUserPlaylist: (uid: string) => ipcRenderer.invoke('netease:userPlaylist', uid),
   neteasePlaylistDetail: (id: string, limit?: number, offset?: number) => ipcRenderer.invoke('netease:playlistDetail', id, limit, offset),
   neteaseOpenLoginWindow: () => ipcRenderer.invoke('netease:openLoginWindow'),
+  neteaseClearLogin: () => ipcRenderer.invoke('netease:clearLogin'),
 
   saveKugouAuth: (uid: string, token: string, nickname: string, avatar?: string) => ipcRenderer.invoke('auth:saveKugou', uid, token, nickname, avatar),
   saveNeteaseAuth: (userId: string, nickname: string, avatarUrl: string, cookie?: string) => ipcRenderer.invoke('auth:saveNetease', userId, nickname, avatarUrl, cookie),
