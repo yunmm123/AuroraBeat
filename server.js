@@ -1,0 +1,485 @@
+// ====================================================================
+//  AuroraBeat Server — 本地HTTP服务器
+//  对标 Mineradio 架构：所有网易云API调用通过本地HTTP服务器
+//  Electron主进程启动此服务器，渲染进程通过fetch调用
+// ====================================================================
+const {
+  search,
+  cloudsearch,
+  song_detail,
+  song_url,
+  song_url_v1,
+  login_status,
+  logout,
+  user_account,
+  user_playlist,
+  like: like_song,
+  likelist,
+  playlist_detail,
+  playlist_track_all,
+  personalized,
+  recommend_resource,
+  recommend_songs,
+  lyric,
+  lyric_new,
+} = require('NeteaseCloudMusicApi');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const PORT = process.env.AURORA_PORT || 0; // 0 = 自动选端口
+const HOST = '127.0.0.1';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const COOKIE_FILE = path.join(process.env.APPDATA || process.env.HOME || __dirname, 'aurorabeat-cookie.txt');
+
+let userCookie = '';
+try { if (fs.existsSync(COOKIE_FILE)) userCookie = fs.readFileSync(COOKIE_FILE, 'utf8').trim(); } catch {}
+
+function saveCookie(c) {
+  userCookie = normalizeCookieHeader(c) || (typeof c === 'string' ? c.trim() : '');
+  try { fs.writeFileSync(COOKIE_FILE, userCookie, 'utf8'); } catch {}
+}
+
+function clearCookie() {
+  userCookie = '';
+  try { fs.unlinkSync(COOKIE_FILE); } catch {}
+}
+
+// ========== Cookie 工具 ==========
+function collectCookieInput(input, picked) {
+  if (input == null) return;
+  if (typeof input === 'object' && !Array.isArray(input)) {
+    Object.keys(input).forEach(key => {
+      const value = input[key];
+      if (value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'value')) {
+        if (!picked.has(key)) picked.set(key, value.value);
+      } else if (typeof value !== 'object') {
+        if (!picked.has(key)) picked.set(key, value);
+      }
+    });
+    return;
+  }
+  String(input).split(/\r?\n/).forEach(line => {
+    line.split(';').forEach(part => {
+      const raw = String(part || '').trim();
+      const idx = raw.indexOf('=');
+      if (idx <= 0) return;
+      const key = raw.slice(0, idx);
+      if (!picked.has(key)) picked.set(key, raw.slice(idx + 1));
+    });
+  });
+}
+
+function normalizeCookieHeader(input) {
+  const picked = new Map();
+  collectCookieInput(input, picked);
+  return Array.from(picked.entries())
+    .filter(([key, value]) => key && value != null && String(value) !== '')
+    .map(([key, value]) => `${key}=${value}`)
+    .join('; ');
+}
+
+// ========== HTTP 工具 ==========
+function sendJSON(res, data, status) {
+  const body = JSON.stringify(data);
+  res.writeHead(status || 200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  });
+  res.end(body);
+}
+
+function readRequestBody(req) {
+  return new Promise((resolve) => {
+    let data = '';
+    req.on('data', chunk => data += chunk);
+    req.on('end', () => {
+      try { resolve(JSON.parse(data) || {}); } catch { resolve({}); }
+    });
+  });
+}
+
+// ========== 业务逻辑 ==========
+function mapArtists(arr) {
+  return (arr || []).filter(Boolean).map(a => ({ id: a.id || 0, name: a.name || '' }));
+}
+
+function mapSongRecord(s) {
+  s = s || {};
+  const artists = mapArtists(s.ar || s.artists);
+  const album = s.al || s.album || {};
+  return {
+    id: s.id,
+    name: s.name || '',
+    artist: artists.map(a => a.name).join(' / '),
+    artists,
+    album: album.name || '',
+    cover: (album.picUrl || album.coverUrl || '').replace(/^http:/, 'https:'),
+    duration: s.dt || s.duration || 0,
+    fee: s.fee || 0,
+  };
+}
+
+function mapPlaylist(pl, tag) {
+  pl = pl || {};
+  return {
+    id: pl.id || pl.resourceId || pl.creativeId,
+    name: pl.name || pl.title || '',
+    cover: pl.picUrl || pl.coverImgUrl || pl.coverUrl || '',
+    trackCount: pl.trackCount || pl.songCount || 0,
+    playCount: pl.playCount || 0,
+    creator: (pl.creator && pl.creator.nickname) || pl.creator?.name || '',
+    tag: tag || '',
+  };
+}
+
+function normalizeLoginInfo(profile, account) {
+  profile = profile || {};
+  account = account || {};
+  const userId = profile.userId || profile.user_id || profile.id || account.userId || account.id || '';
+  if (!userId && userId !== 0) return { loggedIn: false };
+  return {
+    loggedIn: true,
+    userId: String(userId),
+    nickname: profile.nickname || profile.userName || '网易云用户',
+    avatar: profile.avatarUrl || profile.avatar || '',
+  };
+}
+
+async function getLoginInfo() {
+  if (!userCookie) return { loggedIn: false };
+  try {
+    const st = await login_status({ cookie: userCookie, timestamp: Date.now() });
+    const body = st.body || {};
+    const data = body.data || body;
+    const info = normalizeLoginInfo(data.profile || body.profile, data.account || body.account);
+    if (info.loggedIn) return info;
+  } catch (e) {
+    console.warn('[Login] login_status failed:', e.message);
+  }
+  try {
+    const acc = await user_account({ cookie: userCookie, timestamp: Date.now() });
+    const body = acc.body || {};
+    const info = normalizeLoginInfo(body.profile, body.account);
+    if (info.loggedIn) return info;
+    return { loggedIn: false, hasCookie: !!userCookie };
+  } catch (e) {
+    console.warn('[Login] account check failed:', e.message);
+    return { loggedIn: false, hasCookie: !!userCookie };
+  }
+}
+
+async function handleSearch(keywords, limit) {
+  const result = await cloudsearch({ keywords, limit, cookie: userCookie });
+  const songs = result.body?.result?.songs || [];
+  let mapped = songs.map(mapSongRecord);
+  // 补齐缺失封面
+  const missing = mapped.filter(s => !s.cover).map(s => s.id);
+  if (missing.length) {
+    try {
+      const dd = await song_detail({ ids: missing.join(','), cookie: userCookie });
+      const arr = dd.body?.songs || [];
+      const idToPic = {};
+      arr.forEach(s => {
+        const pic = s.al?.picUrl || s.album?.picUrl || '';
+        if (pic) idToPic[s.id] = pic.replace(/^http:/, 'https:');
+      });
+      mapped = mapped.map(s => s.cover ? s : { ...s, cover: idToPic[s.id] || '' });
+    } catch {}
+  }
+  return mapped;
+}
+
+async function handleSongUrl(id, quality) {
+  // 尝试多个音质
+  const levels = quality ? [quality, 'exhigh', 'standard'] : ['exhigh', 'standard', 'lossless'];
+  let trialFallback = null;
+  for (const level of levels) {
+    try {
+      let result;
+      try {
+        result = await song_url_v1({ id, level, cookie: userCookie });
+      } catch {
+        result = await song_url({ id, cookie: userCookie });
+      }
+      const d = result.body?.data?.[0];
+      if (!d) continue;
+      const url = d.url;
+      const freeTrial = d.freeTrialInfo;
+      if (url && !freeTrial) {
+        return { url: url.replace(/^http:/, 'https:'), trial: false, playable: true, level };
+      }
+      if (url && freeTrial && !trialFallback) {
+        trialFallback = { url: url.replace(/^http:/, 'https:'), trial: true, playable: true, level };
+      }
+    } catch (e) {
+      console.warn('[SongUrl]', level, 'failed:', e.message);
+    }
+  }
+  if (trialFallback) return trialFallback;
+  return { url: null, playable: false };
+}
+
+async function handleDiscoverHome() {
+  const info = await getLoginInfo();
+  if (!info.loggedIn) {
+    // 未登录也返回推荐歌单（无需cookie）
+    try {
+      const r = await personalized({ limit: 10, timestamp: Date.now() });
+      const playlists = (r.body?.result || []).map(pl => mapPlaylist(pl, '推荐歌单')).filter(pl => pl.id).slice(0, 10);
+      return { loggedIn: false, playlists, dailySongs: [] };
+    } catch {
+      return { loggedIn: false, playlists: [], dailySongs: [] };
+    }
+  }
+  const tasks = await Promise.allSettled([
+    personalized({ limit: 10, cookie: userCookie, timestamp: Date.now() }),
+    recommend_songs({ cookie: userCookie, timestamp: Date.now() }),
+  ]);
+  const playlists = tasks[0].status === 'fulfilled'
+    ? (tasks[0].value?.body?.result || []).map(pl => mapPlaylist(pl, '推荐歌单')).filter(pl => pl.id).slice(0, 10)
+    : [];
+  const dailySongs = tasks[1].status === 'fulfilled'
+    ? (tasks[1].value?.body?.data?.dailySongs || tasks[1].value?.body?.data?.recommend || []).map(mapSongRecord).filter(s => s.id).slice(0, 20)
+    : [];
+  return { loggedIn: true, user: info, playlists, dailySongs };
+}
+
+// ========== HTTP Server ==========
+const server = http.createServer(async (req, res) => {
+  // CORS preflight
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    });
+    res.end();
+    return;
+  }
+
+  const url = new URL(req.url, `http://${HOST}`);
+  const pn = url.pathname;
+
+  try {
+    // ========== 搜索 ==========
+    if (pn === '/api/search') {
+      const kw = url.searchParams.get('keywords') || '';
+      const limit = parseInt(url.searchParams.get('limit') || '30');
+      const songs = await handleSearch(kw, limit);
+      sendJSON(res, { songs });
+      return;
+    }
+
+    // ========== 歌曲URL ==========
+    if (pn === '/api/song/url') {
+      const id = url.searchParams.get('id');
+      const quality = url.searchParams.get('quality') || '';
+      if (!id) { sendJSON(res, { error: 'Missing id' }, 400); return; }
+      const info = await getLoginInfo();
+      const result = await handleSongUrl(id, quality);
+      sendJSON(res, { ...result, loggedIn: info.loggedIn });
+      return;
+    }
+
+    // ========== 歌词 ==========
+    if (pn === '/api/lyric') {
+      const id = url.searchParams.get('id');
+      if (!id) { sendJSON(res, { error: 'Missing id', lyric: '' }, 400); return; }
+      let body = {};
+      try {
+        if (typeof lyric_new === 'function') {
+          const r = await lyric_new({ id, cookie: userCookie, timestamp: Date.now() });
+          body = r.body || {};
+        }
+      } catch {}
+      if (!(body.lrc?.lyric || body.yrc?.lyric)) {
+        try {
+          const r = await lyric({ id, cookie: userCookie, timestamp: Date.now() });
+          body = r.body || body;
+        } catch {}
+      }
+      sendJSON(res, {
+        lyric: body.lrc?.lyric || '',
+        tlyric: body.tlyric?.lyric || '',
+        yrc: body.yrc?.lyric || '',
+      });
+      return;
+    }
+
+    // ========== 登录: 保存cookie ==========
+    if (pn === '/api/login/cookie') {
+      const body = await readRequestBody(req);
+      const raw = body.cookie || body.data || body.text || '';
+      const normalized = normalizeCookieHeader(raw);
+      if (!normalized.includes('MUSIC_U')) {
+        sendJSON(res, { loggedIn: false, error: 'INVALID_COOKIE' }, 400);
+        return;
+      }
+      saveCookie(normalized);
+      const info = await getLoginInfo();
+      sendJSON(res, { ...info, saved: true });
+      return;
+    }
+
+    // ========== 登录状态 ==========
+    if (pn === '/api/login/status') {
+      const info = await getLoginInfo();
+      sendJSON(res, info);
+      return;
+    }
+
+    // ========== 登出 ==========
+    if (pn === '/api/logout') {
+      try { await logout({ cookie: userCookie }); } catch {}
+      clearCookie();
+      sendJSON(res, { ok: true });
+      return;
+    }
+
+    // ========== 用户歌单 ==========
+    if (pn === '/api/user/playlists') {
+      const info = await getLoginInfo();
+      if (!info.loggedIn) { sendJSON(res, { loggedIn: false, playlists: [] }); return; }
+      const limit = Math.max(12, Math.min(100, parseInt(url.searchParams.get('limit') || '50')));
+      const r = await user_playlist({ uid: info.userId, limit, cookie: userCookie, timestamp: Date.now() });
+      const list = (r.body?.playlist || []).map(pl => ({
+        id: pl.id,
+        name: pl.name,
+        cover: pl.coverImgUrl || '',
+        trackCount: pl.trackCount || 0,
+        creator: pl.creator?.nickname || '',
+      }));
+      sendJSON(res, { loggedIn: true, playlists: list });
+      return;
+    }
+
+    // ========== 歌单歌曲 ==========
+    if (pn === '/api/playlist/tracks') {
+      const id = url.searchParams.get('id');
+      if (!id) { sendJSON(res, { error: 'Missing id', tracks: [] }, 400); return; }
+      let rawTracks = [];
+      let meta = { id, name: '', cover: '', trackCount: 0 };
+      try {
+        const all = await playlist_track_all({ id, limit: 500, offset: 0, cookie: userCookie, timestamp: Date.now() });
+        rawTracks = all.body?.songs || all.body?.tracks || [];
+      } catch (e) {
+        console.warn('[PlaylistTracks] fallback to detail:', e.message);
+        try {
+          const detail = await playlist_detail({ id, s: 0, cookie: userCookie, timestamp: Date.now() });
+          const pl = detail.body?.playlist || {};
+          meta = { id: pl.id || id, name: pl.name || '', cover: pl.coverImgUrl || '', trackCount: pl.trackCount || 0 };
+          rawTracks = pl.tracks || [];
+        } catch (e2) {
+          console.error('[PlaylistTracks] detail also failed:', e2.message);
+        }
+      }
+      const tracks = rawTracks.map(mapSongRecord).filter(t => t.id);
+      if (!meta.trackCount) meta.trackCount = tracks.length;
+      sendJSON(res, { playlist: meta, tracks });
+      return;
+    }
+
+    // ========== 发现页 ==========
+    if (pn === '/api/discover/home') {
+      const data = await handleDiscoverHome();
+      sendJSON(res, data);
+      return;
+    }
+
+    // ========== 喜欢歌曲 ==========
+    if (pn === '/api/song/like') {
+      const body = await readRequestBody(req);
+      const id = body.id;
+      const like = body.like !== false;
+      if (!id) { sendJSON(res, { error: 'Missing id' }, 400); return; }
+      const info = await getLoginInfo();
+      if (!info.loggedIn) { sendJSON(res, { error: 'LOGIN_REQUIRED' }, 401); return; }
+      await like_song({ trackId: id, like, cookie: userCookie, timestamp: Date.now() });
+      sendJSON(res, { ok: true, liked: like });
+      return;
+    }
+
+    // ========== 喜欢列表 ==========
+    if (pn === '/api/song/like/check') {
+      const info = await getLoginInfo();
+      if (!info.loggedIn) { sendJSON(res, { loggedIn: false, liked: {} }); return; }
+      const r = await likelist({ uid: info.userId, cookie: userCookie, timestamp: Date.now() });
+      const likedIds = (r.body?.ids || []).map(String);
+      const liked = {};
+      likedIds.forEach(id => { liked[id] = true; });
+      sendJSON(res, { loggedIn: true, liked });
+      return;
+    }
+
+    // ========== 封面代理 ==========
+    if (pn === '/api/cover') {
+      const coverUrl = url.searchParams.get('url');
+      if (!coverUrl || !/^https?:\/\//i.test(coverUrl)) {
+        res.writeHead(400, { 'Access-Control-Allow-Origin': '*' });
+        res.end('Invalid url');
+        return;
+      }
+      try {
+        const resp = await fetch(coverUrl, { headers: { 'User-Agent': UA, 'Referer': 'https://music.163.com/' } });
+        const ct = resp.headers.get('content-type') || 'image/jpeg';
+        res.writeHead(resp.status, {
+          'Content-Type': ct,
+          'Access-Control-Allow-Origin': '*',
+          'Cross-Origin-Resource-Policy': 'cross-origin',
+          'Cache-Control': 'public, max-age=86400',
+        });
+        const reader = resp.body.getReader();
+        while (true) {
+          const c = await reader.read();
+          if (c.done) break;
+          res.write(c.value);
+        }
+        res.end();
+      } catch (e) {
+        res.writeHead(502, { 'Access-Control-Allow-Origin': '*' });
+        res.end('Fetch failed');
+      }
+      return;
+    }
+
+    // ========== 健康检查 ==========
+    if (pn === '/api/health') {
+      sendJSON(res, { ok: true, hasCookie: !!userCookie });
+      return;
+    }
+
+    // 404
+    sendJSON(res, { error: 'Not Found' }, 404);
+  } catch (err) {
+    console.error('[Server]', pn, err);
+    sendJSON(res, { error: err.message }, 500);
+  }
+});
+
+// 导出启动函数
+let serverInstance = null;
+function startServer(callback) {
+  serverInstance = server.listen(PORT, HOST, () => {
+    const actualPort = serverInstance.address().port;
+    console.log('[AuroraBeat] Server running on port', actualPort);
+    if (callback) callback(actualPort);
+  });
+  return serverInstance;
+}
+
+function stopServer() {
+  if (serverInstance) {
+    serverInstance.close();
+    serverInstance = null;
+  }
+}
+
+// 直接运行时自动启动
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { startServer, stopServer };

@@ -7,14 +7,10 @@ export interface Song {
   cover: string
   duration: number
   url: string
-  source: 'local' | 'kugou' | 'netease'
-  quality?: 'standard' | 'high' | 'lossless' | 'hires'
-  lyrics?: LyricsLine[]
-  hash?: string
-  albumId?: string
-  albumAudioId?: string
+  source: 'local' | 'netease'
   path?: string
   size?: number
+  fee?: number
 }
 
 export interface LyricsLine {
@@ -30,45 +26,13 @@ export interface Playlist {
   name: string
   cover: string
   songs: Song[]
-  source: 'local' | 'kugou'
+  source: 'local' | 'netease'
 }
 
-export interface AudioFeatures {
-  bpm: number
-  beatIntensity: number
-  lowFrequency: number
-  midFrequency: number
-  highFrequency: number
-  spectrum: Float32Array
-  waveform: Float32Array
-  isBeat: boolean
-  mood: 'energetic' | 'calm' | 'sad' | 'happy' | 'electronic' | 'classical'
-}
+export type PlayMode = 'sequence' | 'shuffle' | 'single'
 
-export type VisualEffectType = 'lyrics'
-
-export interface Theme {
-  id: string
-  name: string
-  primary: string
-  secondary: string
-  accent: string
-  background: string
-  surface: string
-  text: string
-  textSecondary: string
-}
-
-export type PlayMode = 'sequence' | 'shuffle' | 'single' | 'loop'
-
-export interface EqualizerPreset {
-  name: string
-  gains: number[]
-}
-
-export interface KugouUser {
-  id: string
+export interface NeteaseUser {
+  userId: string
   nickname: string
   avatar: string
-  isVip: boolean
 }

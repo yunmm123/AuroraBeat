@@ -1,59 +1,37 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  window: {
-    minimize: () => ipcRenderer.invoke('window:minimize'),
-    maximize: () => ipcRenderer.invoke('window:maximize'),
-    close: () => ipcRenderer.invoke('window:close'),
-    isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
-  },
-  app: {
-    getPath: (name: string) => ipcRenderer.invoke('app:getPath', name),
-  },
+  // 窗口控制
+  minimize: () => ipcRenderer.invoke('window:minimize'),
+  maximize: () => ipcRenderer.invoke('window:maximize'),
+  close: () => ipcRenderer.invoke('window:close'),
 
-  selectLocalFiles: () => ipcRenderer.invoke('dialog:selectLocalFiles'),
-  readLocalFile: (path: string) => ipcRenderer.invoke('file:readAsBlob', path),
-  searchLyrics: (title: string, artist: string) => ipcRenderer.invoke('lyrics:search', title, artist),
+  // 服务器端口
+  getServerPort: () => ipcRenderer.invoke('get-server-port'),
 
-  kugouGetSongUrl: (hash: string, albumId?: string) => ipcRenderer.invoke('kg:songUrl', hash, albumId),
-  kugouGetLyric: (hash: string, albumId?: string) => ipcRenderer.invoke('kg:lyric', hash, albumId),
-  kugouSearch: (keyword: string, page?: number, pageSize?: number) => ipcRenderer.invoke('kg:search', keyword, page, pageSize),
-  kugouPlaylistTrackAllNew: (listId: string, page?: number, pageSize?: number) => ipcRenderer.invoke('kg:playlistTrackAllNew', listId, page, undefined, undefined, pageSize),
-  kugouRankList: () => ipcRenderer.invoke('kg:rankList'),
-  kugouRankAudio: (rankId: string, page?: number) => ipcRenderer.invoke('kg:rankAudio', rankId, page),
-  kugouUserPlaylist: (uid: string, token: string, page?: number) => ipcRenderer.invoke('kg:userPlaylist', uid, token, page),
-  kugouRecommendSongs: () => ipcRenderer.invoke('kg:recommendSongs'),
-  kugouQrKey: () => ipcRenderer.invoke('kg:qrKey'),
-  kugouQrCreate: (key: string) => ipcRenderer.invoke('kg:qrCreate', key),
-  kugouQrCheck: (key: string) => ipcRenderer.invoke('kg:qrCheck', key),
-  kugouLoginStatus: () => ipcRenderer.invoke('kg:loginStatus'),
-
-  neteaseGetSongUrl: (id: string) => ipcRenderer.invoke('netease:songUrl', id),
-  neteaseGetLyric: (id: string) => ipcRenderer.invoke('netease:lyric', id),
-  neteaseSearch: (keyword: string, limit?: number, offset?: number) => ipcRenderer.invoke('netease:search', keyword, limit, offset),
-  neteaseRecommendSongs: () => ipcRenderer.invoke('netease:recommendSongs'),
-  neteaseRecommendPlaylists: () => ipcRenderer.invoke('netease:recommendPlaylists'),
-  neteaseLoginStatus: () => ipcRenderer.invoke('netease:loginStatus'),
-  neteaseUserPlaylist: (uid: string) => ipcRenderer.invoke('netease:userPlaylist', uid),
-  neteasePlaylistDetail: (id: string, limit?: number, offset?: number) => ipcRenderer.invoke('netease:playlistDetail', id, limit, offset),
-  neteaseOpenLoginWindow: () => ipcRenderer.invoke('netease:openLoginWindow'),
+  // 网易云登录
+  neteaseOpenLogin: () => ipcRenderer.invoke('netease:openLogin'),
   neteaseClearLogin: () => ipcRenderer.invoke('netease:clearLogin'),
 
-  saveKugouAuth: (uid: string, token: string, nickname: string, avatar?: string) => ipcRenderer.invoke('auth:saveKugou', uid, token, nickname, avatar),
-  saveNeteaseAuth: (userId: string, nickname: string, avatarUrl: string, cookie?: string) => ipcRenderer.invoke('auth:saveNetease', userId, nickname, avatarUrl, cookie),
-  getAuth: () => ipcRenderer.invoke('auth:get'),
-  clearAuth: (provider?: string) => ipcRenderer.invoke('auth:clear', provider),
+  // 本地文件
+  selectLocalFiles: () => ipcRenderer.invoke('dialog:selectLocalFiles'),
+  readLocalFile: (filePath: string) => ipcRenderer.invoke('file:readAsBlob', filePath),
+  searchLyrics: (title: string, artist: string) => ipcRenderer.invoke('lyrics:search', title, artist),
 
-  onAuthRestored: (callback: (data: any) => void) => {
-    ipcRenderer.on('auth:restored', (_e, data) => callback(data))
+  // 媒体键
+  onPlaybackToggle: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('playback:toggle', listener)
+    return () => ipcRenderer.removeListener('playback:toggle', listener)
   },
-  onPlaybackToggle: (callback: () => void) => {
-    ipcRenderer.on('playback:toggle', callback)
+  onPlaybackNext: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('playback:next', listener)
+    return () => ipcRenderer.removeListener('playback:next', listener)
   },
-  onPlaybackNext: (callback: () => void) => {
-    ipcRenderer.on('playback:next', callback)
-  },
-  onPlaybackPrev: (callback: () => void) => {
-    ipcRenderer.on('playback:prev', callback)
+  onPlaybackPrev: (cb: () => void) => {
+    const listener = () => cb()
+    ipcRenderer.on('playback:prev', listener)
+    return () => ipcRenderer.removeListener('playback:prev', listener)
   },
 })

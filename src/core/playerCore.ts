@@ -22,6 +22,7 @@ type Listener = (state: PlayerState) => void;
 class PlayerCore {
   private audio: HTMLAudioElement | null = null;
   private trackSwitchToken = 0;
+  private serverPort = 0;
   private state: PlayerState = {
     queue: [],
     currentIndex: -1,
@@ -47,6 +48,18 @@ class PlayerCore {
 
   constructor() {
     this.initAudio();
+    // 获取服务器端口
+    (window as any).electronAPI?.getServerPort?.().then((port: number) => {
+      this.serverPort = port;
+    });
+  }
+
+  setServerPort(port: number) {
+    this.serverPort = port;
+  }
+
+  private get apiBase() {
+    return `http://127.0.0.1:${this.serverPort}`;
   }
 
   private initAudio() {
@@ -186,50 +199,50 @@ class PlayerCore {
   }
 
   async resolveSongUrl(song: Song): Promise<string | null> {
+    // Blob URL 直接返回
     if (song.url && song.url.startsWith('blob:')) return song.url;
+    // HTTP URL 直接返回
     if (song.url && song.url.startsWith('http')) return song.url;
+    // 本地文件通过 Electron 读取为 data URL
     if (song.url && song.url.startsWith('file://')) {
       try {
-        const blobUrl = await (window as any).electronAPI?.readLocalFile?.(song.url);
-        return blobUrl || null;
+        const dataUrl = await (window as any).electronAPI?.readLocalFile?.(song.url);
+        return dataUrl || null;
       } catch (e) {
         console.error('[PlayerCore] read local file error:', e);
         return null;
       }
     }
-
-    try {
-      if (song.source === 'kugou') {
-        const hash = song.hash || song.id;
-        const result = await (window as any).electronAPI?.kugouGetSongUrl?.(hash, song.albumId);
-        return result?.url || null;
-      } else if (song.source === 'netease') {
-        const result = await (window as any).electronAPI?.neteaseGetSongUrl?.(song.id);
-        return result?.url || result?.data?.[0]?.url || null;
+    // 网易云歌曲通过本地服务器获取URL
+    if (song.source === 'netease' && this.serverPort) {
+      try {
+        const res = await fetch(`${this.apiBase}/api/song/url?id=${song.id}`);
+        const data = await res.json();
+        if (data.url) return data.url;
+        console.warn('[PlayerCore] No URL for song', song.id, data);
+      } catch (e) {
+        console.error('[PlayerCore] resolveSongUrl error:', e);
       }
-    } catch (e) {
-      console.error('[PlayerCore] resolveSongUrl error:', e);
     }
     return null;
   }
 
   async fetchLyrics(song: Song): Promise<LyricsLine[]> {
     try {
-      if (song.source === 'kugou') {
-        const hash = song.hash || song.id;
-        const result = await (window as any).electronAPI?.kugouGetLyric?.(hash, song.albumId);
-        return this.parseLyrics(result?.lyric || '');
-      } else if (song.source === 'netease') {
-        const result = await (window as any).electronAPI?.neteaseGetLyric?.(song.id);
-        return this.parseLyrics(result?.lrc?.lyric || result?.lyric || '');
+      let lrc = '';
+      if (song.source === 'netease' && this.serverPort) {
+        const res = await fetch(`${this.apiBase}/api/lyric?id=${song.id}`);
+        const data = await res.json();
+        lrc = data.lyric || '';
       } else if (song.source === 'local') {
         const result = await (window as any).electronAPI?.searchLyrics?.(song.title || song.name || '', song.artist);
-        return this.parseLyrics(result?.lyric || '');
+        lrc = result?.lyric || '';
       }
+      return this.parseLyrics(lrc);
     } catch (e) {
       console.error('[PlayerCore] fetchLyrics error:', e);
+      return [];
     }
-    return [];
   }
 
   private parseLyrics(lrcString: string): LyricsLine[] {
@@ -295,7 +308,7 @@ class PlayerCore {
         return false;
       }
 
-      if (song.source === 'kugou' || song.source === 'local') {
+      if (song.source === 'local') {
         this.state.currentSong = { ...song, url };
         const idx = this.state.queue.findIndex((s) => s.id === song.id);
         if (idx >= 0) this.state.queue[idx] = this.state.currentSong!;

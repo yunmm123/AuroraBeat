@@ -81,6 +81,10 @@ export function usePlayer() {
     playerCore.setAnalyserReadyHandler(fn);
   }, []);
 
+  const setServerPort = useCallback((port: number) => {
+    playerCore.setServerPort(port);
+  }, []);
+
   return {
     ...state,
     playSong,
@@ -101,5 +105,6 @@ export function usePlayer() {
     clearQueue,
     getAnalyser,
     setAnalyserReadyHandler,
+    setServerPort,
   };
 }
