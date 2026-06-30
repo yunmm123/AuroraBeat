@@ -236,7 +236,7 @@ function useVisualEngine(
         vEdgeBoost = 0.0;
         vSourceLum = 0.5;
         vDepth = 0.0;
-        vBeatGlow = uBeat; // 节拍发光强度，传给 fragment
+        // vBeatGlow 用 beatEnv（节拍包络）驱动发光，而非旧 uBeat，让卡点发光更准确
 
         // 封面颜色（新旧渐变）
         vec2 cuv = safeCoverUv(aUv);
@@ -262,6 +262,7 @@ function useVisualEngine(
         float beatPhase = r1 * 0.4; // 0~0.4 的相位差
         float beatT = max(0.0, uBeatAge - beatPhase); // 该粒子的节拍龄
         float beatEnv = exp(-beatT * 4.0) * uBeatStrength; // 节拍包络（快速衰减）
+        vBeatGlow = beatEnv; // 节拍发光强度，传给 fragment（用 beatEnv 驱动卡点发光）
         // 节拍方向（基于粒子哈希，每个粒子有自己的爆发方向）
         vec3 beatDir = normalize(basePos + vec3(0.001));
 
@@ -466,17 +467,21 @@ function useVisualEngine(
     let prevTime = performance.now();
     let rippleWriteIdx = 0;
     let beatCooldown = 0;
-    // === Spectral Flux 节拍检测（比单纯低频更准确，参考 R.P.M. 文章）===
-    // 上一帧节拍频谱（用于计算帧间正变化之和 = spectral flux）
+    // === Spectral Flux 节拍检测（参考 beat-detection npm / librosa onset / Joe Sullivan 算法）===
+    // 关键：fftSize=2048 @ 44100Hz → 每 bin ≈ 21.5Hz
+    //   kick 区 50-150Hz → bin 2~7（只用这段算 flux，避免人声/乐器污染）
+    // 上一帧节拍频谱（用于计算帧间正变化 = spectral flux）
     let prevBeatSpectrum: Float32Array | null = null;
-    // 滚动历史窗口（用于自适应阈值 = mean + 1.5*stdDev）
-    const FLUX_HISTORY_LEN = 43; // 约 0.7s @ 60fps
+    // 滚动历史窗口（约 200ms @ 60fps，用于自适应阈值 mean * delta）
+    const FLUX_HISTORY_LEN = 12;
     const fluxHistory: number[] = new Array(FLUX_HISTORY_LEN).fill(0);
     let fluxHistoryIdx = 0;
-    // 上次节拍强度（用于避免极弱节拍触发）
-    let lastBeatFlux = 0;
-    // 节拍后阈值提升的"不应期"，避免单一峰值反复触发
+    // 上一帧 flux 值（用于局部最大值检测：当前帧必须 > 上一帧才算峰值）
+    let prevFlux = 0;
+    // 节拍后不应期（refractory），避免单一击打重复触发
     let beatRefractory = 0;
+    // 调试：节流输出节拍触发情况
+    let beatDebugTimer = 0;
     // 电影级缓慢相机漂移（替代抖动），呼吸感而非晃动
     let camDriftX = 0, camDriftY = 0;
     // 鼠标追踪状态（屏幕像素坐标 + 平滑速度）
@@ -554,44 +559,37 @@ function useVisualEngine(
 
         const bassOnset = Math.max(0, bKick - smoothBass * 0.9);
 
-        // === Spectral Flux 节拍检测（核心节奏卡点算法）===
-        // 1) 计算 spectral flux：当前帧相对上一帧的频谱正变化之和（只取增量，即 onset）
-        //    使用低频+中频段（kickEnd~midEnd），这是节奏信息最集中的频段
-        // 2) 自适应阈值：用过去 ~0.7s 的 flux 滚动均值 + 1.5*标准差
-        //    这种自适应方法在不同歌曲/响度下都能稳定工作
-        // 3) 触发条件：flux > threshold 且超过不应期（refractory ~250ms）
-        // 4) 触发后：uBeatAge=0 / uBeatCount++ / uBeatStrength=flux归一化值
+        // === Spectral Flux 节拍检测（生产级实现，参考 beat-detection/librosa）===
+        // 算法：flux = Σ max(0, cur-bin - prev-bin) over kick 区(50-150Hz)
+        //       threshold = mean(flux history) * delta(1.4)  ← 标准自适应阈值
+        //       触发条件：flux > threshold && flux > prevFlux(局部峰值) && refractory 结束
+        // 关键修复：bin 范围收窄到 kick 区，避免人声污染（之前用 7-280 太大）
         let flux = 0;
+        // fftSize=2048 @ 44100Hz → bin 2≈43Hz, bin 7≈150Hz（kick 主能量区）
+        const FLUX_BIN_LO = 2;
+        const FLUX_BIN_HI = Math.min(7, beatData.length - 1);
         if (prevBeatSpectrum) {
-          // 限制 flux 计算到节奏频段（约 80Hz ~ 2kHz），避免高频抖动误触发
-          const fluxStart = kickEnd;
-          const fluxEnd = Math.min(midEnd, beatData.length);
-          for (let i = fluxStart; i < fluxEnd; i++) {
+          for (let i = FLUX_BIN_LO; i <= FLUX_BIN_HI; i++) {
             const cur = beatData[i] / 255;
             const prev = prevBeatSpectrum[i];
             const diff = cur - prev;
             if (diff > 0) flux += diff; // 只累加正变化（onset）
           }
-          // 归一化到频段数量
-          flux /= Math.max(1, fluxEnd - fluxStart);
+          // 归一化到 bin 数量
+          flux /= Math.max(1, FLUX_BIN_HI - FLUX_BIN_LO + 1);
         }
-        // 更新历史窗口（写入当前 flux，供下一帧阈值计算）
+
+        // 更新历史窗口（用于自适应阈值）
         fluxHistory[fluxHistoryIdx] = flux;
         fluxHistoryIdx = (fluxHistoryIdx + 1) % FLUX_HISTORY_LEN;
-        // 计算均值与标准差
+        // 计算 flux 均值（标准做法：threshold = mean * delta）
         let fluxMean = 0;
         for (let i = 0; i < FLUX_HISTORY_LEN; i++) fluxMean += fluxHistory[i];
         fluxMean /= FLUX_HISTORY_LEN;
-        let fluxVar = 0;
-        for (let i = 0; i < FLUX_HISTORY_LEN; i++) {
-          const d = fluxHistory[i] - fluxMean;
-          fluxVar += d * d;
-        }
-        const fluxStd = Math.sqrt(fluxVar / FLUX_HISTORY_LEN);
-        // 自适应阈值：均值 + 1.5 标准差（文献常用 1.0~2.0，1.5 较平衡）
-        const fluxThreshold = fluxMean + fluxStd * 1.5;
+        // delta=1.4：文献推荐 1.3-1.5，1.4 在大多数歌曲上平衡
+        const fluxThreshold = fluxMean * 1.4;
 
-        // 复制当前频谱到 prevBeatSpectrum 供下一帧使用
+        // 复制当前频谱供下一帧使用
         if (beatData) {
           if (!prevBeatSpectrum || prevBeatSpectrum.length !== beatData.length) {
             prevBeatSpectrum = new Float32Array(beatData.length);
@@ -599,37 +597,55 @@ function useVisualEngine(
           for (let i = 0; i < beatData.length; i++) prevBeatSpectrum[i] = beatData[i] / 255;
         }
 
-        // 不应期倒计时（避免连续触发）
+        // 不应期倒计时（220ms，对应最快 ~270BPM，过滤单次击打回响）
         beatRefractory = Math.max(0, beatRefractory - dt);
 
-        // 节拍触发判定：flux 超过自适应阈值 + 不应期结束 + 当前 flux 比上次节拍强（避免弱节拍跟随）
-        // 同时要求 flux 有绝对强度（>0.02），避免静音段噪声误触发
-        const fluxStrength = Math.max(0, flux - fluxThreshold); // 超出阈值的部分
-        if (flux > fluxThreshold && beatRefractory <= 0 && flux > 0.02 && flux > lastBeatFlux * 0.45) {
-          // 触发节拍卡点行为：重置节拍龄，节拍数 +1，记录节拍强度
+        // 节拍触发判定（下降沿峰值检测）：
+        //   当 flux 开始下降(flux < prevFlux)时，prevFlux 就是局部峰值
+        //   用 prevFlux 判断是否超阈值，这样触发的是真正的峰值时刻（仅 1 帧延迟~16ms）
+        //   配合 refractory 防止单次击打重复触发
+        const isPeak = flux < prevFlux; // 下降沿 → 上一帧是峰值
+        const peakFlux = prevFlux;
+        const overThreshold = peakFlux > fluxThreshold;
+        if (overThreshold && isPeak && beatRefractory <= 0 && peakFlux > 0.01) {
+          // 触发节拍卡点行为
           uniforms.uBeatAge.value = 0;
           uniforms.uBeatCount.value += 1;
-          // 节拍强度：flux 超出阈值的程度 + 低频强度共同决定，钳制到 0~1
-          const strength = Math.min(1, fluxStrength * 6 + bassNorm * 0.3);
+          // 节拍强度 = peakFlux 相对阈值的倍率（自适应，不同歌曲可比）
+          const strength = Math.min(1, Math.max(0.35, peakFlux / Math.max(0.001, fluxThreshold) * 0.5));
           uniforms.uBeatStrength.value = strength;
-          lastBeatFlux = flux;
-          // 不应期约 250ms（限制最快节拍到 ~240BPM，过滤过高误判）
-          beatRefractory = 0.25;
-          // beatPulse 用于涟漪/相机推近等次级效果（保留原涟漪触发行为）
-          beatPulse = Math.max(beatPulse, Math.min(0.18, fluxStrength * 0.6 + 0.04));
-          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, Math.min(1, strength));
+          // 不应期 220ms
+          beatRefractory = 0.22;
+          // beatPulse 用于涟漪/相机等次级效果
+          beatPulse = Math.max(beatPulse, Math.min(0.2, strength * 0.18));
+          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, strength);
           beatCooldown = 0.18;
+          // 调试日志（节流 500ms 一次，验证节拍是否触发）
+          beatDebugTimer += dt;
+          if (beatDebugTimer > 0.5) {
+            beatDebugTimer = 0;
+            console.log('[BEAT]', {
+              peakFlux: peakFlux.toFixed(4),
+              threshold: fluxThreshold.toFixed(4),
+              mean: fluxMean.toFixed(4),
+              strength: strength.toFixed(2),
+              count: uniforms.uBeatCount.value,
+              bass: bKick.toFixed(3),
+            });
+          }
         } else {
-          // 节拍强度随时间快速衰减（每个粒子 shader 内也会用 beatEnv 衰减）
-          // 这里只对 uBeatStrength 做缓慢清零，实际卡点效果由 uBeatAge 在 shader 里驱动
-          uniforms.uBeatStrength.value *= Math.pow(0.5, dt * 2);
+          // 非节拍帧：uBeatStrength 不衰减（保持上次触发值）
+          // 衰减完全由 shader 内 beatEnv = exp(-beatT * 4) * uBeatStrength 负责
+          // beatT 随 uBeatAge 增大会自动让 beatEnv → 0，无需在 JS 端再衰减
         }
         // 节拍龄每帧累加（shader 用它计算 exp(-beatT * 4) 包络）
         uniforms.uBeatAge.value += dt;
+        // 记录本帧 flux 供下一帧峰值比较
+        prevFlux = flux;
 
-        // 兼容旧逻辑：bassOnset 仍可用于次级效果（这里仅作 beatPulse 备份）
+        // 兼容旧逻辑：bassOnset 备份 beatPulse（弱化，主节拍源是 spectral flux）
         if (bassOnset > 0.075 && bKick > 0.32 && beatCooldown <= 0) {
-          beatPulse = Math.max(beatPulse, Math.min(0.12, bassOnset * 0.15));
+          beatPulse = Math.max(beatPulse, Math.min(0.1, bassOnset * 0.1));
           beatCooldown = 0.18;
         }
         beatPulse *= Math.pow(0.36, dt);
@@ -639,12 +655,21 @@ function useVisualEngine(
         uniforms.uTreble.value = smoothTreb;
         uniforms.uBeat.value = beatPulse;
         uniforms.uEnergy.value = smoothEnergy;
+
+        // 写入调试信息供 BeatDebugOverlay 显示
+        (window as any).__beatDebug = {
+          count: uniforms.uBeatCount.value,
+          flux: prevFlux,
+          threshold: fluxThreshold,
+          strength: uniforms.uBeatStrength.value,
+          age: uniforms.uBeatAge.value,
+          beat: beatPulse,
+        };
       } else {
         smoothBass *= 0.91; smoothMid *= 0.91; smoothTreb *= 0.91; smoothEnergy *= 0.91; beatPulse *= 0.82;
         bassPeak *= 0.99;
-        // 未播放/无分析器时：节拍龄继续累加（让粒子回归静止），节拍强度衰减
+        // 未播放/无分析器时：节拍龄继续累加（让粒子回归静止）
         uniforms.uBeatAge.value += dt;
-        uniforms.uBeatStrength.value *= Math.pow(0.5, dt * 2);
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
         uniforms.uTreble.value = smoothTreb;
@@ -852,6 +877,31 @@ function detectMood(song: Song | null): Mood {
   if (/dark|夜|shadow|death|blood|黑|暗|魔|night|demon|evil/.test(text)) return 'dark';
   return 'calm';
 }
+
+// ====================================================================
+// 临时节拍调试显示（验证节拍检测是否工作）
+// ====================================================================
+const BeatDebugOverlay: React.FC = () => {
+  const [info, setInfo] = React.useState({ count: 0, flux: 0, threshold: 0, strength: 0, age: 0, beat: 0 });
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      const d = (window as any).__beatDebug;
+      if (d) setInfo(d);
+    }, 100);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div className="absolute top-16 left-4 z-50 bg-black/70 text-green-400 font-mono text-xs px-3 py-2 rounded pointer-events-none">
+      <div>BEAT COUNT: {info.count}</div>
+      <div>FLUX: {info.flux.toFixed(4)} / THRESH: {info.threshold.toFixed(4)}</div>
+      <div>STRENGTH: {info.strength.toFixed(2)} / AGE: {info.age.toFixed(3)}</div>
+      <div>BEAT PULSE: {info.beat.toFixed(3)}</div>
+      <div style={{ color: info.count > 0 ? '#0f0' : '#f00' }}>
+        {info.count > 0 ? '✓ 节拍检测工作中' : '✗ 等待节拍触发...'}
+      </div>
+    </div>
+  );
+};
 
 // ====================================================================
 // 主应用
@@ -1110,6 +1160,8 @@ const App: React.FC = () => {
       )}
       {/* Three.js 粒子画布 */}
       <canvas ref={canvasRef} className="absolute inset-0 z-10 pointer-events-none" />
+      {/* 临时节拍调试显示 */}
+      <BeatDebugOverlay />
       {/* 涟漪点击层：捕获空白区域点击触发涟漪（UI 控件位于更高 z-index，会优先消费自己的点击） */}
       <div
         className="absolute inset-0 z-[15] pointer-events-auto"
