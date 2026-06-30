@@ -7,45 +7,10 @@ export default function QueuePanel() {
   
   const handlePlaySong = (index: number) => {
     const song = queue[index]
-    if (!song) return
+    if (!song || index === queueIndex) return
     
-    const { playSong } = usePlayerStore.getState()
-    // If the song has no URL, we need to pass the full queue
-    // and the store will resolve the URL via the effect chain
-    if (song.url || song.source === 'local') {
-      usePlayerStore.setState({
-        currentSong: song,
-        queueIndex: index,
-        isPlaying: true,
-        currentTime: 0,
-        lyrics: [],
-        lyricsLoading: true,
-      })
-      // Load lyrics for the selected song
-      const trackName = song.title.replace(/\.[^.]+$/, '')
-      const artistName = song.artist !== '未知艺术家' ? song.artist : ''
-      const songHash = (song as any).hash || ''
-      // Trigger lyrics loading
-      const { loadLyricsForSong } = usePlayerStore.getState() as any
-      if (typeof loadLyricsForSong === 'function') {
-        loadLyricsForSong(trackName, artistName, song.duration, songHash)
-      }
-    } else {
-      // For cloud songs without URL, set the song and let the resolveSongUrl handle it
-      usePlayerStore.setState({
-        currentSong: song,
-        queueIndex: index,
-        isPlaying: true,
-        currentTime: 0,
-        lyrics: [],
-        lyricsLoading: true,
-      })
-      // Trigger URL resolution
-      const { resolveSongUrl } = (usePlayerStore as any).getState?.()
-      if (typeof resolveSongUrl === 'function') {
-        resolveSongUrl(song, index)
-      }
-    }
+    // Simply call playSong with the current queue - it handles everything
+    usePlayerStore.getState().playSong(song, queue)
   }
   
   if (!showQueue) return null

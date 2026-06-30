@@ -183,7 +183,6 @@ function isPureMusic(trackName: string, artistName: string): boolean {
 }
 
 // Resolve the actual play URL for cloud songs. Returns the URL string or empty string.
-// Used by nextSong/prevSong to resolve URL before setting state.
 async function resolveSongUrlSync(song: Song): Promise<string> {
   if (song.source === 'kugou') {
     const hash = (song as any).hash
@@ -211,6 +210,23 @@ async function resolveSongUrlSync(song: Song): Promise<string> {
     }
   }
   return ''
+}
+
+// Resolve URL and update the queue + currentSong in the store
+async function resolveSongUrlAndUpdate(song: Song, queueIndex: number) {
+  const url = await resolveSongUrlSync(song)
+  if (url) {
+    const state = usePlayerStore.getState()
+    const updatedQueue = [...state.queue]
+    const updatedSong = { ...song, url }
+    updatedQueue[queueIndex] = updatedSong
+    // Only update currentSong if we're still on the same song
+    const isCurrentSong = state.currentSong?.id === song.id
+    usePlayerStore.setState({
+      queue: updatedQueue,
+      currentSong: isCurrentSong ? updatedSong : state.currentSong
+    })
+  }
 }
 
 async function loadLyricsForSong(trackName: string, artistName: string, duration?: number, hash?: string) {
@@ -348,7 +364,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   toggleMute: () => set({ isMuted: !get().isMuted }),
   setPlayMode: (mode) => set({ playMode: mode }),
   setPlaybackRate: (rate) => set({ playbackRate: rate }),
-  nextSong: async () => {
+  nextSong: () => {
     const { queue, queueIndex, playMode } = get()
     if (queue.length === 0) return
     let nextIndex = queueIndex
@@ -360,44 +376,31 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     } else {
       nextIndex = (queueIndex + 1) % queue.length
     }
-    let nextSong = queue[nextIndex]
-    
-    // Resolve URL before setting state to avoid race conditions
-    if (!nextSong.url && (nextSong.source === 'kugou' || nextSong.source === 'netease')) {
-      const resolvedUrl = await resolveSongUrlSync(nextSong)
-      if (resolvedUrl) {
-        nextSong = { ...nextSong, url: resolvedUrl }
-        const updatedQueue = [...queue]
-        updatedQueue[nextIndex] = nextSong
-        set({ queue: updatedQueue })
-      }
-    }
+    const nextSong = queue[nextIndex]
     
     set({ queueIndex: nextIndex, currentSong: nextSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
+    
+    // If the song has no URL, resolve it asynchronously
+    if (!nextSong.url && (nextSong.source === 'kugou' || nextSong.source === 'netease')) {
+      resolveSongUrlAndUpdate(nextSong, nextIndex)
+    }
     
     const trackName = nextSong.title.replace(/\.[^.]+$/, '')
     const artistName = nextSong.artist !== '未知艺术家' ? nextSong.artist : ''
     const songHash = (nextSong as any).hash || ''
     loadLyricsForSong(trackName, artistName, nextSong.duration, songHash)
   },
-  prevSong: async () => {
+  prevSong: () => {
     const { queue, queueIndex } = get()
     if (queue.length === 0) return
     const prevIndex = queueIndex === 0 ? queue.length - 1 : queueIndex - 1
-    let prevSong = queue[prevIndex]
-    
-    // Resolve URL before setting state to avoid race conditions
-    if (!prevSong.url && (prevSong.source === 'kugou' || prevSong.source === 'netease')) {
-      const resolvedUrl = await resolveSongUrlSync(prevSong)
-      if (resolvedUrl) {
-        prevSong = { ...prevSong, url: resolvedUrl }
-        const updatedQueue = [...queue]
-        updatedQueue[prevIndex] = prevSong
-        set({ queue: updatedQueue })
-      }
-    }
+    const prevSong = queue[prevIndex]
     
     set({ queueIndex: prevIndex, currentSong: prevSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
+    
+    if (!prevSong.url && (prevSong.source === 'kugou' || prevSong.source === 'netease')) {
+      resolveSongUrlAndUpdate(prevSong, prevIndex)
+    }
     
     const trackName = prevSong.title.replace(/\.[^.]+$/, '')
     const artistName = prevSong.artist !== '未知艺术家' ? prevSong.artist : ''

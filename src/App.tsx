@@ -6,6 +6,7 @@ import TitleBar from '@/components/TitleBar'
 import PlaylistSidebar from '@/components/PlaylistSidebar'
 import PlayControlBar from '@/components/PlayControlBar'
 import LyricsVisual from '@/components/LyricsVisual'
+import NowPlayingView from '@/components/NowPlayingView'
 import SongListPanel from '@/components/SongListPanel'
 import QueuePanel from '@/components/QueuePanel'
 import SettingsPanel from '@/components/SettingsPanel'
@@ -46,6 +47,7 @@ function App() {
     setKugouUserInfo,
     showNetease,
     toggleNetease,
+    showLyrics,
   } = usePlayerStore()
 
   // Load songs from IndexedDB on mount
@@ -128,6 +130,16 @@ function App() {
     }
   }, [visualEffect])
   
+  // Update visual engine when song changes
+  useEffect(() => {
+    if (!visualEngineRef.current) return
+    if (currentSong?.cover) {
+      visualEngineRef.current.setSongInfo(currentSong.cover)
+    } else {
+      visualEngineRef.current.hideAlbumArt()
+    }
+  }, [currentSong?.id, currentSong?.cover])
+  
   // Audio element setup
   useEffect(() => {
     const audio = new Audio()
@@ -143,8 +155,6 @@ function App() {
       }
     }
     initAudio()
-    
-    // Main animation loop - uses REAL audio data when playing, demo when idle
     let time = 0
     const animationLoop = () => {
       if (!visualEngineRef.current) {
@@ -245,27 +255,38 @@ function App() {
     const audio = audioElementRef.current
     
     if (currentSong.url) {
-      // Only change src if URL is different
-      if (audio.src !== currentSong.url) {
+      const urlChanged = audio.src !== currentSong.url
+      if (urlChanged) {
         audio.src = currentSong.url
         audio.load()
       }
       if (isPlaying) {
-        audio.play().catch(() => {})
+        const tryPlay = () => {
+          audio.play().catch(() => {})
+        }
+        if (urlChanged) {
+          // Wait for the audio to be ready before playing
+          audio.addEventListener('canplay', tryPlay, { once: true })
+        } else {
+          tryPlay()
+        }
       }
     } else {
-      // Song has no URL yet (e.g. from queue), pause and wait for URL resolution
+      // Song has no URL yet (e.g. from queue/next), pause and wait for async resolution
       audio.pause()
     }
   }, [currentSong])
 
   // Handle play/pause
   useEffect(() => {
-    if (!audioElementRef.current) return
+    if (!audioElementRef.current || !currentSong?.url) return
+    const audio = audioElementRef.current
     if (isPlaying) {
-      audioElementRef.current.play().catch(() => {})
+      if (audio.paused || audio.ended) {
+        audio.play().catch(() => {})
+      }
     } else {
-      audioElementRef.current.pause()
+      audio.pause()
     }
   }, [isPlaying])
   
@@ -312,7 +333,15 @@ function App() {
           <PlaylistSidebar />
           
           <div className="flex-1 relative pointer-events-auto">
-            {currentPlaylist ? <SongListPanel /> : <LyricsVisual />}
+            {showLyrics ? (
+              <LyricsVisual />
+            ) : currentPlaylist ? (
+              <SongListPanel />
+            ) : currentSong ? (
+              <NowPlayingView />
+            ) : (
+              <NowPlayingView />
+            )}
           </div>
           
           <QueuePanel />

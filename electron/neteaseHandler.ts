@@ -62,13 +62,17 @@ async function callApi(apiName: string, params: Record<string, any> = {}) {
   const api = getApi()
   if (!api) return { ok: false, error: 'API not loaded' }
 
-  const cookie = params.cookie || currentCookie || loadCookie()
+  const isLoginApi = apiName.startsWith('login_')
   const fullParams: Record<string, any> = { ...params }
-  if (cookie) {
-    fullParams.cookie = cookie
-  }
-  // Only add realIP for non-login APIs to avoid device environment detection
-  if (!apiName.startsWith('login_')) {
+  
+  if (isLoginApi) {
+    // Login APIs: do NOT pass cookie or realIP to avoid device environment risk detection
+    delete fullParams.cookie
+  } else {
+    const cookie = params.cookie || currentCookie || loadCookie()
+    if (cookie) {
+      fullParams.cookie = cookie
+    }
     fullParams.realIP = '116.25.146.177'
   }
 

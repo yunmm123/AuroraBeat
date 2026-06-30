@@ -132,26 +132,27 @@ async function callApi(fnName: string, params: Record<string, any> = {}): Promis
 // ============ Search ============
 export async function kgSearch(keyword: string, page = 1, pageSize = 30) {
   let body = await callApi('search', { keywords: keyword, page, pagesize: pageSize })
-  if (body?.error_code && body.error_code !== 0) {
-    let complex = await callApi('search_complex', { keywords: keyword, page, pagesize: pageSize })
-    if (typeof complex === 'string') {
-      try {
-        const jsonStr = complex.replace(/<!--KG_TAG_RES_START-->/, '').replace(/<!--KG_TAG_RES_END-->/, '')
-        complex = JSON.parse(jsonStr)
-      } catch {
-        complex = { error_code: -1, data: { lists: [] } }
-      }
+  // Always try complex search as fallback to get more results
+  let complex = await callApi('search_complex', { keywords: keyword, page, pagesize: pageSize })
+  if (typeof complex === 'string') {
+    try {
+      const jsonStr = complex
+        .replace(/<!--KG_TAG_RES_START-->/g, '')
+        .replace(/<!--KG_TAG_RES_END-->/g, '')
+      complex = JSON.parse(jsonStr)
+    } catch {
+      complex = { error_code: -1, data: { lists: [] } }
     }
-    if (complex?.data?.lists && Array.isArray(complex.data.lists)) {
-      const songBlock = complex.data.lists.find((b: any) => b.type === 'song')
-      if (songBlock) {
-        body = {
-          ...complex,
-          data: {
-            ...complex.data,
-            lists: songBlock.lists || [],
-          },
-        }
+  }
+  if (complex?.data?.lists && Array.isArray(complex.data.lists)) {
+    const songBlock = complex.data.lists.find((b: any) => b.type === 'song')
+    if (songBlock && songBlock.lists && songBlock.lists.length > 0) {
+      body = {
+        ...complex,
+        data: {
+          ...complex.data,
+          lists: songBlock.lists || [],
+        },
       }
     }
   }
