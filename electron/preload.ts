@@ -22,6 +22,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return ipcRenderer.invoke(channel, ...args)
     },
   },
+  netease: {
+    search: (keyword: string, limit?: number, offset?: number) => ipcRenderer.invoke('netease:search', keyword, limit, offset),
+    songUrl: (id: string, quality?: string) => ipcRenderer.invoke('netease:songUrl', id, quality),
+    lyric: (id: string) => ipcRenderer.invoke('netease:lyric', id),
+    qrKey: () => ipcRenderer.invoke('netease:qrKey'),
+    qrCreate: (key: string) => ipcRenderer.invoke('netease:qrCreate', key),
+    qrCheck: (key: string) => ipcRenderer.invoke('netease:qrCheck', key),
+    loginStatus: () => ipcRenderer.invoke('netease:loginStatus'),
+    userPlaylist: (uid: string) => ipcRenderer.invoke('netease:userPlaylist', uid),
+    playlistDetail: (id: string, limit?: number, offset?: number) => ipcRenderer.invoke('netease:playlistDetail', id, limit, offset),
+    recommendSongs: () => ipcRenderer.invoke('netease:recommendSongs'),
+    recommendPlaylists: () => ipcRenderer.invoke('netease:recommendPlaylists'),
+    artistTopSongs: (artistId: string) => ipcRenderer.invoke('netease:artistTopSongs', artistId),
+    songDetail: (ids: string[]) => ipcRenderer.invoke('netease:songDetail', ids),
+  },
   onKugouReady: (callback: () => void) => {
     ipcRenderer.on('kugou-api:ready', callback)
   },

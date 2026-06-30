@@ -11,6 +11,7 @@ import QueuePanel from '@/components/QueuePanel'
 import SettingsPanel from '@/components/SettingsPanel'
 import SearchPanel from '@/components/SearchPanel'
 import KugouMusicPanel from '@/components/KugouMusicPanel'
+import NeteaseMusicPanel from '@/components/NeteaseMusicPanel'
 import KugouLogin from '@/components/KugouLogin'
 import { applyTheme } from '@/utils/themes'
 
@@ -43,6 +44,8 @@ function App() {
     toggleKugou,
     kugouUserInfo,
     setKugouUserInfo,
+    showNetease,
+    toggleNetease,
   } = usePlayerStore()
 
   // Load songs from IndexedDB on mount
@@ -311,6 +314,11 @@ function App() {
           onLoginClick={() => setShowKugouLogin(true)}
           onLogout={() => setKugouUserInfo(null)}
         />
+      )}
+      
+      {/* Netease Music Panel */}
+      {showNetease && (
+        <NeteaseMusicPanel onClose={toggleNetease} />
       )}
       
       {/* KuGou Login Modal */}

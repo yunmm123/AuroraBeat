@@ -1,11 +1,11 @@
 import { motion } from 'framer-motion'
-import { Minus, Square, X, Search, Music } from 'lucide-react'
+import { Minus, Square, X, Search, Music, Disc3 } from 'lucide-react'
 import { usePlayerStore } from '@/store/playerStore'
 import { useState } from 'react'
 import Tooltip from './Tooltip'
 
 export default function TitleBar() {
-  const { currentSong, toggleSettings, toggleSearch, showSearch, showKugou, toggleKugou } = usePlayerStore()
+  const { currentSong, toggleSettings, toggleSearch, showSearch, showKugou, toggleKugou, showNetease, toggleNetease } = usePlayerStore()
   const [isMaximized, setIsMaximized] = useState(false)
   
   const handleMinimize = () => {
@@ -67,6 +67,17 @@ export default function TitleBar() {
             }`}
           >
             <Music size={18} />
+          </button>
+        </Tooltip>
+        
+        <Tooltip text="网易云音乐" position="bottom">
+          <button
+            onClick={toggleNetease}
+            className={`w-9 h-9 rounded-full glass-button flex items-center justify-center transition-colors ${
+              showNetease ? 'text-red-400' : 'text-white/70 hover:text-white'
+            }`}
+          >
+            <Disc3 size={18} />
           </button>
         </Tooltip>
         

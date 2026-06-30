@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, globalShortcut, systemPreferences, net } from 'electron'
 import path from 'path'
 import * as kugouHandler from './kugouHandler'
+import { registerNeteaseHandlers } from './neteaseHandler'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -104,6 +105,10 @@ app.whenReady().then(async () => {
   // KuGou API is now handled directly via IPC, no subprocess needed
   console.log('[KuGouAPI] Ready (direct IPC mode)')
   mainWindow?.webContents.send('kugou-api:ready')
+  
+  // Netease Cloud Music API
+  registerNeteaseHandlers()
+  console.log('[NeteaseAPI] Ready')
   
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

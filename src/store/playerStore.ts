@@ -53,6 +53,9 @@ interface PlayerState {
   showKugou: boolean
   kugouUserInfo: { uid: string; token: string; nickname: string } | null
   
+  // Netease Music
+  showNetease: boolean
+  
   // Recent play history
   recentSongs: Song[]
   
@@ -102,6 +105,9 @@ interface PlayerState {
   // KuGou Music actions
   toggleKugou: () => void
   setKugouUserInfo: (info: { uid: string; token: string; nickname: string } | null) => void
+  
+  // Netease Music actions
+  toggleNetease: () => void
 }
 
 const mockSong: Song = {
@@ -279,6 +285,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   // KuGou Music
   showKugou: false,
   kugouUserInfo: null,
+  
+  // Netease Music
+  showNetease: false,
   
   // Recent play history
   recentSongs: [],
@@ -495,4 +504,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   // KuGou Music actions
   toggleKugou: () => set({ showKugou: !get().showKugou }),
   setKugouUserInfo: (info) => set({ kugouUserInfo: info }),
+  
+  // Netease Music actions
+  toggleNetease: () => set({ showNetease: !get().showNetease }),
 }))
