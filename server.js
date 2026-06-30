@@ -445,6 +445,47 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // ========== 音频代理（解决CORS）==========
+    if (pn === '/api/audio') {
+      const audioUrl = url.searchParams.get('url');
+      if (!audioUrl || !/^https?:\/\//i.test(audioUrl)) {
+        res.writeHead(400, { 'Access-Control-Allow-Origin': '*' });
+        res.end('Invalid url');
+        return;
+      }
+      try {
+        const resp = await fetch(audioUrl, {
+          headers: {
+            'User-Agent': UA,
+            'Referer': 'https://music.163.com/',
+            'Cookie': userCookie || '',
+          },
+          redirect: 'follow',
+        });
+        const ct = resp.headers.get('content-type') || 'audio/mpeg';
+        const cl = resp.headers.get('content-length') || '';
+        const headers = {
+          'Content-Type': ct,
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-store',
+        };
+        if (cl) headers['Content-Length'] = cl;
+        res.writeHead(resp.status, headers);
+        const reader = resp.body.getReader();
+        while (true) {
+          const c = await reader.read();
+          if (c.done) break;
+          res.write(c.value);
+        }
+        res.end();
+      } catch (e) {
+        console.error('[Audio Proxy] error:', e.message);
+        res.writeHead(502, { 'Access-Control-Allow-Origin': '*' });
+        res.end('Proxy failed');
+      }
+      return;
+    }
+
     // ========== 健康检查 ==========
     if (pn === '/api/health') {
       sendJSON(res, { ok: true, hasCookie: !!userCookie });

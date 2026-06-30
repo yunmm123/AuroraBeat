@@ -40,6 +40,7 @@ class PlayerCore {
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
+  private beatAnalyser: AnalyserNode | null = null;
   private gainNode: GainNode | null = null;
   private source: MediaElementAudioSourceNode | null = null;
   private progressRaf: number | null = null;
@@ -116,20 +117,31 @@ class PlayerCore {
     try {
       const Ctx = window.AudioContext || (window as any).webkitAudioContext;
       this.audioContext = new Ctx();
-      this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 512;
-      this.gainNode = this.audioContext.createGain();
       this.source = this.audioContext.createMediaElementSource(this.audio);
+      // 双 AnalyserNode — Mineradio同款架构
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 2048;
+      this.analyser.smoothingTimeConstant = 0.58;
+      this.beatAnalyser = this.audioContext.createAnalyser();
+      this.beatAnalyser.fftSize = 2048;
+      this.beatAnalyser.smoothingTimeConstant = 0.10;
+      this.gainNode = this.audioContext.createGain();
+      this.gainNode.gain.value = this.state.volume;
+      // source → analyser + beatAnalyser → gainNode → destination
       this.source.connect(this.analyser);
+      this.source.connect(this.beatAnalyser);
       this.analyser.connect(this.gainNode);
       this.gainNode.connect(this.audioContext.destination);
-      this.gainNode.gain.value = 1;
       if (this.onAnalyserReady && this.analyser) {
         this.onAnalyserReady(this.analyser);
       }
     } catch (e) {
       console.warn('[PlayerCore] AudioContext init failed:', e);
     }
+  }
+
+  getBeatAnalyser(): AnalyserNode | null {
+    return this.beatAnalyser;
   }
 
   private startProgressLoop() {
@@ -199,10 +211,8 @@ class PlayerCore {
   }
 
   async resolveSongUrl(song: Song): Promise<string | null> {
-    // Blob URL 直接返回
-    if (song.url && song.url.startsWith('blob:')) return song.url;
-    // HTTP URL 直接返回
-    if (song.url && song.url.startsWith('http')) return song.url;
+    // Blob URL / data URL 直接返回
+    if (song.url && (song.url.startsWith('blob:') || song.url.startsWith('data:'))) return song.url;
     // 本地文件通过 Electron 读取为 data URL
     if (song.url && song.url.startsWith('file://')) {
       try {
@@ -213,12 +223,15 @@ class PlayerCore {
         return null;
       }
     }
-    // 网易云歌曲通过本地服务器获取URL
+    // 网易云歌曲通过本地服务器获取URL，再走音频代理（解决CORS）
     if (song.source === 'netease' && this.serverPort) {
       try {
         const res = await fetch(`${this.apiBase}/api/song/url?id=${song.id}`);
         const data = await res.json();
-        if (data.url) return data.url;
+        if (data.url) {
+          // 通过本地服务器代理音频流（Mineradio同款 /api/audio?url=...）
+          return `${this.apiBase}/api/audio?url=${encodeURIComponent(data.url)}`;
+        }
         console.warn('[PlayerCore] No URL for song', song.id, data);
       } catch (e) {
         console.error('[PlayerCore] resolveSongUrl error:', e);
@@ -445,7 +458,13 @@ class PlayerCore {
   setVolume(vol: number) {
     const v = Math.max(0, Math.min(1, vol));
     this.state.volume = v;
-    if (this.audio) this.audio.volume = v;
+    // GainNode 平滑过渡 — Mineradio同款
+    if (this.gainNode && this.audioContext) {
+      const now = this.audioContext.currentTime;
+      this.gainNode.gain.cancelScheduledValues(now);
+      this.gainNode.gain.setTargetAtTime(v, now, 0.025);
+    }
+    if (this.audio) this.audio.volume = this.gainNode ? 1 : v;
     this.notify();
   }
 
