@@ -395,14 +395,14 @@ export default function KugouMusicPanel({
     setSelectedPlaylistName(n.name || '歌单')
     setPlaylistTracks([])
     setPlaylistPage(1)
-    setPlaylistHasMore(true)
+    setPlaylistHasMore(false) // Load all at once, disable pagination
     try {
       const uid = userInfo?.uid
       const token = userInfo?.token
-      const res = await kugouPlaylistTrackAllNew(listId, 1, uid, token)
+      // Load all tracks at once with a large page size
+      const res = await kugouPlaylistTrackAllNew(listId, 1, uid, token, 500)
       const rawList = extractSongList(res)
       setPlaylistTracks(rawList.map(normalizeSong))
-      if (rawList.length < 30) setPlaylistHasMore(false)
     } catch {
       // ignore
     }

@@ -324,7 +324,7 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   currentTheme: themes[0],
   darkMode: true,
   
-  showLyrics: false,
+  showLyrics: true,
   showPlaylist: true,
   showQueue: false,
   showSettings: false,
@@ -533,6 +533,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       lyrics: [], 
       lyricsLoading: true 
     })
+    
+    // If the song has no URL (e.g. clicked from queue), resolve it asynchronously
+    if (!song.url && (song.source === 'kugou' || song.source === 'netease')) {
+      resolveSongUrlAndUpdate(song, newIndex)
+    }
     
     const trackName = song.title.replace(/\.[^.]+$/, '')
     const artistName = song.artist !== '未知艺术家' ? song.artist : ''

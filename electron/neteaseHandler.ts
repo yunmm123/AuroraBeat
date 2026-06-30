@@ -65,14 +65,13 @@ async function callApi(apiName: string, params: Record<string, any> = {}) {
   const isLoginApi = apiName.startsWith('login_')
   const fullParams: Record<string, any> = { ...params }
   
-  if (isLoginApi) {
-    // Login APIs: do NOT pass cookie or realIP to avoid device environment risk detection
-    delete fullParams.cookie
-  } else {
-    const cookie = params.cookie || currentCookie || loadCookie()
-    if (cookie) {
-      fullParams.cookie = cookie
-    }
+  // Always pass cookie for login APIs to maintain the auth chain
+  // But NEVER pass realIP for login APIs to avoid device environment risk detection
+  const cookie = params.cookie || currentCookie || loadCookie()
+  if (cookie) {
+    fullParams.cookie = cookie
+  }
+  if (!isLoginApi) {
     fullParams.realIP = '116.25.146.177'
   }
 

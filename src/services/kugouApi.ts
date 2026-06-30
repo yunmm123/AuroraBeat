@@ -74,8 +74,8 @@ export async function kugouPlaylistTrackAll(id: string, page: number = 1) {
   return invoke('kg:playlistTrackAll', id, page)
 }
 
-export async function kugouPlaylistTrackAllNew(listId: string, page: number = 1, uid?: string, token?: string) {
-  return invoke('kg:playlistTrackAllNew', listId, page, uid, token)
+export async function kugouPlaylistTrackAllNew(listId: string, page: number = 1, uid?: string, token?: string, pageSize?: number) {
+  return invoke('kg:playlistTrackAllNew', listId, page, uid, token, pageSize)
 }
 
 // ============ Rank ============

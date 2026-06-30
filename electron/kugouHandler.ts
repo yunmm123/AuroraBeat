@@ -131,8 +131,7 @@ async function callApi(fnName: string, params: Record<string, any> = {}): Promis
 
 // ============ Search ============
 export async function kgSearch(keyword: string, page = 1, pageSize = 30) {
-  let body = await callApi('search', { keywords: keyword, page, pagesize: pageSize })
-  // Always try complex search as fallback to get more results
+  // Use search_complex as primary - it's more reliable and returns structured data
   let complex = await callApi('search_complex', { keywords: keyword, page, pagesize: pageSize })
   if (typeof complex === 'string') {
     try {
@@ -147,16 +146,18 @@ export async function kgSearch(keyword: string, page = 1, pageSize = 30) {
   if (complex?.data?.lists && Array.isArray(complex.data.lists)) {
     const songBlock = complex.data.lists.find((b: any) => b.type === 'song')
     if (songBlock && songBlock.lists && songBlock.lists.length > 0) {
-      body = {
-        ...complex,
+      return {
+        status: 1,
+        error_code: 0,
         data: {
-          ...complex.data,
           lists: songBlock.lists || [],
+          total: complex.data.total || songBlock.lists.length,
         },
       }
     }
   }
-  return body
+  // Fallback to regular search
+  return callApi('search', { keywords: keyword, page, pagesize: pageSize })
 }
 
 export async function kgSearchHot() {
@@ -258,11 +259,11 @@ export async function kgPlaylistTrackAll(id: string, page = 1) {
   return callApi('playlist_track_all', { id, page })
 }
 
-export async function kgPlaylistTrackAllNew(listId: string, page = 1, uid?: string, token?: string) {
+export async function kgPlaylistTrackAllNew(listId: string, page = 1, uid?: string, token?: string, pageSize?: number) {
   const cookie: Record<string, string> = {}
   if (uid) cookie.userid = uid
   if (token) cookie.token = token
-  return callApi('playlist_track_all_new', { listid: listId, page, cookie })
+  return callApi('playlist_track_all_new', { listid: listId, page, pagesize: pageSize || 30, cookie })
 }
 
 // ============ Rank ============
