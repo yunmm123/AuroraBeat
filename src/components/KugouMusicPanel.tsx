@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Search, Play, Music, User, ListMusic, Trophy, Radio,
@@ -155,8 +155,13 @@ export default function KugouMusicPanel({
   const [selectedRankId, setSelectedRankId] = useState('')
   const [selectedRankName, setSelectedRankName] = useState('')
   const [rankSongs, setRankSongs] = useState<KugouSongItem[]>([])
+  const [rankPage, setRankPage] = useState(1)
+  const [rankHasMore, setRankHasMore] = useState(true)
   const [selectedPlaylistId, setSelectedPlaylistId] = useState('')
   const [selectedPlaylistName, setSelectedPlaylistName] = useState('')
+  const [playlistPage, setPlaylistPage] = useState(1)
+  const [playlistHasMore, setPlaylistHasMore] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [playErrorMsg, setPlayErrorMsg] = useState('')
 
   useEffect(() => {
@@ -339,21 +344,44 @@ export default function KugouMusicPanel({
     setSelectedRankId(n.id)
     setSelectedRankName(n.name || '榜单')
     setRankSongs([])
+    setRankPage(1)
+    setRankHasMore(true)
     setLoading(true)
     try {
       const res = await kugouRankAudio(n.id, 1)
       const rawList = extractSongList(res)
       setRankSongs(rawList.map(normalizeSong))
+      if (rawList.length < 30) setRankHasMore(false)
     } catch {
       // ignore
     }
     setLoading(false)
+  }
+  
+  async function loadMoreRankSongs() {
+    if (!selectedRankId || !rankHasMore || loadingMore) return
+    setLoadingMore(true)
+    try {
+      const nextPage = rankPage + 1
+      const res = await kugouRankAudio(selectedRankId, nextPage)
+      const rawList = extractSongList(res)
+      if (rawList.length > 0) {
+        setRankSongs(prev => [...prev, ...rawList.map(normalizeSong)])
+        setRankPage(nextPage)
+      }
+      if (rawList.length < 30) setRankHasMore(false)
+    } catch {
+      // ignore
+    }
+    setLoadingMore(false)
   }
 
   function handleRankBack() {
     setSelectedRankId('')
     setSelectedRankName('')
     setRankSongs([])
+    setRankPage(1)
+    setRankHasMore(true)
   }
 
   async function handleOpenPlaylist(playlist: any) {
@@ -363,12 +391,15 @@ export default function KugouMusicPanel({
     setSelectedPlaylistId(listId)
     setSelectedPlaylistName(n.name || '歌单')
     setPlaylistTracks([])
+    setPlaylistPage(1)
+    setPlaylistHasMore(true)
     try {
       const uid = userInfo?.uid
       const token = userInfo?.token
       const res = await kugouPlaylistTrackAllNew(listId, 1, uid, token)
       const rawList = extractSongList(res)
       setPlaylistTracks(rawList.map(normalizeSong))
+      if (rawList.length < 30) setPlaylistHasMore(false)
     } catch {
       // ignore
     }
@@ -379,6 +410,28 @@ export default function KugouMusicPanel({
     setSelectedPlaylistId('')
     setSelectedPlaylistName('')
     setPlaylistTracks([])
+    setPlaylistPage(1)
+    setPlaylistHasMore(true)
+  }
+  
+  async function loadMorePlaylistSongs() {
+    if (!selectedPlaylistId || !playlistHasMore || loadingMore) return
+    setLoadingMore(true)
+    try {
+      const nextPage = playlistPage + 1
+      const uid = userInfo?.uid
+      const token = userInfo?.token
+      const res = await kugouPlaylistTrackAllNew(selectedPlaylistId, nextPage, uid, token)
+      const rawList = extractSongList(res)
+      if (rawList.length > 0) {
+        setPlaylistTracks(prev => [...prev, ...rawList.map(normalizeSong)])
+        setPlaylistPage(nextPage)
+      }
+      if (rawList.length < 30) setPlaylistHasMore(false)
+    } catch {
+      // ignore
+    }
+    setLoadingMore(false)
   }
 
   function formatDuration(seconds: number): string {
@@ -617,7 +670,11 @@ export default function KugouMusicPanel({
                       <ChevronLeft size={16} />返回榜单列表
                     </button>
                     <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><Trophy size={16} className="text-yellow-400" />{selectedRankName}</h3>
-                    <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-2">
+                    <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-2" onScroll={(e) => {
+                      const target = e.target as HTMLDivElement
+                      const bottom = target.scrollHeight - target.scrollTop - target.clientHeight
+                      if (bottom < 100) loadMoreRankSongs()
+                    }}>
                       {rankSongs.map((song: KugouSongItem, idx: number) => (
                         <div key={song.Hash || idx} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors group" style={{ background: 'rgba(255,255,255,0.03)' }}
                           onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.08)'}
@@ -632,6 +689,11 @@ export default function KugouMusicPanel({
                           </div>
                         </div>
                       ))}
+                      {loadingMore && (
+                        <div className="flex items-center justify-center py-4">
+                          <Loader2 size={18} className="text-white/40 animate-spin" />
+                        </div>
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -677,7 +739,11 @@ export default function KugouMusicPanel({
                           <ChevronLeft size={16} />返回歌单列表
                         </button>
                         <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><ListMusic size={16} className="text-purple-400" />{selectedPlaylistName}</h3>
-                        <div className="space-y-1 max-h-[55vh] overflow-y-auto pr-2">
+                        <div className="space-y-1 max-h-[55vh] overflow-y-auto pr-2" onScroll={(e) => {
+                          const target = e.target as HTMLDivElement
+                          const bottom = target.scrollHeight - target.scrollTop - target.clientHeight
+                          if (bottom < 100) loadMorePlaylistSongs()
+                        }}>
                           {playlistTracks.map((song, i) => (
                             <div key={song.Hash + i} onClick={() => handlePlaySong(song)} className="flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-colors" style={{ background: playingHash === song.Hash ? 'rgba(168,85,247,0.2)' : 'transparent' }}
                               onMouseEnter={(e) => { if (playingHash !== song.Hash) (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.06)' }}
@@ -692,6 +758,11 @@ export default function KugouMusicPanel({
                               </div>
                             </div>
                           ))}
+                          {loadingMore && (
+                            <div className="flex items-center justify-center py-4">
+                              <Loader2 size={18} className="text-white/40 animate-spin" />
+                            </div>
+                          )}
                           {playlistTracks.length === 0 && (
                             <div className="text-white/40 text-center py-8">该歌单暂无歌曲</div>
                           )}
