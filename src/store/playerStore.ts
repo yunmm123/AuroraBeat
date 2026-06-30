@@ -170,7 +170,21 @@ function pickBestLyricCandidate(
   return best
 }
 
-async function loadLyricsForSong(trackName: string, artistName: string, duration?: number) {
+function isPureMusic(trackName: string, artistName: string): boolean {
+  const combined = `${trackName} ${artistName}`.toLowerCase()
+  const keywords = ['纯音乐', 'instrumental', 'inst.', 'pure music', '轻音乐', '钢琴曲', '纯享版', '无歌词', '伴奏', 'beat']
+  return keywords.some(k => combined.includes(k))
+}
+
+async function loadLyricsForSong(trackName: string, artistName: string, duration?: number, hash?: string) {
+  if (isPureMusic(trackName, artistName)) {
+    usePlayerStore.setState({ 
+      lyrics: [{ time: 0, text: '♪ 纯音乐 ♪' }], 
+      lyricsLoading: false 
+    })
+    return
+  }
+  
   const keyword = artistName ? `${trackName} ${artistName}` : trackName
   
   try {
@@ -187,7 +201,7 @@ async function loadLyricsForSong(trackName: string, artistName: string, duration
   }
   
   try {
-    const searchRes = await kugouSearchLyric(keyword, duration)
+    const searchRes = await kugouSearchLyric(keyword, duration, hash)
     const candidates = searchRes?.candidates || searchRes?.data?.candidates || []
     if (candidates.length > 0) {
       const best = pickBestLyricCandidate(candidates, trackName, artistName, duration)
@@ -422,8 +436,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     
     const trackName = song.title.replace(/\.[^.]+$/, '')
     const artistName = song.artist !== '未知艺术家' ? song.artist : ''
+    const songHash = (song as any).hash || ''
     
-    loadLyricsForSong(trackName, artistName, song.duration)
+    loadLyricsForSong(trackName, artistName, song.duration, songHash)
   },
   
   addToRecent: (song) => {
@@ -441,8 +456,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     
     const trackName = currentSong.title.replace(/\.[^.]+$/, '')
     const artistName = currentSong.artist !== '未知艺术家' ? currentSong.artist : ''
+    const songHash = (currentSong as any).hash || ''
     
-    loadLyricsForSong(trackName, artistName, currentSong.duration)
+    loadLyricsForSong(trackName, artistName, currentSong.duration, songHash)
   },
   
   loadFromDB: async () => {
