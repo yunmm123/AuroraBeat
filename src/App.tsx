@@ -360,11 +360,22 @@ const App: React.FC = () => {
 
   const openNeteaseLogin = async () => {
     if (!electron?.neteaseOpenLoginWindow) return;
-    await electron.neteaseOpenLoginWindow();
+    const result = await electron.neteaseOpenLoginWindow();
+    if (!result?.ok) return;
+    // 等待 auth:restored 事件写入完成
+    await new Promise(r => setTimeout(r, 500));
     const auth = await electron.getAuth?.();
     if (auth?.netease) {
       setNeteaseLoggedIn(true);
       setUserInfo(auth.netease);
+    } else {
+      // 再试一次（可能事件还没写完）
+      await new Promise(r => setTimeout(r, 1000));
+      const auth2 = await electron.getAuth?.();
+      if (auth2?.netease) {
+        setNeteaseLoggedIn(true);
+        setUserInfo(auth2.netease);
+      }
     }
   };
 

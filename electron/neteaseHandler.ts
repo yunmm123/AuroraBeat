@@ -9,10 +9,10 @@ import { ipcMain } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as crypto from 'crypto'
+import { getNeteaseCookie } from './authPersistence'
 
 // 网易云API函数（动态导入以支持CJS模块）
 let neteaseApi: any = null
-let cookiePath = ''
 let qrKey = ''
 let currentCookie = ''
 
@@ -28,33 +28,18 @@ function getApi() {
   return neteaseApi
 }
 
-function getCookiePath(): string {
-  if (!cookiePath) {
-    cookiePath = path.join(process.env.APPDATA || process.env.HOME || __dirname, 'aurorabeat-netease-cookie.txt')
-  }
-  return cookiePath
-}
-
 function loadCookie(): string {
-  try {
-    const p = getCookiePath()
-    if (fs.existsSync(p)) {
-      currentCookie = fs.readFileSync(p, 'utf-8').trim()
-      return currentCookie
-    }
-  } catch {
-    // ignore
+  // 优先从 authPersistence 读取
+  const persisted = getNeteaseCookie()
+  if (persisted) {
+    currentCookie = persisted
+    return persisted
   }
   return ''
 }
 
 function saveCookie(cookie: string) {
-  try {
-    fs.writeFileSync(getCookiePath(), cookie, 'utf-8')
-    currentCookie = cookie
-  } catch {
-    // ignore
-  }
+  currentCookie = cookie
 }
 
 // 通用API调用封装

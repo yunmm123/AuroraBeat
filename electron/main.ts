@@ -289,18 +289,22 @@ ipcMain.handle('netease:openLoginWindow', async () => {
     })
     loginWin.loadURL('https://music.163.com/#/login')
     loginWin.on('closed', () => resolve({ ok: false }))
+
+    let loginDetected = false
     const checkLogin = async () => {
       try {
-        if (loginWin.isDestroyed()) return
+        if (loginWin.isDestroyed() || loginDetected) return
         const url = loginWin.webContents.getURL()
-        if (url.includes('#/discover') || url.includes('#/my') || url.includes('music.163.com/#/')) {
+        // 只检测登录成功后的跳转页面，不匹配登录页本身
+        if (url.includes('#/discover') || url.includes('#/my')) {
           const cookies = await loginWin.webContents.session.cookies.get({ url: 'https://music.163.com' })
           const cookieStr = cookies.map((c) => `${c.name}=${c.value}`).join('; ')
-          const hasLoginCookie = cookies.some((c) => c.name === 'MUSIC_U' || c.name === '__csrf')
-          if (hasLoginCookie) {
-            saveNeteaseAuthFromCookie(cookieStr)
+          const hasLoginCookie = cookies.some((c) => c.name === 'MUSIC_U')
+          if (hasLoginCookie && cookieStr) {
+            loginDetected = true
+            const ok = await saveNeteaseAuthFromCookie(cookieStr)
             loginWin.close()
-            resolve({ ok: true })
+            resolve({ ok })
           }
         }
       } catch (e) { /* ignore */ }
@@ -308,21 +312,48 @@ ipcMain.handle('netease:openLoginWindow', async () => {
     const interval = setInterval(() => {
       if (loginWin.isDestroyed()) { clearInterval(interval); return }
       checkLogin()
-    }, 1000)
+    }, 1500)
   })
 })
 
-async function saveNeteaseAuthFromCookie(cookieStr: string) {
+async function saveNeteaseAuthFromCookie(cookieStr: string): Promise<boolean> {
   try {
     const neteaseApi = require('NeteaseCloudMusicApi')
-    const result = await neteaseApi.login_status({ cookie: cookieStr })
-    const profile = result?.body?.profile
+    const result = await neteaseApi.login_status({ cookie: cookieStr, realIP: '' })
+    const profile = result?.body?.profile || result?.body?.data?.profile
     if (profile) {
       saveNeteaseAuth(String(profile.userId), profile.nickname, profile.avatarUrl, cookieStr)
-      if (mainWindow) mainWindow.webContents.send('auth:restored', loadAuthData())
+      // 同时同步 cookie 到 neteaseHandler 的 cookie 文件
+      try {
+        const fs = require('fs')
+        const path = require('path')
+        const cookiePath = path.join(process.env.APPDATA || process.env.HOME || __dirname, 'aurorabeat-netease-cookie.txt')
+        fs.writeFileSync(cookiePath, cookieStr, 'utf-8')
+      } catch { /* ignore */ }
+      if (mainWindow) {
+        mainWindow.webContents.send('auth:restored', loadAuthData())
+      }
+      return true
     }
+    // 如果 login_status 没返回 profile，至少保存 cookie 本身
+    console.warn('[Login] login_status returned no profile, saving cookie only')
+    saveNeteaseAuth('unknown', '网易云用户', '', cookieStr)
+    if (mainWindow) {
+      mainWindow.webContents.send('auth:restored', loadAuthData())
+    }
+    return true
   } catch (e) {
-    console.warn('Failed to fetch netease user after login:', e)
+    console.warn('[Login] Failed to fetch netease user after login:', e)
+    // fallback: 即使 login_status 失败，也保存 cookie
+    try {
+      saveNeteaseAuth('unknown', '网易云用户', '', cookieStr)
+      if (mainWindow) {
+        mainWindow.webContents.send('auth:restored', loadAuthData())
+      }
+      return true
+    } catch {
+      return false
+    }
   }
 }
 
