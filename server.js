@@ -470,23 +470,32 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       try {
+        // 转发浏览器的 Range 请求，支持进度条 seek
+        const upstreamHeaders = {
+          'User-Agent': UA,
+          'Referer': 'https://music.163.com/',
+          'Cookie': userCookie || '',
+        };
+        if (req.headers.range) {
+          upstreamHeaders['Range'] = req.headers.range;
+        }
         const resp = await fetch(audioUrl, {
-          headers: {
-            'User-Agent': UA,
-            'Referer': 'https://music.163.com/',
-            'Cookie': userCookie || '',
-          },
+          headers: upstreamHeaders,
           redirect: 'follow',
         });
         const ct = resp.headers.get('content-type') || 'audio/mpeg';
         const cl = resp.headers.get('content-length') || '';
+        const cr = resp.headers.get('content-range') || '';
+        const upstreamStatus = resp.status;
         const headers = {
           'Content-Type': ct,
           'Access-Control-Allow-Origin': '*',
+          'Accept-Ranges': 'bytes',
           'Cache-Control': 'no-store',
         };
         if (cl) headers['Content-Length'] = cl;
-        res.writeHead(resp.status, headers);
+        if (cr) headers['Content-Range'] = cr;
+        res.writeHead(upstreamStatus, headers);
         const reader = resp.body.getReader();
         while (true) {
           const c = await reader.read();

@@ -248,56 +248,19 @@ class PlayerCore {
   async fetchLyrics(song: Song): Promise<LyricsLine[]> {
     try {
       let lrc = '';
-      let yrc = '';
       if (song.source === 'netease' && this.serverPort) {
         const res = await fetch(`${this.apiBase}/api/lyric?id=${song.id}`);
         const data = await res.json();
         lrc = data.lyric || '';
-        yrc = data.yrc || '';
       } else if (song.source === 'local') {
         const result = await (window as any).electronAPI?.searchLyrics?.(song.title || song.name || '', song.artist);
         lrc = result?.lyric || '';
       }
-      // 优先使用 YRC 逐字时间，否则解析 LRC 并估算逐字时间
-      const yrcLines = yrc ? this.parseYrc(yrc) : [];
-      if (yrcLines.length > 0) return yrcLines;
-      return this.parseLyricsWithWords(lrc);
+      return this.parseLyrics(lrc);
     } catch (e) {
       console.error('[PlayerCore] fetchLyrics error:', e);
       return [];
     }
-  }
-
-  private parseYrc(yrcString: string): LyricsLine[] {
-    if (!yrcString) return [];
-    const lines: LyricsLine[] = [];
-    const lineRegex = /\[(\d+),(\d+)\](.*)/g;
-    const wordRegex = /\((\d+),(\d+),\d+\)([^()]*)/g;
-    let lineMatch;
-    while ((lineMatch = lineRegex.exec(yrcString)) !== null) {
-      const lineStartMs = parseInt(lineMatch[1], 10);
-      const lineDurMs = parseInt(lineMatch[2], 10);
-      const body = lineMatch[3] || '';
-      const words: YrcWord[] = [];
-      let fullText = '';
-      let wordMatch;
-      wordRegex.lastIndex = 0;
-      while ((wordMatch = wordRegex.exec(body)) !== null) {
-        const wordText = (wordMatch[3] || '').trim();
-        if (!wordText) continue;
-        const wordStartMs = parseInt(wordMatch[1], 10);
-        const wordDurMs = parseInt(wordMatch[2], 10);
-        words.push({ text: wordText, startMs: wordStartMs, durationMs: wordDurMs });
-        fullText += wordText;
-      }
-      if (!fullText.trim()) continue;
-      lines.push({
-        time: lineStartMs / 1000,
-        text: fullText,
-        words,
-      });
-    }
-    return lines.sort((a, b) => a.time - b.time);
   }
 
   private parseLyrics(lrcString: string): LyricsLine[] {
@@ -320,40 +283,6 @@ class PlayerCore {
       }
     }
     return result.sort((a, b) => a.time - b.time);
-  }
-
-  // 解析 LRC 并估算逐字时间（按字符权重+句末停顿分配）
-  private parseLyricsWithWords(lrcString: string): LyricsLine[] {
-    const lines = this.parseLyrics(lrcString);
-    if (lines.length === 0) return [];
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const nextTime = i + 1 < lines.length ? lines[i + 1].time : line.time + 4;
-      // 句末预留 15% 停顿时间，让逐字更贴合实际演唱节奏
-      const lineDuration = Math.max(1, (nextTime - line.time) * 1000 * 0.85);
-      const chars = Array.from(line.text);
-      if (chars.length === 0) continue;
-      // 字符权重：汉字/字母=1，标点=0.25，空格=0.15
-      const charWeight = (c: string): number => {
-        if (/\s/.test(c)) return 0.15;
-        if (/[，。、；：！？,.!?;:—…～~]/.test(c)) return 0.25;
-        return 1;
-      };
-      const totalWeight = chars.reduce((s, c) => s + charWeight(c), 0) || 1;
-      let elapsed = 0;
-      line.words = chars.map((c) => {
-        const w = charWeight(c);
-        const wordDur = (w / totalWeight) * lineDuration;
-        const word: YrcWord = {
-          text: c,
-          startMs: Math.round(line.time * 1000 + elapsed),
-          durationMs: Math.round(wordDur),
-        };
-        elapsed += wordDur;
-        return word;
-      });
-    }
-    return lines;
   }
 
   async playTrackAt(index: number, queue?: Song[]): Promise<boolean> {

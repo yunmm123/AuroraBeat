@@ -73,6 +73,23 @@ function useVisualEngine(
     const dotTexture = makeDotTexture();
     const coverTex = new THREE.Texture();
     coverTex.minFilter = THREE.LinearFilter; coverTex.magFilter = THREE.LinearFilter;
+    // 前一首封面（切歌渐变用，Mineradio同款）
+    const prevCoverTex = new THREE.Texture();
+    prevCoverTex.minFilter = THREE.LinearFilter; prevCoverTex.magFilter = THREE.LinearFilter;
+    // 封面深度/边缘纹理（Mineradio同款 RGBA: depth/edge/fg/lum）
+    const edgeTexSize = 64;
+    const edgeData = new Uint8Array(edgeTexSize * edgeTexSize * 4);
+    const edgeTex = new THREE.DataTexture(edgeData, edgeTexSize, edgeTexSize, THREE.RGBAFormat);
+    edgeTex.minFilter = THREE.LinearFilter; edgeTex.magFilter = THREE.LinearFilter;
+    edgeTex.needsUpdate = true;
+    // 涟漪纹理（Mineradio同款 1×N RGBA FloatType）
+    const RIPPLE_MAX = 8;
+    const rippleData = new Float32Array(RIPPLE_MAX * 4);
+    const rippleTex = new THREE.DataTexture(rippleData, RIPPLE_MAX, 1, THREE.RGBAFormat, THREE.FloatType);
+    rippleTex.minFilter = THREE.LinearFilter; rippleTex.magFilter = THREE.LinearFilter;
+    rippleTex.needsUpdate = true;
+    const ripples: { x: number; y: number; age: number; str: number }[] = [];
+    for (let i = 0; i < RIPPLE_MAX; i++) ripples.push({ x: 0, y: 0, age: 999, str: 0 });
 
     // 粒子几何
     const GRID = 128;
@@ -103,7 +120,13 @@ function useVisualEngine(
       uBeat: { value: 0 },
       uEnergy: { value: 0 },
       uCoverTex: { value: coverTex },
+      uPrevCoverTex: { value: prevCoverTex },
+      uEdgeTex: { value: edgeTex },
+      uRippleTex: { value: rippleTex },
+      uRippleCount: { value: RIPPLE_MAX },
       uHasCover: { value: 0 },
+      uHasEdge: { value: 0 },
+      uColorMixT: { value: 1 },
       uDotTex: { value: dotTexture },
       uAlpha: { value: 0 },
       uPixel: { value: renderer.getPixelRatio() },
@@ -114,16 +137,19 @@ function useVisualEngine(
 
     const vertexShader = `
       uniform float uTime, uBass, uMid, uTreble, uBeat, uEnergy, uPixel, uAlpha, uIntensity, uPreset;
-      uniform sampler2D uCoverTex;
-      uniform float uHasCover;
+      uniform sampler2D uCoverTex, uPrevCoverTex, uEdgeTex, uRippleTex;
+      uniform float uHasCover, uHasEdge, uColorMixT, uRippleCount;
       attribute vec2 aUv;
       attribute float aRand;
       varying float vBright;
       varying float vEdgeBoost;
       varying vec3 vColor;
       varying float vAlpha;
+      varying float vSourceLum;
 
       #define PI 3.14159265
+
+      vec2 safeCoverUv(vec2 uv) { return clamp(uv, vec2(0.001), vec2(0.999)); }
 
       void main() {
         vec3 pos = position;
@@ -133,17 +159,46 @@ function useVisualEngine(
         float r3 = fract(r2 * 11.91);
         vAlpha = 1.0;
         vEdgeBoost = 0.0;
+        vSourceLum = 0.5;
 
-        vec3 coverCol = texture2D(uCoverTex, aUv).rgb;
+        // 封面颜色（新旧渐变，Mineradio同款 uColorMixT）
+        vec2 cuv = safeCoverUv(aUv);
+        vec3 newCol = texture2D(uCoverTex, cuv).rgb;
+        vec3 prevCol = texture2D(uPrevCoverTex, cuv).rgb;
+        vec3 coverCol = mix(prevCol, newCol, clamp(uColorMixT, 0.0, 1.0));
         vColor = mix(vec3(0.6, 0.75, 0.85), coverCol, uHasCover);
+        vSourceLum = dot(coverCol, vec3(0.299, 0.587, 0.114));
+
+        // 封面深度/边缘纹理（Mineradio同款启发式 depth+edge）
+        vec4 edge = texture2D(uEdgeTex, cuv);
+        float depthVal = edge.r;
+        float edgeVal = edge.g;
+
         int preset = int(uPreset + 0.5);
 
+        // 涟漪系统（Mineradio同款，循环采样涟漪纹理）
+        float rippleZ = 0.0;
+        for (int ri = 0; ri < 8; ri++) {
+          if (float(ri) >= uRippleCount) break;
+          vec4 rp = texture2D(uRippleTex, vec2((float(ri) + 0.5) / 8.0, 0.5));
+          float rAge = rp.z;
+          float rStr = rp.w * exp(-rAge * 2.0);
+          if (rStr < 0.01) continue;
+          float rdx = aUv.x - rp.x;
+          float rdy = aUv.y - rp.y;
+          float rDist = sqrt(rdx * rdx + rdy * rdy);
+          float rRing = exp(-pow((rDist - rAge * 0.35) * 12.0, 2.0));
+          float rBulge = exp(-rDist * 6.0) * (1.0 - smoothstep(0.0, 0.3, rAge));
+          rippleZ += (rRing * 0.8 + rBulge * 0.4) * rStr;
+        }
+
         if (preset == 0) {
-          // SILK 丝绸 — xy平面 z涟漪
+          // SILK 丝绸 — xy平面 z涟漪 + 封面深度增强
           float bassDisp = sin(pos.x * 1.8 + t * 0.6) * cos(pos.y * 1.6 + t * 0.4) * uBass * 1.3;
           float midDisp = sin(pos.x * 4.0 + t * 1.2) * cos(pos.y * 3.5 + t * 0.9) * uMid * 0.5;
           float trebleJ = sin(pos.x * 8.0 + t * 2.0) * cos(pos.y * 7.0 + t * 1.6) * uTreble * 0.25;
-          pos.z = bassDisp + midDisp + trebleJ + sin(t * 0.3 + r1 * 6.28) * uBass * 0.15;
+          float depthBoost = (depthVal - 0.5) * uHasEdge * 1.2;
+          pos.z = bassDisp + midDisp + trebleJ + sin(t * 0.3 + r1 * 6.28) * uBass * 0.15 + depthBoost + rippleZ * 1.5;
         } else if (preset == 1) {
           // TUNNEL 隧道 — 圆柱+自旋
           float spin = t * 0.12;
@@ -183,7 +238,7 @@ function useVisualEngine(
           if (dist > 0.5) { vAlpha = 0.0; }
           float groove = sin(dist * 80.0) * 0.5 + 0.5;
           vColor = mix(coverCol * 0.3, coverCol, groove);
-          pos.z = sin(dist * 40.0 + t * 2.0) * uBass * 0.15;
+          pos.z = sin(dist * 40.0 + t * 2.0) * uBass * 0.15 + rippleZ;
           float spinAngle = t * 0.5;
           float s = sin(spinAngle), c = cos(spinAngle);
           pos.x = cx * c - cy * s;
@@ -236,11 +291,16 @@ function useVisualEngine(
       varying float vEdgeBoost;
       varying vec3 vColor;
       varying float vAlpha;
+      varying float vSourceLum;
       void main() {
         vec4 tex = texture2D(uDotTex, gl_PointCoord);
         if (tex.a < 0.02) discard;
         vec3 col = vColor * vBright * 1.6;
-        gl_FragColor = vec4(col, tex.a * uAlpha * 0.45 * vAlpha);
+        // Mineradio同款 keepBlack: 暗粒子不溢光，避免画面发灰
+        float keepBlack = 1.0 - smoothstep(0.025, 0.115, vSourceLum);
+        float bloomKeep = 1.0 - keepBlack * 0.92;
+        float soft = tex.a * tex.a;
+        gl_FragColor = vec4(col, soft * uAlpha * 0.55 * vAlpha * bloomKeep);
       }
     `;
 
@@ -321,13 +381,26 @@ function useVisualEngine(
     let smoothBass = 0, smoothMid = 0, smoothTreb = 0, smoothEnergy = 0;
     let beatPulse = 0;
     let ringPulse = 0;
+    // Mineradio同款 peak tracking：低频慢衰减峰值，配合 gamma 归一化让画面在动态范围上更稳定
+    let bassPeak = 0.030;
     let prevTime = performance.now();
+    let rippleWriteIdx = 0;
+    let beatCooldown = 0;
+
+    // 触发一次涟漪（点击或强节拍）。u=0.5,v=0.5 为画面中心
+    const triggerRipple = (u: number, v: number, str: number) => {
+      const r = ripples[rippleWriteIdx];
+      r.x = u; r.y = v; r.age = 0; r.str = str;
+      rippleWriteIdx = (rippleWriteIdx + 1) % RIPPLE_MAX;
+    };
+    // 暴露给点击事件
+    (window as any).__triggerRipple = triggerRipple;
 
     const setupAnalysers = () => {
       const a = player.getAnalyser();
       const ba = player.getBeatAnalyser();
       if (a && !analyser) { analyser = a; freqData = new Uint8Array(a.frequencyBinCount); }
-      if (ba && !beatAnalyser) { beatAnalyser = ba; beatData = new Uint8Array(ba.frequencyBinCount); }
+      if (ba && !beatAnalyser) { beatData = new Uint8Array(ba.frequencyBinCount); beatAnalyser = ba; }
     };
     player.setAnalyserReadyHandler?.(setupAnalysers);
     setTimeout(setupAnalysers, 500);
@@ -341,6 +414,7 @@ function useVisualEngine(
       const dt = Math.min((now - prevTime) / 1000, 0.05);
       prevTime = now;
       uniforms.uTime.value += dt;
+      beatCooldown = Math.max(0, beatCooldown - dt);
 
       if (analyser && freqData && beatAnalyser && beatData && player.isPlaying) {
         analyser.getByteFrequencyData(freqData as any);
@@ -358,17 +432,25 @@ function useVisualEngine(
         mInst /= Math.max(1, midEnd - kickEnd);
         tHigh /= Math.max(1, len - midEnd);
 
+        // Mineradio同款 peak tracking：低频慢衰减 + 下限钳制，避免静音段把增益拉到 0
+        bassPeak = Math.max(bassPeak * 0.994, bKick, 0.030);
+        // gamma 归一化：把 bKick 相对 bassPeak 的比例映射到 0~1，使动态范围更稳定
+        const bassNorm = Math.pow(Math.min(1, bKick / Math.max(0.05, bassPeak)), 0.7);
+
         const env = (cur: number, target: number, up: number, down: number) =>
           cur + (target > cur ? up : down) * (target - cur);
-        smoothBass = env(smoothBass, Math.min(0.82, bKick * 0.78), 0.28, 0.075);
+        smoothBass = env(smoothBass, Math.min(0.82, bassNorm * 0.85), 0.30, 0.075);
         smoothMid = env(smoothMid, Math.min(0.68, mInst * 0.64), 0.18, 0.06);
         smoothTreb = env(smoothTreb, Math.min(0.56, tHigh * 0.54), 0.18, 0.055);
-        smoothEnergy = env(smoothEnergy, Math.min(0.72, (bKick + mInst + tHigh) / 3), 0.16, 0.055);
+        smoothEnergy = env(smoothEnergy, Math.min(0.72, (bassNorm + mInst + tHigh) / 3), 0.16, 0.055);
 
         const bassOnset = Math.max(0, bKick - smoothBass * 0.9);
-        if (bassOnset > 0.075 && bKick > 0.32) {
+        if (bassOnset > 0.075 && bKick > 0.32 && beatCooldown <= 0) {
           beatPulse = Math.max(beatPulse, Math.min(0.15, bassOnset * 0.2));
           ringPulse = 1.0;
+          // 节拍自动触发涟漪（Mineradio 同款行为），位置随机偏移让画面更生动
+          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, Math.min(1, bassOnset * 4));
+          beatCooldown = 0.18;
         }
         beatPulse *= Math.pow(0.36, dt);
         ringPulse *= Math.pow(0.85, dt);
@@ -384,12 +466,24 @@ function useVisualEngine(
         camera.position.y = Math.cos(now * 0.0007) * shake;
       } else {
         smoothBass *= 0.91; smoothMid *= 0.91; smoothTreb *= 0.91; smoothEnergy *= 0.91; beatPulse *= 0.82;
+        bassPeak *= 0.99;
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
         uniforms.uTreble.value = smoothTreb;
         uniforms.uBeat.value = beatPulse;
         uniforms.uEnergy.value = smoothEnergy;
       }
+
+      // 更新涟漪 age 并写入 rippleTex（Mineradio 同款 1×N RGBA FloatType）
+      for (let i = 0; i < RIPPLE_MAX; i++) {
+        const r = ripples[i];
+        r.age += dt;
+        rippleData[i * 4] = r.x;
+        rippleData[i * 4 + 1] = r.y;
+        rippleData[i * 4 + 2] = r.age;
+        rippleData[i * 4 + 3] = r.str;
+      }
+      rippleTex.needsUpdate = true;
 
       particles.rotation.y += dt * 0.05;
       particles.rotation.x += dt * 0.02;
@@ -432,24 +526,83 @@ function useVisualEngine(
         const ctx = cv.getContext('2d')!;
         const s = Math.min(img.naturalWidth, img.naturalHeight);
         ctx.drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, size, size);
+
+        // 切歌渐变：把当前 coverTex 内容拷贝到 prevCoverTex，然后 uColorMixT 从 0 渐变到 1（Mineradio同款）
+        if (uniforms.uHasCover.value === 1 && coverTex.image) {
+          const prevCv = document.createElement('canvas');
+          prevCv.width = prevCv.height = size;
+          prevCv.getContext('2d')!.drawImage(coverTex.image as any, 0, 0, size, size);
+          prevCoverTex.image = prevCv;
+          prevCoverTex.needsUpdate = true;
+          uniforms.uColorMixT.value = 0;
+          gsap.to(uniforms.uColorMixT, { value: 1, duration: 1.1, ease: 'power2.inOut' });
+        } else {
+          prevCoverTex.image = cv;
+          prevCoverTex.needsUpdate = true;
+          uniforms.uColorMixT.value = 1;
+        }
+
         coverTex.image = cv;
         coverTex.needsUpdate = true;
         uniforms.uHasCover.value = 1;
+
+        // 生成 64×64 RGBA 边缘/深度纹理（Mineradio同款启发式：R=depth, G=edge, B=fg, A=lum）
         try {
-          const d = ctx.getImageData(0, 0, size, size).data;
+          const src = ctx.getImageData(0, 0, size, size).data;
+          const dst = edgeData;
+          const eSz = edgeTexSize;
+          // 先降采样到 64×64 的灰度缓冲
+          const grayBuf = new Float32Array(eSz * eSz);
+          for (let y = 0; y < eSz; y++) {
+            for (let x = 0; x < eSz; x++) {
+              const sx = Math.floor(x / eSz * size), sy = Math.floor(y / eSz * size);
+              const di = (sy * size + sx) * 4;
+              grayBuf[y * eSz + x] = (src[di] * 0.299 + src[di + 1] * 0.587 + src[di + 2] * 0.114) / 255;
+            }
+          }
+          for (let y = 0; y < eSz; y++) {
+            for (let x = 0; x < eSz; x++) {
+              const idx = y * eSz + x;
+              const lum = grayBuf[idx];
+              // Sobel 边缘
+              const xm = x > 0 ? x - 1 : 0, xp = x < eSz - 1 ? x + 1 : eSz - 1;
+              const ym = y > 0 ? y - 1 : 0, yp = y < eSz - 1 ? y + 1 : eSz - 1;
+              const gx = -grayBuf[ym * eSz + xm] - 2 * grayBuf[y * eSz + xm] - grayBuf[yp * eSz + xm]
+                       + grayBuf[ym * eSz + xp] + 2 * grayBuf[y * eSz + xp] + grayBuf[yp * eSz + xp];
+              const gy = -grayBuf[ym * eSz + xm] - 2 * grayBuf[ym * eSz + x] - grayBuf[ym * eSz + xp]
+                       + grayBuf[yp * eSz + xm] + 2 * grayBuf[yp * eSz + x] + grayBuf[yp * eSz + xp];
+              const edgeMag = Math.min(1, Math.sqrt(gx * gx + gy * gy) * 1.6);
+              // 中心 mask 深度：距离中心越近深度越大（伪3D凸起）
+              const dxn = (x / (eSz - 1) - 0.5) * 2;
+              const dyn = (y / (eSz - 1) - 0.5) * 2;
+              const radial = Math.sqrt(dxn * dxn + dyn * dyn);
+              const depth = Math.max(0, 1 - radial) * 0.7 + lum * 0.3;
+              const di4 = idx * 4;
+              dst[di4] = Math.round(depth * 255);
+              dst[di4 + 1] = Math.round(edgeMag * 255);
+              dst[di4 + 2] = Math.round(lum * 255);
+              dst[di4 + 3] = 255;
+            }
+          }
+          edgeTex.needsUpdate = true;
+          uniforms.uHasEdge.value = 1;
+
+          // 主色提取（保留原有 tint 逻辑）
           let best = { score: -1, r: 143, g: 233, b: 255 };
           for (let y = 0; y < size; y += 8) {
             for (let x = 0; x < size; x += 8) {
               const di = (y * size + x) * 4;
-              const r = d[di], g = d[di + 1], b = d[di + 2];
-              const lum = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
+              const r = src[di], g = src[di + 1], b = src[di + 2];
+              const lumN = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
               const chroma = (Math.max(r, g, b) - Math.min(r, g, b)) / 255;
-              const score = chroma * 1.6 + (0.5 - Math.abs(lum - 0.5)) * 0.45;
-              if (lum > 0.08 && lum < 0.92 && score > best.score) best = { score, r, g, b };
+              const score = chroma * 1.6 + (0.5 - Math.abs(lumN - 0.5)) * 0.45;
+              if (lumN > 0.08 && lumN < 0.92 && score > best.score) best = { score, r, g, b };
             }
           }
           uniforms.uTintColor.value.setRGB(best.r / 255, best.g / 255, best.b / 255);
-        } catch {}
+        } catch {
+          uniforms.uHasEdge.value = 0;
+        }
       };
       img.onerror = () => { uniforms.uHasCover.value = 0; };
       img.src = coverUrl;
@@ -467,7 +620,10 @@ function useVisualEngine(
       floatGeo.dispose(); floatMat.dispose(); coverTex.dispose(); dotTexture.dispose();
       vinylGeo.dispose(); vinylMat.dispose(); labelGeo.dispose(); labelMat.dispose();
       holeGeo.dispose(); holeMat.dispose(); ringGeo.dispose(); ringMat.dispose();
+      prevCoverTex.dispose(); edgeTex.dispose(); rippleTex.dispose();
       renderer.dispose();
+      delete (window as any).__updateCover;
+      delete (window as any).__triggerRipple;
     };
   }, []);
 
@@ -766,6 +922,17 @@ const App: React.FC = () => {
       )}
       {/* Three.js 粒子画布 */}
       <canvas ref={canvasRef} className="absolute inset-0 z-10 pointer-events-none" />
+      {/* 涟漪点击层：捕获空白区域点击触发涟漪（UI 控件位于更高 z-index，会优先消费自己的点击） */}
+      <div
+        className="absolute inset-0 z-[15] pointer-events-auto"
+        onPointerDown={(e) => {
+          const trigger = (window as any).__triggerRipple as ((u: number, v: number, str: number) => void) | undefined;
+          if (!trigger) return;
+          const u = e.clientX / window.innerWidth;
+          const v = 1 - e.clientY / window.innerHeight;
+          trigger(u, v, 0.8);
+        }}
+      />
       {/* 渐变遮罩 */}
       <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: `linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)` }} />
 
@@ -802,40 +969,19 @@ const App: React.FC = () => {
       </div>
 
       {/* 主内容：沉浸式歌词舞台（始终显示在底层） */}
-      <div className="absolute inset-0 z-30 flex flex-col pt-11">
+      <div className="absolute inset-0 z-30 flex flex-col pt-11 pointer-events-none">
         {/* 舞台歌词（沉浸式主界面） */}
         <div className="flex-1 flex items-center justify-center relative overflow-hidden">
           {player.currentSong && player.showLyrics ? (
-            <div className="w-full max-w-2xl h-[60vh] overflow-y-auto px-8" ref={lyricsRef} style={{ scrollbarWidth: 'none' }}>
+            <div className="w-full max-w-2xl h-[60vh] overflow-y-auto px-8 pointer-events-auto" ref={lyricsRef} style={{ scrollbarWidth: 'none' }}>
               <div className="space-y-3 py-32">
                 {player.lyricsLoading && player.lyrics.length === 0 && <div className="text-center text-white/25 text-sm py-8">加载歌词中...</div>}
                 {player.lyrics.length === 0 && !player.lyricsLoading && <div className="text-center text-white/15 text-sm py-8">暂无歌词</div>}
                 {player.lyrics.map((line, i) => {
                   const isActive = i === activeLyricIdx;
-                  const words = line.words;
-                  // 找到当前正在唱的字索引
-                  const activeWordIdx = isActive && words ? words.findIndex((w: any, wi: number) => {
-                    const start = w.startMs / 1000;
-                    const end = (w.startMs + w.durationMs) / 1000;
-                    return player.currentTime >= start - 0.05 && player.currentTime < end + 0.1;
-                  }) : -1;
                   return (
                     <div key={i} ref={isActive ? activeLyricRef : null} className={`lyrics-line ${isActive ? 'active' : i < activeLyricIdx ? 'past' : 'future'}`}>
-                      {isActive && words && words.length > 0 ? (
-                        <span className="lyric-words">
-                          {words.map((w: any, wi: number) => {
-                            const wordTime = w.startMs / 1000;
-                            const isSung = player.currentTime >= wordTime - 0.05;
-                            const isActiveWord = wi === activeWordIdx;
-                            return (
-                              <span key={wi} className={`lyric-word ${isActiveWord ? 'active' : isSung ? 'sung' : ''}`}>
-                                {isActiveWord && <span className="word-indicator" />}
-                                {w.text}
-                              </span>
-                            );
-                          })}
-                        </span>
-                      ) : (line.text || '♪')}
+                      {line.text || '♪'}
                     </div>
                   );
                 })}
@@ -846,14 +992,14 @@ const App: React.FC = () => {
               <div className="text-5xl mb-5 opacity-30">🎧</div>
               <div className="text-xl font-light text-white/40">{player.currentSong ? '歌词已隐藏' : '选择一首歌开始播放'}</div>
               {!player.currentSong && (
-                <button onClick={() => setShowOverlay(true)} className="mt-6 px-6 py-2.5 rounded-full bg-white/10 hover:bg-white/20 text-sm font-medium backdrop-blur-xl border border-white/10 transition-all">浏览音乐库</button>
+                <button onClick={() => setShowOverlay(true)} className="mt-6 px-6 py-2.5 rounded-full bg-white/10 hover:bg-white/20 text-sm font-medium backdrop-blur-xl border border-white/10 transition-all pointer-events-auto">浏览音乐库</button>
               )}
             </div>
           )}
         </div>
 
         {/* 底部控制条 */}
-        <div className="h-24 px-6 bottom-bar flex items-center gap-6">
+        <div className="h-24 px-6 bottom-bar flex items-center gap-6 pointer-events-auto">
           <div className="flex items-center gap-4 w-[260px] flex-shrink-0">
             {player.currentSong?.cover ? (
               <div className="w-14 h-14 rounded-xl bg-cover bg-center flex-shrink-0 shadow-lg" style={{ backgroundImage: `url(${player.currentSong.cover})` }} />
