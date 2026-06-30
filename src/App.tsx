@@ -98,10 +98,10 @@ function useVisualEngine(
     const ripples: { x: number; y: number; age: number; str: number }[] = [];
     for (let i = 0; i < RIPPLE_MAX; i++) ripples.push({ x: 0, y: 0, age: 999, str: 0 });
 
-    // 粒子几何 — 自由粒子，环形/光晕分布（不遮挡中心图片视频）
-    // 设计：粒子分布在屏幕边缘的环形带 + 少量散落星点，中心留空给用户图片/视频
-    // 数量适中（~6000），足够卡点视觉冲击，又不会糊成一片
-    const PCOUNT = 6000;
+    // 粒子几何 — 自由粒子，3D 体积内自由分布（不固定形状，中间也有粒子）
+    // 设计：粒子在圆盘体积内自由分布，覆盖整个画面包括中心
+    // 跟随节奏做爆发/聚拢/抖动等各种变化，非固定形状，穿插在背景图片/视频周围
+    const PCOUNT = 5000;
     const positions = new Float32Array(PCOUNT * 3);
     const uvs = new Float32Array(PCOUNT * 2);
     const rand = new Float32Array(PCOUNT);
@@ -113,30 +113,19 @@ function useVisualEngine(
     for (let i = 0; i < PCOUNT; i++) {
       const r1 = hhash(i * 3 + 1);
       const r2 = hhash(i * 3 + 2);
-      const r3 = hhash(i * 3 + 3);
-      // 环形带分布：大部分粒子在半径 2.8~5.2 的环形带（屏幕边缘光晕）
-      // 少量粒子在 1.8~2.8 内圈，极少量在 5.2~6.5 外圈散落
-      let radius: number;
-      const band = r3;
-      if (band < 0.68) {
-        // 主光晕带（边缘）
-        radius = 2.8 + r1 * 2.4;
-      } else if (band < 0.90) {
-        // 内圈（靠近中心但不遮挡）
-        radius = 1.8 + r1 * 1.0;
-      } else {
-        // 外圈散落星点
-        radius = 5.2 + r1 * 1.3;
-      }
+      const r4 = hhash(i * 5 + 7);
+      // 圆盘内自由分布：半径用 pow 让中心略稀疏（不遮挡背景）但仍有粒子
+      // 覆盖 0~5.2，中间不空、不固定形状
+      const radius = Math.pow(r1, 0.6) * 5.2;
       const theta = r2 * Math.PI * 2;
-      // 略带 z 厚度（薄环，非纯平面），增加纵深感
-      const zSpread = (hhash(i * 5 + 7) - 0.5) * 0.8;
+      // 薄 z 厚度，增加纵深感
+      const zSpread = (r4 - 0.5) * 1.5;
       positions[i * 3] = radius * Math.cos(theta);
       positions[i * 3 + 1] = radius * Math.sin(theta);
       positions[i * 3 + 2] = zSpread;
-      // aUv 基于角度归一化（用于封面采样时的方位映射）
-      uvs[i * 2] = (Math.cos(theta) + 1) * 0.5;
-      uvs[i * 2 + 1] = (Math.sin(theta) + 1) * 0.5;
+      // aUv 基于位置归一化（用于封面采样映射）
+      uvs[i * 2] = (positions[i * 3] / 5.2) * 0.5 + 0.5;
+      uvs[i * 2 + 1] = (positions[i * 3 + 1] / 5.2) * 0.5 + 0.5;
       rand[i] = r1;
     }
     const geo = new THREE.BufferGeometry();
@@ -258,112 +247,50 @@ function useVisualEngine(
         vec3 coverCol = mix(prevCol, newCol, clamp(uColorMixT, 0.0, 1.0));
         vSourceLum = dot(coverCol, vec3(0.299, 0.587, 0.114));
 
-        int preset = int(uPreset + 0.5);
-
-        // 环境漂移：所有预设共享的缓慢噪声漂移（避免完全静止）
-        // 基于粒子位置和时间，让粒子在基础位置附近轻微浮动
+        // 环境漂移：缓慢噪声漂移（避免完全静止）
         vec3 drift = vec3(
           vnoise3(basePos * 0.4 + vec3(t * 0.08, 0.0, 0.0)),
           vnoise3(basePos * 0.4 + vec3(0.0, t * 0.08, 0.0)),
           vnoise3(basePos * 0.4 + vec3(0.0, 0.0, t * 0.08))
         ) - 0.5;
-        // 低频驱动漂移幅度，高频增加湍流
         drift *= 0.4 + uBass * 0.8 + uTreble * 0.3;
 
-        // 节拍行为：每个粒子有自己的"响应相位"，基于 aRand 错开
-        // beatPhase 让粒子行为有时间差，避免整体同步呆板
-        float beatPhase = r1 * 0.4; // 0~0.4 的相位差
-        float beatT = max(0.0, uBeatAge - beatPhase); // 该粒子的节拍龄
-        float beatEnv = exp(-beatT * 4.0) * uBeatStrength; // 节拍包络（快速衰减）
-        vBeatGlow = beatEnv; // 节拍发光强度，传给 fragment（用 beatEnv 驱动卡点发光）
-        // 节拍方向（基于粒子哈希，每个粒子有自己的爆发方向）
+        // 节拍包络：每个粒子有相位差，避免呆板同步
+        float beatPhase = r1 * 0.4;
+        float beatT = max(0.0, uBeatAge - beatPhase);
+        float beatEnv = exp(-beatT * 4.0) * uBeatStrength;
+        vBeatGlow = beatEnv;
         vec3 beatDir = normalize(basePos + vec3(0.001));
 
         vec3 pos = basePos;
         float pointScale = 1.0;
         float brightBoost = 1.0;
-
-        // 默认应用联觉配色
         vColor = synestheticColor(uBass, uMid, uTreble, coverCol, uHasCover);
 
-        if (preset == 0) {
-          // === BLOOM 绽放 === 节拍时粒子从中心向外爆发，衰减后回归
-          // 爆发距离 = 节拍强度 * 方向，远粒子爆发更猛（视觉冲击）
-          float dist = length(basePos);
-          float burstMag = beatEnv * (1.0 + dist * 0.3) * 2.5;
-          pos = basePos + beatDir * burstMag;
-          // 爆发时变亮变大
-          brightBoost = 1.0 + beatEnv * 2.5;
-          pointScale = 1.0 + beatEnv * 1.8;
-          // 爆发时颜色偏暖
-          vColor = mix(vColor, vec3(1.0, 0.7, 0.4), beatEnv * 0.6);
-        } else if (preset == 1) {
-          // === IMPLODE 坍缩 === 节拍时粒子向中心聚拢，衰减后散开
-          // 聚拢 = 位置向中心收缩，远粒子收缩更多
-          float shrink = 1.0 - beatEnv * 0.7;
-          pos = basePos * shrink;
-          // 聚拢时核心变亮（密度增加）
-          brightBoost = 1.0 + beatEnv * 1.8;
-          pointScale = 1.0 + beatEnv * 1.2;
-          vColor = mix(vColor, vec3(0.5, 0.8, 1.0), beatEnv * 0.5);
-        } else if (preset == 2) {
-          // === SHOCKWAVE 冲击波 === 节拍时从中心发出环形冲击波，粒子被波推开后回归
-          // 波前半径 = 节拍龄 * 速度
-          float waveRadius = beatT * 4.5;
-          float dist = length(basePos);
-          // 波前附近的粒子被推开（高斯峰）
-          float waveFront = exp(-pow((dist - waveRadius) * 1.8, 2.0));
-          float push = waveFront * uBeatStrength * 2.0;
-          pos = basePos + beatDir * push;
-          // 波前粒子变亮
-          brightBoost = 1.0 + waveFront * uBeatStrength * 3.0;
-          pointScale = 1.0 + waveFront * uBeatStrength * 1.5;
-          // 冲击波颜色：波前暖白，内部冷
-          vColor = mix(vColor, vec3(1.0, 0.9, 0.7), waveFront * uBeatStrength * 0.7);
-        } else if (preset == 3) {
-          // === FLASH 闪烁 === 节拍时粒子瞬间放大变亮，像萤火虫同步闪烁
-          // 位置基本不动，主要变化大小和亮度
-          // 每个粒子有自己的闪烁阈值（部分粒子不闪，增加层次）
-          float flashThreshold = r2;
-          float flash = step(0.3, flashThreshold) * beatEnv;
-          brightBoost = 1.0 + flash * 4.0;
-          pointScale = 1.0 + flash * 3.0;
-          // 闪烁颜色：暖白
-          vColor = mix(vColor, vec3(1.0, 0.95, 0.8), flash * 0.8);
-          // 非节拍时粒子有呼吸般的明暗变化
-          float breathe = 0.6 + 0.4 * sin(t * 1.2 + r1 * 8.0);
-          brightBoost *= 0.5 + breathe * 0.5;
-        } else if (preset == 4) {
-          // === VORTEX 漩涡 === 节拍时粒子绕中心旋转，旋转量随节拍衰减
-          // 旋转角度 = 节拍强度 * (1 + 距离)，远粒子转得更多
-          float dist = length(basePos);
-          float angle = beatEnv * (2.0 + dist * 0.8) * (r1 > 0.5 ? 1.0 : -1.0); // 随机正反向
-          float s = sin(angle), c = cos(angle);
-          // 绕 z 轴旋转
-          pos.x = basePos.x * c - basePos.y * s;
-          pos.y = basePos.x * s + basePos.y * c;
-          pos.z = basePos.z;
-          brightBoost = 1.0 + beatEnv * 1.5;
-          pointScale = 1.0 + beatEnv * 1.0;
-          // 漩涡颜色：旋转时偏冷蓝
-          vColor = mix(vColor, vec3(0.4, 0.7, 1.0), beatEnv * 0.5);
-        } else {
-          // === TREMOR 震颤 === 节拍时粒子剧烈随机抖动，衰减后平静
-          // 每个粒子有自己的抖动方向（基于哈希），节拍驱动幅度
-          vec3 jitterDir = normalize(vec3(
-            hash13(basePos + vec3(1.0, 0.0, 0.0)) - 0.5,
-            hash13(basePos + vec3(0.0, 1.0, 0.0)) - 0.5,
-            hash13(basePos + vec3(0.0, 0.0, 1.0)) - 0.5
-          ));
-          float tremorMag = beatEnv * 1.2;
-          pos = basePos + jitterDir * tremorMag;
-          // 高频也驱动持续微抖（非节拍时也有活力）
-          pos += jitterDir * uTreble * 0.15;
-          brightBoost = 1.0 + beatEnv * 1.8;
-          pointScale = 1.0 + beatEnv * 1.3;
-          // 震颤颜色：偏暖橙
-          vColor = mix(vColor, vec3(1.0, 0.6, 0.3), beatEnv * 0.5);
-        }
+        // === 自由粒子跟随节奏 ===
+        // 节拍时粒子做爆发/聚拢混合：一半向外爆发，一半向内聚拢（基于 aRand），制造层次而非整齐划一
+        float dist = length(basePos);
+        float burstSign = r2 > 0.5 ? 1.0 : -1.0;
+        float burstMag = beatEnv * (1.0 + dist * 0.25) * 2.2 * burstSign;
+        pos += beatDir * burstMag;
+        // 节拍时额外随机方向抖动（每个粒子方向不同）
+        vec3 jitterDir = normalize(vec3(
+          hash13(basePos + vec3(1.0, 0.0, 0.0)) - 0.5,
+          hash13(basePos + vec3(0.0, 1.0, 0.0)) - 0.5,
+          hash13(basePos + vec3(0.0, 0.0, 1.0)) - 0.5
+        ));
+        pos += jitterDir * beatEnv * 0.7;
+        // 高频持续驱动微抖（非节拍时也有活力）
+        pos += jitterDir * uTreble * 0.18;
+        // bass 驱动径向呼吸（持续，非节拍）
+        pos += beatDir * uBass * 0.25;
+
+        // 节拍时变亮变大
+        brightBoost = 1.0 + beatEnv * 2.5;
+        pointScale = 1.0 + beatEnv * 1.8;
+        // 节拍颜色：爆发粒子暖橙，聚拢粒子冷蓝
+        vec3 beatColor = burstSign > 0.5 ? vec3(1.0, 0.7, 0.4) : vec3(0.5, 0.8, 1.0);
+        vColor = mix(vColor, beatColor, beatEnv * 0.6);
 
         // 叠加环境漂移（所有预设共享）
         pos += drift;
@@ -486,6 +413,16 @@ function useVisualEngine(
     let beatMapSongId: string | null = null;  // 当前 beatMap 对应的歌曲 id
     let beatAnalysisToken = 0;   // 取消旧分析
     let beatAnalysisStarted = false;
+    // === 实时频谱 onset 节拍检测（主驱动，可靠即时无外部依赖）===
+    // 用 beatAnalyser(smoothing=0.1) 低频能量，滑动窗口自适应阈值 + 上升沿 + 不应期
+    // 保证一定有节拍信号，不依赖离线分析是否成功
+    const ONSET_WIN = 43; // 滑动窗口 ~0.7s @60fps
+    const onsetHistory = new Float32Array(ONSET_WIN);
+    let onsetHistIdx = 0;
+    let onsetHistFilled = 0;
+    let prevBeatEnergy = 0;
+    let beatRefractoryUntil = 0; // 不应期（统一控制离线+实时触发，避免过密）
+    let realtimeBeatCount = 0;  // 实时节拍计数（调试用）
     // 电影级缓慢相机漂移（替代抖动），呼吸感而非晃动
     let camDriftX = 0, camDriftY = 0;
     // 鼠标追踪状态（屏幕像素坐标 + 平滑速度）
@@ -575,17 +512,16 @@ function useVisualEngine(
       if (currentBeatMap && currentBeatMap.beats.length > 0 && player.isPlaying) {
         // 查表：处理所有 <= 当前时间的节拍（通常每帧最多 1 个，seek 时可能多个）
         while (beatMapNextIdx < currentBeatMap.beats.length && currentBeatMap.beats[beatMapNextIdx] <= t) {
-          const beatTime = currentBeatMap.beats[beatMapNextIdx];
-          // 触发节拍卡点行为
-          uniforms.uBeatAge.value = 0;
-          uniforms.uBeatCount.value += 1;
-          // 节拍强度：基于节拍间隔估算（间隔短的鼓点更密集，强度适中）
-          // 这里用固定 0.7 基础强度 + 低频能量微调，让卡点视觉稳定
-          const strength = 0.6 + smoothBass * 0.3;
-          uniforms.uBeatStrength.value = Math.min(1, strength);
-          // beatPulse 用于涟漪/相机等次级效果
-          beatPulse = Math.max(beatPulse, 0.15);
-          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, Math.min(1, strength));
+          // 尊重不应期（与实时onset统一），避免离线+实时重叠过密
+          if (t >= beatRefractoryUntil) {
+            uniforms.uBeatAge.value = 0;
+            uniforms.uBeatCount.value += 1;
+            const strength = 0.6 + smoothBass * 0.3;
+            uniforms.uBeatStrength.value = Math.min(1, strength);
+            beatPulse = Math.max(beatPulse, 0.15);
+            triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, Math.min(1, strength));
+            beatRefractoryUntil = t + 0.20;
+          }
           beatMapNextIdx++;
         }
       }
@@ -609,6 +545,35 @@ function useVisualEngine(
         mInst /= Math.max(1, midEnd - kickEnd);
         tHigh /= Math.max(1, len - midEnd);
 
+        // === 实时频谱 onset 节拍检测（主驱动）===
+        // 用 beatData（beatAnalyser, smoothing=0.1 响应快）低频能量 bin 1-8（~21-172Hz kick 区）
+        let beatLow = 0;
+        for (let i = 1; i < 9; i++) beatLow += beatData[i] / 255;
+        beatLow /= 8;
+        // 滑动窗口均值 + 标准差（自适应阈值）
+        onsetHistory[onsetHistIdx] = beatLow;
+        onsetHistIdx = (onsetHistIdx + 1) % ONSET_WIN;
+        if (onsetHistFilled < ONSET_WIN) onsetHistFilled++;
+        let oSum = 0;
+        for (let i = 0; i < onsetHistFilled; i++) oSum += onsetHistory[i];
+        const oMean = oSum / onsetHistFilled;
+        let oVar = 0;
+        for (let i = 0; i < onsetHistFilled; i++) { const d = onsetHistory[i] - oMean; oVar += d * d; }
+        const oStd = Math.sqrt(oVar / onsetHistFilled);
+        // onset 判定：超阈值 + 上升沿 + 不应期 + 最低能量门限
+        const onsetThreshold = oMean + oStd * 1.4;
+        if (beatLow > onsetThreshold && beatLow > prevBeatEnergy * 0.92 && t >= beatRefractoryUntil && beatLow > 0.08) {
+          const strength = Math.min(1, (beatLow - oMean) / Math.max(oStd, 0.01) * 0.35 + 0.5);
+          uniforms.uBeatAge.value = 0;
+          uniforms.uBeatCount.value += 1;
+          uniforms.uBeatStrength.value = strength;
+          beatPulse = Math.max(beatPulse, 0.18);
+          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, strength);
+          beatRefractoryUntil = t + 0.20;
+          realtimeBeatCount++;
+        }
+        prevBeatEnergy = beatLow;
+
         // Mineradio同款 peak tracking：低频慢衰减 + 下限钳制，避免静音段把增益拉到 0
         bassPeak = Math.max(bassPeak * 0.994, bKick, 0.030);
         // gamma 归一化：把 bKick 相对 bassPeak 的比例映射到 0~1，使动态范围更稳定
@@ -630,15 +595,14 @@ function useVisualEngine(
         // 写入调试信息供 BeatDebugOverlay 显示
         (window as any).__beatDebug = {
           count: uniforms.uBeatCount.value,
-          flux: 0,
-          threshold: 0,
+          realtime: realtimeBeatCount,
           strength: uniforms.uBeatStrength.value,
           age: uniforms.uBeatAge.value,
           beat: beatPulse,
+          beatLow: prevBeatEnergy,
+          threshold: oMean + oStd * 1.4,
           beatMapReady: currentBeatMap ? currentBeatMap.beats.length : 0,
           tempo: currentBeatMap ? currentBeatMap.tempo : 0,
-          nextBeatIn: currentBeatMap && beatMapNextIdx < currentBeatMap.beats.length
-            ? Math.max(0, currentBeatMap.beats[beatMapNextIdx] - t) : -1,
         };
       } else {
         smoothBass *= 0.91; smoothMid *= 0.91; smoothTreb *= 0.91; smoothEnergy *= 0.91; beatPulse *= 0.82;
@@ -874,7 +838,7 @@ function detectMood(song: Song | null): Mood {
 // 临时节拍调试显示（验证节拍检测是否工作）
 // ====================================================================
 const BeatDebugOverlay: React.FC = () => {
-  const [info, setInfo] = React.useState<any>({ count: 0, strength: 0, age: 0, beat: 0, beatMapReady: 0, tempo: 0, nextBeatIn: -1 });
+  const [info, setInfo] = React.useState<any>({ count: 0, realtime: 0, strength: 0, age: 0, beat: 0, beatLow: 0, threshold: 0, beatMapReady: 0, tempo: 0 });
   React.useEffect(() => {
     const id = setInterval(() => {
       const d = (window as any).__beatDebug;
@@ -884,13 +848,10 @@ const BeatDebugOverlay: React.FC = () => {
   }, []);
   return (
     <div className="absolute top-16 left-4 z-50 bg-black/70 text-green-400 font-mono text-xs px-3 py-2 rounded pointer-events-none">
-      <div>BEAT COUNT: {info.count}</div>
+      <div>BEAT: 总{info.count} / 实时{info.realtime}</div>
       <div>BPM: {(info.tempo || 0).toFixed(1)} / 节拍表: {info.beatMapReady || 0} 个</div>
+      <div>低频能量: {(info.beatLow || 0).toFixed(3)} / 阈值: {(info.threshold || 0).toFixed(3)}</div>
       <div>STRENGTH: {(info.strength || 0).toFixed(2)} / AGE: {(info.age || 0).toFixed(3)}</div>
-      <div>NEXT BEAT IN: {info.nextBeatIn >= 0 ? (info.nextBeatIn).toFixed(3) + 's' : '—'}</div>
-      <div style={{ color: (info.beatMapReady || 0) > 0 ? '#0f0' : '#f4d28a' }}>
-        {(info.beatMapReady || 0) > 0 ? '✓ 节拍表就绪' : '⏳ 正在分析节拍...'}
-      </div>
       <div style={{ color: info.count > 0 ? '#0f0' : '#888' }}>
         {info.count > 0 ? '✓ 卡点触发中' : '— 等待卡点'}
       </div>
@@ -1553,19 +1514,6 @@ const App: React.FC = () => {
           <div className="flex items-center justify-between">
             <div className="text-sm font-bold">视觉特效</div>
             <button onClick={() => setShowFx(false)} className="w-7 h-7 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center">×</button>
-          </div>
-
-          {/* 粒子预设 */}
-          <div>
-            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">粒子预设</div>
-            <div className="grid grid-cols-3 gap-2">
-              {PRESETS.map((p) => (
-                <button key={p.id} onClick={() => setPreset(p.id)} className={`h-16 rounded-xl border flex flex-col items-center justify-center gap-1 transition-all ${preset === p.id ? 'border-[#00f5d4]/40 bg-[#00f5d4]/08 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40 hover:bg-white/[0.05]'}`}>
-                  <span className="text-lg">{p.icon}</span>
-                  <span className="text-[10px]">{p.name}</span>
-                </button>
-              ))}
-            </div>
           </div>
 
           {/* 强度滑块 */}
