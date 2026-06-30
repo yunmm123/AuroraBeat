@@ -285,7 +285,13 @@ export default function KugouMusicPanel({
     setPlayingHash(song.Hash)
     setPlayErrorMsg('')
     try {
-      const urlRes = await kugouSongUrl(song.Hash, song.AlbumID, song.AlbumAudioID)
+      const urlRes = await kugouSongUrl(
+        song.Hash,
+        song.AlbumID,
+        song.AlbumAudioID,
+        userInfo?.uid,
+        userInfo?.token
+      )
       let playUrl = ''
       if (urlRes?.play_url) {
         playUrl = urlRes.play_url

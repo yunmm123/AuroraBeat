@@ -26,8 +26,8 @@ export async function kugouSearchDefault() {
 }
 
 // ============ Song URL ============
-export async function kugouSongUrl(hash: string, albumId?: string, albumAudioId?: string) {
-  return invoke('kg:songUrl', hash, albumId, albumAudioId)
+export async function kugouSongUrl(hash: string, albumId?: string, albumAudioId?: string, uid?: string, token?: string) {
+  return invoke('kg:songUrl', hash, albumId, albumAudioId, uid, token)
 }
 
 // ============ Lyrics ============

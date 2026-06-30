@@ -175,11 +175,16 @@ export async function kgSearchComplex(keyword: string, page = 1) {
 }
 
 // ============ Song URL ============
-export async function kgSongUrl(hash: string, albumId?: string, albumAudioId?: string) {
+export async function kgSongUrl(hash: string, albumId?: string, albumAudioId?: string, uid?: string, token?: string) {
+  const cookie: Record<string, string> = {}
+  if (uid) cookie.userid = uid
+  if (token) cookie.token = token
+  
   const body = await callApi('song_url', { 
     hash, 
     album_id: albumId || 0,
     album_audio_id: albumAudioId || 0,
+    cookie,
   })
   
   let playUrl = ''
