@@ -48,3 +48,4 @@ electron-builder/
 # OS
 Thumbs.db
 Desktop.ini
+.uploads/
