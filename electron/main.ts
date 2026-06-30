@@ -11,12 +11,26 @@ const NETEASE_LOGIN_PARTITION = 'persist:aurorabeat-netease'
 const NETEASE_LOGIN_URL = 'https://music.163.com/#/login'
 
 // ========== 启动本地HTTP服务器 ==========
+// 打包后用户系统无独立 node 可执行文件，用 Electron 自身
+// (process.execPath) + ELECTRON_RUN_AS_NODE=1 以纯 Node 模式运行 server.js
 function startServer(): Promise<number> {
   return new Promise((resolve) => {
     const serverPath = path.join(__dirname, '..', 'server.js')
-    serverProcess = spawn('node', [serverPath], {
-      env: { ...process.env, AURORA_PORT: '0' },
+    const isPackaged = app.isPackaged
+    // 打包后无独立 node，用 Electron 自身以纯 Node 模式运行 server.js
+    const exec = isPackaged ? process.execPath : 'node'
+    serverProcess = spawn(exec, [serverPath], {
+      env: {
+        ...process.env,
+        // 让 Electron 以纯 Node.js 进程运行（无 GUI），用于执行 server.js
+        ELECTRON_RUN_AS_NODE: isPackaged ? '1' : '',
+        AURORA_PORT: '0',
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    serverProcess.on('error', (err: Error) => {
+      console.error('[Server] spawn error:', err.message)
+      if (!serverPort) { serverPort = 3000; resolve(serverPort) }
     })
     serverProcess.stdout?.on('data', (data: Buffer) => {
       const text = data.toString()
@@ -30,8 +44,8 @@ function startServer(): Promise<number> {
     serverProcess.stderr?.on('data', (data: Buffer) => {
       console.error('[Server Error]', data.toString().trim())
     })
-    // 兜底：3秒后用默认端口
-    setTimeout(() => { if (!serverPort) { serverPort = 3000; resolve(serverPort) } }, 3000)
+    // 兜底：5秒后用默认端口
+    setTimeout(() => { if (!serverPort) { serverPort = 3000; resolve(serverPort) } }, 5000)
   })
 }
 
