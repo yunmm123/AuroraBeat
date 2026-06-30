@@ -507,6 +507,7 @@ const App: React.FC = () => {
   const [panel, setPanel] = useState<Panel>('home');
   const [showQueue, setShowQueue] = useState(false);
   const [showFx, setShowFx] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Song[]>([]);
   const [searching, setSearching] = useState(false);
@@ -689,41 +690,51 @@ const App: React.FC = () => {
     let prevFrame: Uint8ClampedArray | null = null;
     let motionBuffer: { t: number; x: number }[] = [];
     let lastTrigger = 0;
+    let stableFrames = 0;
     const canvas = document.createElement('canvas');
-    canvas.width = 64; canvas.height = 48;
+    canvas.width = 80; canvas.height = 60;
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
     const W = canvas.width, H = canvas.height;
 
     const tick = () => {
-      if (video.readyState >= 2) {
+      if (video.readyState >= 2 && video.videoWidth > 0) {
         ctx.drawImage(video, 0, 0, W, H);
         const frame = ctx.getImageData(0, 0, W, H).data;
         if (prevFrame) {
-          // 计算质心横向位移
+          // 计算运动质心横向位置
           let sumX = 0, sumMotion = 0;
           for (let y = 0; y < H; y++) {
             for (let x = 0; x < W; x++) {
               const i = (y * W + x) * 4;
               const d = Math.abs(frame[i] - prevFrame[i]) + Math.abs(frame[i + 1] - prevFrame[i + 1]) + Math.abs(frame[i + 2] - prevFrame[i + 2]);
-              if (d > 60) { sumX += x; sumMotion++; }
+              if (d > 40) { sumX += x; sumMotion++; }
             }
           }
-          if (sumMotion > 40) {
+          if (sumMotion > 20) {
             const cx = sumX / sumMotion;
             motionBuffer.push({ t: Date.now(), x: cx });
-            // 只保留最近 500ms
-            const cutoff = Date.now() - 500;
-            motionBuffer = motionBuffer.filter((m) => m.t > cutoff);
-            if (motionBuffer.length >= 4 && Date.now() - lastTrigger > 1200) {
-              const first = motionBuffer[0];
-              const last = motionBuffer[motionBuffer.length - 1];
-              const dx = last.x - first.x;
-              if (Math.abs(dx) > 18) {
-                lastTrigger = Date.now();
-                if (dx > 0) { player.next(); showGestureHint('手势 → 下一首'); }
-                else { player.prev(); showGestureHint('上一首 ← 手势'); }
-                motionBuffer = [];
-              }
+            stableFrames = 0;
+          } else {
+            // 无明显运动时也记录（用于检测挥手结束）
+            stableFrames++;
+          }
+          // 只保留最近 700ms 的运动数据
+          const cutoff = Date.now() - 700;
+          motionBuffer = motionBuffer.filter((m) => m.t > cutoff);
+
+          // 当有足够的运动数据且运动刚结束（stableFrames 检测挥手收手），或缓冲区够大时判定方向
+          const shouldDetect = (stableFrames > 3 && motionBuffer.length >= 3) || motionBuffer.length >= 6;
+          if (shouldDetect && motionBuffer.length >= 3 && Date.now() - lastTrigger > 800) {
+            // 用首尾平均位置计算方向，更稳定
+            const firstAvg = motionBuffer.slice(0, Math.min(3, motionBuffer.length)).reduce((s, m) => s + m.x, 0) / Math.min(3, motionBuffer.length);
+            const lastAvg = motionBuffer.slice(-Math.min(3, motionBuffer.length)).reduce((s, m) => s + m.x, 0) / Math.min(3, motionBuffer.length);
+            const dx = lastAvg - firstAvg;
+            if (Math.abs(dx) > 12) {
+              lastTrigger = Date.now();
+              if (dx > 0) { player.next(); showGestureHint('手势 → 下一首'); }
+              else { player.prev(); showGestureHint('上一首 ← 手势'); }
+              motionBuffer = [];
+              stableFrames = 0;
             }
           }
         }
@@ -738,6 +749,7 @@ const App: React.FC = () => {
         video.srcObject = s;
         video.play().catch(() => {});
         raf = requestAnimationFrame(tick);
+        showGestureHint('手势已开启 · 挥手切歌');
       })
       .catch((e) => {
         console.warn('[Gesture] 摄像头不可用:', e.message);
@@ -914,7 +926,7 @@ const App: React.FC = () => {
       <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: `linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)` }} />
 
       {/* 摄像头手势检测（隐藏视频源） */}
-      <video ref={gestureVideoRef} className="hidden" playsInline muted />
+      <video ref={gestureVideoRef} className="fixed opacity-0 pointer-events-none" style={{ width: 1, height: 1, top: -10, left: -10 }} playsInline muted />
 
       {/* 手势提示气泡 */}
       {gestureHint && (
@@ -948,332 +960,41 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* 主内容 */}
+      {/* 主内容：沉浸式歌词舞台（始终显示在底层） */}
       <div className="absolute inset-0 z-30 flex flex-col pt-11">
-        <div className="flex-1 flex overflow-hidden">
-          {/* 侧边栏 */}
-          <div className="w-[220px] flex flex-col px-3 py-4 gap-0.5 border-r border-white/[0.04] bg-black/20 backdrop-blur-xl">
-            <div className="text-[10px] font-bold tracking-[0.12em] text-white/25 uppercase px-3 mb-2">导航</div>
-            {[
-              { id: 'home', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6', label: '首页' },
-              { id: 'search', icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z', label: '搜索' },
-              { id: 'library', icon: 'M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10', label: '我的音乐' },
-            ].map((item) => (
-              <button key={item.id} onClick={() => { setPanel(item.id as Panel); setViewingTracks([]); }} className={`sidebar-tab ${panel === item.id ? 'active' : ''}`}>
-                <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d={item.icon} /></svg>
-                <span>{item.label}</span>
-              </button>
-            ))}
-            {userPlaylists.length > 0 && (
-              <>
-                <div className="text-[10px] font-bold tracking-[0.12em] text-white/25 uppercase px-3 mt-4 mb-2">我的歌单</div>
-                {userPlaylists.slice(0, 15).map((pl: any) => (
-                  <button key={pl.id} onClick={() => openPlaylist(String(pl.id), pl.name)} className="sidebar-tab">
-                    <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13M9 9l12-2" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
-                    <span className="truncate">{pl.name}</span>
-                  </button>
-                ))}
-              </>
-            )}
-            <div className="flex-1" />
-            <button onClick={importLocal} className="sidebar-tab">
-              <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4"/></svg>
-              <span>导入本地</span>
-            </button>
-            <div className="px-2 py-3">
-              {neteaseUser ? (
-                <div className="flex items-center gap-2 px-2">
-                  <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center text-xs font-bold">{(neteaseUser.nickname || 'U')[0]}</div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-medium truncate">{neteaseUser.nickname}</div>
-                    <button onClick={logoutNetease} className="text-[10px] text-white/30 hover:text-red-400">退出登录</button>
-                  </div>
-                </div>
-              ) : (
-                <button onClick={loginNetease} className="login-btn w-full">登录网易云</button>
-              )}
-            </div>
-          </div>
-
-          {/* 内容区 */}
-          <div className="flex-1 flex flex-col overflow-hidden relative" ref={listRef}>
-            {/* 首页 */}
-            {panel === 'home' && (
-              <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                <div className="relative min-h-[200px] rounded-[28px] overflow-hidden border border-white/[0.06] bg-gradient-to-br from-[#12151a]/70 to-[#08090d]/80 backdrop-blur-2xl p-8 flex items-center">
-                  <div>
-                    <div className="text-[10px] font-bold tracking-[0.14em] uppercase mb-3" style={{ color: moodColors.primary }}>Welcome</div>
-                    <div className="text-[42px] font-bold leading-none tracking-tight mb-3">AuroraBeat</div>
-                    <div className="text-sm text-white/50 max-w-md">沉浸式音乐播放器 · 粒子可视化 · 逐字歌词 · AI情绪主题</div>
-                    <div className="flex gap-3 mt-5">
-                      <button onClick={() => setPanel('search')} className="h-9 px-5 rounded-full bg-white text-black text-xs font-semibold hover:shadow-lg hover:shadow-white/20 transition-all">开始探索</button>
-                      <button onClick={importLocal} className="h-9 px-5 rounded-full border border-white/15 text-white/70 text-xs font-medium hover:bg-white/5 hover:text-white transition-all">导入音乐</button>
-                    </div>
-                  </div>
-                </div>
-                {playlists.length > 0 && (
-                  <div>
-                    <div className="text-[13px] font-bold text-white/80 tracking-[0.04em] mb-4">推荐歌单</div>
-                    <div className="grid grid-cols-3 gap-3">
-                      {playlists.map((pl: any, i: number) => (
-                        <button key={i} onClick={() => pl.id && openPlaylist(String(pl.id), pl.name)} className="home-card group">
-                          <div className="home-card-label">Playlist</div>
-                          <div className="home-card-title truncate">{pl.name}</div>
-                          <div className="home-card-sub">{pl.trackCount || 0} 首</div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 歌单详情 */}
-            {panel === 'playlist' && (
-              <div className="flex-1 flex flex-col overflow-hidden">
-                <div className="flex items-center gap-4 px-6 py-4 border-b border-white/[0.04]">
-                  <button onClick={() => setPanel('home')} className="w-9 h-9 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-white/50 hover:text-white transition-all">←</button>
-                  <h2 className="text-lg font-bold">{viewingName}</h2>
-                  <span className="text-xs text-white/30">{viewingTracks.length} 首</span>
-                  {viewingTracks.length > 0 && (
-                    <>
-                      <button onClick={() => player.playTrackAt(0, viewingTracks)} className="ml-auto px-5 py-2 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg hover:shadow-cyan-500/25 transition-all">播放全部</button>
-                      <button onClick={() => player.addSongsToQueue(viewingTracks)} className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-sm font-medium transition-all">加入队列</button>
-                    </>
-                  )}
-                </div>
-                <div className="flex-1 overflow-y-auto">
-                  {viewingTracks.length === 0 ? (
-                    <div className="flex items-center justify-center h-40 text-white/20 text-sm">加载中...</div>
-                  ) : (
-                    viewingTracks.map((song, i) => {
-                      const isCurrent = player.currentSong?.id === song.id;
-                      const isLiked = likedSet.has(song.id);
-                      return (
-                        <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''} px-6 group`} onClick={() => player.playTrackAt(i, viewingTracks)}>
-                          <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
-                          <div className="flex-1 min-w-0"><div className={`text-sm truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/85'}`}>{song.title}</div></div>
-                          <div className="w-36 text-xs text-white/35 truncate">{song.artist}</div>
-                          <button onClick={(e) => { e.stopPropagation(); handleLike(song); }} className={`w-6 h-6 flex items-center justify-center transition-all ${isLiked ? 'text-[#ff5e8a]' : 'text-white/15 hover:text-white/50'}`}>
-                            <svg width="14" height="14" fill={isLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
-                          </button>
-                          <div className="w-12 text-xs text-white/25 text-right">{formatTime(song.duration)}</div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* 搜索 */}
-            {panel === 'search' && (
-              <div className="flex-1 flex flex-col overflow-hidden p-6">
-                <div className="flex gap-3 mb-4">
-                  <div className="flex-1 search-box">
-                    <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" className="text-white/25 mr-3 flex-shrink-0" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                    <input className="search-input" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSearch()} placeholder="搜索歌曲、歌手..." />
-                  </div>
-                  <button onClick={handleSearch} disabled={searching || !searchQuery.trim()} className="px-6 py-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all">{searching ? '搜索中' : '搜索'}</button>
-                </div>
-                <div className="flex-1 overflow-y-auto">
-                  {searchResults.length === 0 && !searching && (
-                    <div className="flex flex-col items-center justify-center h-60 text-white/25">
-                      <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-4"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                      <div className="text-sm">输入关键词搜索音乐</div>
-                    </div>
-                  )}
-                  {searchResults.map((song, i) => {
-                    const isCurrent = player.currentSong?.id === song.id;
-                    const isLiked = likedSet.has(song.id);
-                    return (
-                      <div key={song.id + i} className="search-result-item group" onClick={() => player.playSong(song, searchResults)}>
-                        {song.cover ? <div className="w-10 h-10 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${song.cover})` }} /> : <div className="w-10 h-10 rounded-lg bg-white/[0.05] flex items-center justify-center flex-shrink-0 text-white/20">♪</div>}
-                        <div className="flex-1 min-w-0">
-                          <div className={`text-[13px] font-medium truncate ${isCurrent ? 'text-[#00f5d4]' : 'text-white/90'}`}>{song.title}</div>
-                          <div className="text-[11px] text-white/35 truncate">{song.artist}</div>
-                        </div>
-                        <button onClick={(e) => { e.stopPropagation(); handleLike(song); }} className={`w-6 h-6 flex items-center justify-center transition-all ${isLiked ? 'text-[#ff5e8a]' : 'text-white/15 hover:text-white/50'}`}>
-                          <svg width="14" height="14" fill={isLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
-                        </button>
-                        <div className="text-[11px] text-white/25 w-12 text-right">{formatTime(song.duration)}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* 我的音乐 */}
-            {panel === 'library' && (
-              <div className="flex-1 overflow-y-auto p-6">
-                <div className="text-[13px] font-bold text-white/80 mb-4">播放列表</div>
-                {player.queue.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-80 text-white/25">
-                    <svg width="48" height="48" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-4"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-                    <div className="text-sm">暂无播放记录</div>
-                  </div>
-                ) : (
-                  player.queue.map((song, i) => {
-                    const isCurrent = i === player.currentIndex;
-                    return (
-                      <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''}`} onClick={() => player.playTrackAt(i)}>
-                        <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
-                        {song.cover && <div className="w-9 h-9 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${song.cover})` }} />}
-                        <div className="flex-1 min-w-0">
-                          <div className={`text-sm truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/85'}`}>{song.title}</div>
-                          <div className="text-[11px] text-white/35 truncate">{song.artist}</div>
-                        </div>
-                        <div className="text-[11px] text-white/25 w-12 text-right">{formatTime(song.duration)}</div>
-                        <button onClick={(e) => { e.stopPropagation(); player.removeFromQueue(i); }} className="w-6 h-6 rounded-lg text-white/15 hover:text-red-400 hover:bg-red-500/10 transition-all flex items-center justify-center text-sm">×</button>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            )}
-
-            {/* 舞台歌词 */}
-            {player.currentSong && player.showLyrics && panel === 'home' && (
-              <div className="absolute left-0 right-0 top-0 bottom-24 flex items-center justify-center pointer-events-none stage-lyrics-container">
-                <div ref={lyricsRef} className="w-full max-w-2xl h-80 overflow-y-auto px-8 pointer-events-auto" style={{ scrollbarWidth: 'none' }}>
-                  <div className="space-y-3 py-28">
-                    {player.lyricsLoading && player.lyrics.length === 0 && <div className="text-center text-white/25 text-sm py-8">加载歌词中...</div>}
-                    {player.lyrics.length === 0 && !player.lyricsLoading && <div className="text-center text-white/15 text-sm py-8">暂无歌词</div>}
-                    {player.lyrics.map((line, i) => {
-                      const isActive = i === activeLyricIdx;
-                      // YRC逐字高亮
-                      const words = line.words;
-                      const wordProgress = isActive && words ? Math.min(1, Math.max(0, (player.currentTime * 1000 - words[0]?.startMs) / (words[words.length - 1]?.startMs + words[words.length - 1]?.durationMs - words[0]?.startMs))) : 0;
-                      return (
-                        <div key={i} ref={isActive ? activeLyricRef : null} className={`lyrics-line ${isActive ? 'active' : i < activeLyricIdx ? 'past' : 'future'}`}>
-                          {isActive && words && words.length > 0 ? (
-                            <span>
-                              {words.map((w: any, wi: number) => {
-                                const wordTime = w.startMs / 1000;
-                                const isWordActive = player.currentTime >= wordTime - 0.05;
-                                return <span key={wi} style={{ opacity: isWordActive ? 1 : 0.4, transition: 'opacity 0.15s' }}>{w.text}</span>;
-                              })}
-                            </span>
-                          ) : (line.text || '♪')}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {!player.currentSong && panel === 'home' && (
-              <div className="absolute left-0 right-0 top-0 bottom-24 flex items-center justify-center">
-                <div className="text-center">
-                  <div className="text-5xl mb-5 opacity-30">🎧</div>
-                  <div className="text-xl font-light text-white/40">选择一首歌开始播放</div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* FX 面板 */}
-          {showFx && (
-            <div className="w-[280px] border-l border-white/[0.04] bg-black/40 backdrop-blur-2xl flex flex-col p-4 gap-4 overflow-y-auto">
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-bold">视觉特效</div>
-                <button onClick={() => setShowFx(false)} className="w-7 h-7 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center">×</button>
-              </div>
-
-              {/* 粒子预设 */}
-              <div>
-                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">粒子预设</div>
-                <div className="grid grid-cols-3 gap-2">
-                  {PRESETS.map((p) => (
-                    <button key={p.id} onClick={() => setPreset(p.id)} className={`h-16 rounded-xl border flex flex-col items-center justify-center gap-1 transition-all ${preset === p.id ? 'border-[#00f5d4]/40 bg-[#00f5d4]/08 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40 hover:bg-white/[0.05]'}`}>
-                      <span className="text-lg">{p.icon}</span>
-                      <span className="text-[10px]">{p.name}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* 强度滑块 */}
-              <div>
-                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">粒子强度</div>
-                <div className="flex items-center gap-2">
-                  <input type="range" min="0.2" max="1.5" step="0.05" value={intensity} onChange={(e) => setIntensity(parseFloat(e.target.value))} className="flex-1" />
-                  <span className="text-[11px] text-white/40 w-8 text-right font-mono">{intensity.toFixed(2)}</span>
-                </div>
-              </div>
-
-              {/* 3D黑胶 */}
-              <div>
-                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">3D黑胶唱片</div>
-                <button onClick={() => setShowVinyl(!showVinyl)} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${showVinyl ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
-                  {showVinyl ? '已开启' : '已关闭'}
-                </button>
-              </div>
-
-              {/* AI情绪 */}
-              <div>
-                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">AI情绪主题</div>
-                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.03] border border-white/05">
-                  <div className="w-3 h-3 rounded-full" style={{ background: moodColors.primary }} />
-                  <span className="text-xs text-white/60">{mood}</span>
-                  <span className="text-[10px] text-white/25 ml-auto">自动检测</span>
-                </div>
-              </div>
-
-              {/* 自定义背景（图片/视频） */}
-              <div>
-                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">沉浸背景</div>
-                <div className="flex gap-2">
-                  <button onClick={importCustomBg} className={`flex-1 h-9 rounded-xl border text-xs transition-all ${customBg ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}>图片</button>
-                  <button onClick={importCustomVideo} className={`flex-1 h-9 rounded-xl border text-xs transition-all ${customVideo ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}>视频</button>
-                  {(customBg || customVideo) && <button onClick={() => { setCustomBg(null); setCustomVideo(null); }} className="h-9 px-3 rounded-xl border border-red-500/20 bg-red-500/05 text-xs text-red-400/70 hover:bg-red-500/10 transition-all">清除</button>}
-                </div>
-                {customVideo && <div className="text-[10px] text-white/25 mt-1.5">视频将循环静音播放</div>}
-              </div>
-
-              {/* 沉浸手势控制 */}
-              <div>
-                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">隔空手势</div>
-                <button onClick={() => setGestureEnabled((v) => !v)} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${gestureEnabled ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
-                  {gestureEnabled ? '摄像头已开启' : '开启摄像头'}
-                </button>
-                <div className="text-[10px] text-white/25 mt-1.5 leading-relaxed">挥手左/右 = 上/下一首 · 键盘: 空格=播放 ←/→=快进 Shift+←/→=切歌 ↑/↓=音量 L=红心 F=FX</div>
-              </div>
-
-              {/* 桌面歌词 */}
-              <div>
-                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">桌面歌词</div>
-                <button onClick={toggleDesktopLyrics} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${desktopLyricsOpen ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
-                  {desktopLyricsOpen ? '已开启' : '已关闭'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* 播放队列 */}
-          {showQueue && (
-            <div className="w-[300px] border-l border-white/[0.04] bg-black/30 backdrop-blur-xl flex flex-col">
-              <div className="p-4 flex items-center justify-between border-b border-white/[0.04]">
-                <div className="text-sm font-semibold">播放队列 ({player.queue.length})</div>
-                <button onClick={() => setShowQueue(false)} className="w-7 h-7 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center">×</button>
-              </div>
-              <div className="flex-1 overflow-y-auto">
-                {player.queue.map((song, i) => {
-                  const isCurrent = i === player.currentIndex;
+        {/* 舞台歌词（沉浸式主界面） */}
+        <div className="flex-1 flex items-center justify-center relative overflow-hidden">
+          {player.currentSong && player.showLyrics ? (
+            <div className="w-full max-w-2xl h-[60vh] overflow-y-auto px-8" ref={lyricsRef} style={{ scrollbarWidth: 'none' }}>
+              <div className="space-y-3 py-32">
+                {player.lyricsLoading && player.lyrics.length === 0 && <div className="text-center text-white/25 text-sm py-8">加载歌词中...</div>}
+                {player.lyrics.length === 0 && !player.lyricsLoading && <div className="text-center text-white/15 text-sm py-8">暂无歌词</div>}
+                {player.lyrics.map((line, i) => {
+                  const isActive = i === activeLyricIdx;
+                  const words = line.words;
                   return (
-                    <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''}`} onClick={() => player.playTrackAt(i)}>
-                      <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
-                      <div className="flex-1 min-w-0">
-                        <div className={`text-xs truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/75'}`}>{song.title}</div>
-                        <div className="text-[10px] text-white/25 truncate">{song.artist}</div>
-                      </div>
+                    <div key={i} ref={isActive ? activeLyricRef : null} className={`lyrics-line ${isActive ? 'active' : i < activeLyricIdx ? 'past' : 'future'}`}>
+                      {isActive && words && words.length > 0 ? (
+                        <span>
+                          {words.map((w: any, wi: number) => {
+                            const wordTime = w.startMs / 1000;
+                            const isWordActive = player.currentTime >= wordTime - 0.05;
+                            return <span key={wi} style={{ opacity: isWordActive ? 1 : 0.4, transition: 'opacity 0.15s' }}>{w.text}</span>;
+                          })}
+                        </span>
+                      ) : (line.text || '♪')}
                     </div>
                   );
                 })}
-                {player.queue.length === 0 && <div className="text-center text-white/15 text-xs py-12">队列为空</div>}
               </div>
+            </div>
+          ) : (
+            <div className="text-center">
+              <div className="text-5xl mb-5 opacity-30">🎧</div>
+              <div className="text-xl font-light text-white/40">{player.currentSong ? '歌词已隐藏' : '选择一首歌开始播放'}</div>
+              {!player.currentSong && (
+                <button onClick={() => setShowOverlay(true)} className="mt-6 px-6 py-2.5 rounded-full bg-white/10 hover:bg-white/20 text-sm font-medium backdrop-blur-xl border border-white/10 transition-all">浏览音乐库</button>
+              )}
             </div>
           )}
         </div>
@@ -1347,6 +1068,304 @@ const App: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* 二级页面覆盖层（比主界面小一点的窗口式） */}
+      {showOverlay && (
+        <div className="absolute z-40" style={{ top: '52px', left: '12px', right: '12px', bottom: '100px' }}>
+          <div className="w-full h-full rounded-2xl overflow-hidden border border-white/[0.08] shadow-2xl flex" style={{ background: 'rgba(8,9,11,0.85)', backdropFilter: 'blur(40px)', boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}>
+            {/* 侧边栏 */}
+            <div className="w-[200px] flex flex-col px-3 py-4 gap-0.5 border-r border-white/[0.04] bg-black/30">
+              <div className="flex items-center justify-between px-3 mb-2">
+                <div className="text-[10px] font-bold tracking-[0.12em] text-white/25 uppercase">导航</div>
+                <button onClick={() => setShowOverlay(false)} className="w-6 h-6 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-sm" title="收起">✕</button>
+              </div>
+              {[
+                { id: 'home', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6', label: '首页' },
+                { id: 'search', icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z', label: '搜索' },
+                { id: 'library', icon: 'M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10', label: '我的音乐' },
+              ].map((item) => (
+                <button key={item.id} onClick={() => { setPanel(item.id as Panel); setViewingTracks([]); }} className={`sidebar-tab ${panel === item.id ? 'active' : ''}`}>
+                  <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d={item.icon} /></svg>
+                  <span>{item.label}</span>
+                </button>
+              ))}
+              {userPlaylists.length > 0 && (
+                <>
+                  <div className="text-[10px] font-bold tracking-[0.12em] text-white/25 uppercase px-3 mt-4 mb-2">我的歌单</div>
+                  {userPlaylists.slice(0, 15).map((pl: any) => (
+                    <button key={pl.id} onClick={() => openPlaylist(String(pl.id), pl.name)} className="sidebar-tab">
+                      <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13M9 9l12-2" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" /></svg>
+                      <span className="truncate">{pl.name}</span>
+                    </button>
+                  ))}
+                </>
+              )}
+              <div className="flex-1" />
+              <button onClick={importLocal} className="sidebar-tab">
+                <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4"/></svg>
+                <span>导入本地</span>
+              </button>
+              <div className="px-2 py-3">
+                {neteaseUser ? (
+                  <div className="flex items-center gap-2 px-2">
+                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center text-xs font-bold">{(neteaseUser.nickname || 'U')[0]}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-medium truncate">{neteaseUser.nickname}</div>
+                      <button onClick={logoutNetease} className="text-[10px] text-white/30 hover:text-red-400">退出登录</button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={loginNetease} className="login-btn w-full">登录网易云</button>
+                )}
+              </div>
+            </div>
+
+            {/* 内容区 */}
+            <div className="flex-1 flex flex-col overflow-hidden relative" ref={listRef}>
+              {/* 首页 */}
+              {panel === 'home' && (
+                <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                  {playlists.length > 0 && (
+                    <div>
+                      <div className="text-[13px] font-bold text-white/80 tracking-[0.04em] mb-4">推荐歌单</div>
+                      <div className="grid grid-cols-3 gap-3">
+                        {playlists.map((pl: any, i: number) => (
+                          <button key={i} onClick={() => pl.id && openPlaylist(String(pl.id), pl.name)} className="home-card group">
+                            <div className="home-card-label">Playlist</div>
+                            <div className="home-card-title truncate">{pl.name}</div>
+                            <div className="home-card-sub">{pl.trackCount || 0} 首</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {playlists.length === 0 && (
+                    <div className="flex flex-col items-center justify-center h-60 text-white/25">
+                      <div className="text-sm">登录网易云后显示推荐歌单</div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 歌单详情 */}
+              {panel === 'playlist' && (
+                <div className="flex-1 flex flex-col overflow-hidden">
+                  <div className="flex items-center gap-4 px-6 py-4 border-b border-white/[0.04]">
+                    <button onClick={() => setPanel('home')} className="w-9 h-9 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-white/50 hover:text-white transition-all">←</button>
+                    <h2 className="text-lg font-bold">{viewingName}</h2>
+                    <span className="text-xs text-white/30">{viewingTracks.length} 首</span>
+                    {viewingTracks.length > 0 && (
+                      <>
+                        <button onClick={() => { player.playTrackAt(0, viewingTracks); setShowOverlay(false); }} className="ml-auto px-5 py-2 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg hover:shadow-cyan-500/25 transition-all">播放全部</button>
+                        <button onClick={() => player.addSongsToQueue(viewingTracks)} className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/20 text-sm font-medium transition-all">加入队列</button>
+                      </>
+                    )}
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {viewingTracks.length === 0 ? (
+                      <div className="flex items-center justify-center h-40 text-white/20 text-sm">加载中...</div>
+                    ) : (
+                      viewingTracks.map((song, i) => {
+                        const isCurrent = player.currentSong?.id === song.id;
+                        const isLiked = likedSet.has(song.id);
+                        return (
+                          <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''} px-6 group`} onClick={() => { player.playTrackAt(i, viewingTracks); setShowOverlay(false); }}>
+                            <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
+                            <div className="flex-1 min-w-0"><div className={`text-sm truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/85'}`}>{song.title}</div></div>
+                            <div className="w-36 text-xs text-white/35 truncate">{song.artist}</div>
+                            <button onClick={(e) => { e.stopPropagation(); handleLike(song); }} className={`w-6 h-6 flex items-center justify-center transition-all ${isLiked ? 'text-[#ff5e8a]' : 'text-white/15 hover:text-white/50'}`}>
+                              <svg width="14" height="14" fill={isLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
+                            </button>
+                            <div className="w-12 text-xs text-white/25 text-right">{formatTime(song.duration)}</div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* 搜索 */}
+              {panel === 'search' && (
+                <div className="flex-1 flex flex-col overflow-hidden p-6">
+                  <div className="flex gap-3 mb-4">
+                    <div className="flex-1 search-box">
+                      <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" className="text-white/25 mr-3 flex-shrink-0" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                      <input className="search-input" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSearch()} placeholder="搜索歌曲、歌手..." />
+                    </div>
+                    <button onClick={handleSearch} disabled={searching || !searchQuery.trim()} className="px-6 py-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all">{searching ? '搜索中' : '搜索'}</button>
+                  </div>
+                  <div className="flex-1 overflow-y-auto">
+                    {searchResults.length === 0 && !searching && (
+                      <div className="flex flex-col items-center justify-center h-60 text-white/25">
+                        <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-4"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                        <div className="text-sm">输入关键词搜索音乐</div>
+                      </div>
+                    )}
+                    {searchResults.map((song, i) => {
+                      const isCurrent = player.currentSong?.id === song.id;
+                      const isLiked = likedSet.has(song.id);
+                      return (
+                        <div key={song.id + i} className="search-result-item group" onClick={() => { player.playSong(song, searchResults); setShowOverlay(false); }}>
+                          {song.cover ? <div className="w-10 h-10 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${song.cover})` }} /> : <div className="w-10 h-10 rounded-lg bg-white/[0.05] flex items-center justify-center flex-shrink-0 text-white/20">♪</div>}
+                          <div className="flex-1 min-w-0">
+                            <div className={`text-[13px] font-medium truncate ${isCurrent ? 'text-[#00f5d4]' : 'text-white/90'}`}>{song.title}</div>
+                            <div className="text-[11px] text-white/35 truncate">{song.artist}</div>
+                          </div>
+                          <button onClick={(e) => { e.stopPropagation(); handleLike(song); }} className={`w-6 h-6 flex items-center justify-center transition-all ${isLiked ? 'text-[#ff5e8a]' : 'text-white/15 hover:text-white/50'}`}>
+                            <svg width="14" height="14" fill={isLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
+                          </button>
+                          <div className="text-[11px] text-white/25 w-12 text-right">{formatTime(song.duration)}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* 我的音乐 */}
+              {panel === 'library' && (
+                <div className="flex-1 overflow-y-auto p-6">
+                  <div className="text-[13px] font-bold text-white/80 mb-4">播放列表</div>
+                  {player.queue.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-80 text-white/25">
+                      <svg width="48" height="48" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-4"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                      <div className="text-sm">暂无播放记录</div>
+                    </div>
+                  ) : (
+                    player.queue.map((song, i) => {
+                      const isCurrent = i === player.currentIndex;
+                      return (
+                        <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''}`} onClick={() => { player.playTrackAt(i); setShowOverlay(false); }}>
+                          <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
+                          {song.cover && <div className="w-9 h-9 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${song.cover})` }} />}
+                          <div className="flex-1 min-w-0">
+                            <div className={`text-sm truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/85'}`}>{song.title}</div>
+                            <div className="text-[11px] text-white/35 truncate">{song.artist}</div>
+                          </div>
+                          <div className="text-[11px] text-white/25 w-12 text-right">{formatTime(song.duration)}</div>
+                          <button onClick={(e) => { e.stopPropagation(); player.removeFromQueue(i); }} className="w-6 h-6 rounded-lg text-white/15 hover:text-red-400 hover:bg-red-500/10 transition-all flex items-center justify-center text-sm">×</button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 顶部栏打开音乐库按钮（overlay收起时显示） */}
+      {!showOverlay && (
+        <button onClick={() => setShowOverlay(true)} className="absolute top-9 left-4 z-50 glass-btn h-[30px] px-3 flex items-center gap-1.5 text-xs" style={{ WebkitAppRegion: 'no-drag' } as any} title="打开音乐库">
+          <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+          <span>音乐库</span>
+        </button>
+      )}
+
+      {/* FX 面板（浮动右侧） */}
+      {showFx && (
+        <div className="absolute z-40 top-14 right-3 bottom-28 w-[280px] rounded-2xl border border-white/[0.06] bg-black/60 backdrop-blur-2xl flex flex-col p-4 gap-4 overflow-y-auto" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}>
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-bold">视觉特效</div>
+            <button onClick={() => setShowFx(false)} className="w-7 h-7 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center">×</button>
+          </div>
+
+          {/* 粒子预设 */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">粒子预设</div>
+            <div className="grid grid-cols-3 gap-2">
+              {PRESETS.map((p) => (
+                <button key={p.id} onClick={() => setPreset(p.id)} className={`h-16 rounded-xl border flex flex-col items-center justify-center gap-1 transition-all ${preset === p.id ? 'border-[#00f5d4]/40 bg-[#00f5d4]/08 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40 hover:bg-white/[0.05]'}`}>
+                  <span className="text-lg">{p.icon}</span>
+                  <span className="text-[10px]">{p.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 强度滑块 */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">粒子强度</div>
+            <div className="flex items-center gap-2">
+              <input type="range" min="0.2" max="1.5" step="0.05" value={intensity} onChange={(e) => setIntensity(parseFloat(e.target.value))} className="flex-1" />
+              <span className="text-[11px] text-white/40 w-8 text-right font-mono">{intensity.toFixed(2)}</span>
+            </div>
+          </div>
+
+          {/* 3D黑胶 */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">3D黑胶唱片</div>
+            <button onClick={() => setShowVinyl(!showVinyl)} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${showVinyl ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
+              {showVinyl ? '已开启' : '已关闭'}
+            </button>
+          </div>
+
+          {/* AI情绪 */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">AI情绪主题</div>
+            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.03] border border-white/05">
+              <div className="w-3 h-3 rounded-full" style={{ background: moodColors.primary }} />
+              <span className="text-xs text-white/60">{mood}</span>
+              <span className="text-[10px] text-white/25 ml-auto">自动检测</span>
+            </div>
+          </div>
+
+          {/* 自定义背景（图片/视频） */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">沉浸背景</div>
+            <div className="flex gap-2">
+              <button onClick={importCustomBg} className={`flex-1 h-9 rounded-xl border text-xs transition-all ${customBg ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}>图片</button>
+              <button onClick={importCustomVideo} className={`flex-1 h-9 rounded-xl border text-xs transition-all ${customVideo ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}>视频</button>
+              {(customBg || customVideo) && <button onClick={() => { setCustomBg(null); setCustomVideo(null); }} className="h-9 px-3 rounded-xl border border-red-500/20 bg-red-500/05 text-xs text-red-400/70 hover:bg-red-500/10 transition-all">清除</button>}
+            </div>
+            {customVideo && <div className="text-[10px] text-white/25 mt-1.5">视频将循环静音播放</div>}
+          </div>
+
+          {/* 沉浸手势控制 */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">隔空手势</div>
+            <button onClick={() => setGestureEnabled((v) => !v)} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${gestureEnabled ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
+              {gestureEnabled ? '摄像头已开启' : '开启摄像头'}
+            </button>
+            <div className="text-[10px] text-white/25 mt-1.5 leading-relaxed">挥手左/右 = 上/下一首 · 键盘: 空格=播放 ←/→=快进 Shift+←/→=切歌 ↑/↓=音量 L=红心 F=FX</div>
+          </div>
+
+          {/* 桌面歌词 */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">桌面歌词</div>
+            <button onClick={toggleDesktopLyrics} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${desktopLyricsOpen ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
+              {desktopLyricsOpen ? '已开启' : '已关闭'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 播放队列（浮动右侧） */}
+      {showQueue && (
+        <div className="absolute z-40 top-14 right-3 bottom-28 w-[300px] rounded-2xl border border-white/[0.06] bg-black/60 backdrop-blur-2xl flex flex-col overflow-hidden" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}>
+          <div className="p-4 flex items-center justify-between border-b border-white/[0.04]">
+            <div className="text-sm font-semibold">播放队列 ({player.queue.length})</div>
+            <button onClick={() => setShowQueue(false)} className="w-7 h-7 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center">×</button>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {player.queue.map((song, i) => {
+              const isCurrent = i === player.currentIndex;
+              return (
+                <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''}`} onClick={() => player.playTrackAt(i)}>
+                  <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
+                  <div className="flex-1 min-w-0">
+                    <div className={`text-xs truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/75'}`}>{song.title}</div>
+                    <div className="text-[10px] text-white/25 truncate">{song.artist}</div>
+                  </div>
+                </div>
+              );
+            })}
+            {player.queue.length === 0 && <div className="text-center text-white/15 text-xs py-12">队列为空</div>}
+          </div>
+        </div>
+      )}
     </div>
   );
 };
