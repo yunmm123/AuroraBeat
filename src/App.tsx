@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { gsap } from 'gsap';
 
 type Panel = 'home' | 'search' | 'library' | 'playlist';
-type Preset = 'silk' | 'tunnel' | 'orbit' | 'void' | 'vinyl' | 'wallpulse';
+type Preset = 'silk' | 'tunnel' | 'orbit' | 'void' | 'nebula' | 'wallpulse';
 type Mood = 'calm' | 'energetic' | 'melancholy' | 'romantic' | 'dark';
 
 // 音质选项
@@ -22,7 +22,7 @@ const PRESETS: { id: Preset; name: string; icon: string }[] = [
   { id: 'tunnel', name: '隧道', icon: '◎' },
   { id: 'orbit', name: '星球', icon: '◉' },
   { id: 'void', name: '虚空', icon: '◇' },
-  { id: 'vinyl', name: '黑胶', icon: '⬤' },
+  { id: 'nebula', name: '星云', icon: '✶' },
   { id: 'wallpulse', name: '极光', icon: '✦' },
 ];
 
@@ -35,37 +35,44 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 — 6预设 + 3D黑胶 + 音波环 + AI情绪
+// Three.js 视觉引擎 — 电影级粒子艺术（联觉配色 + ACES色调 + 6预设）
+// 设计原则：60-30-10色彩规则 / 重平滑防闪烁 / 联觉映射(bass=深海色,treble=暖金)
 // ====================================================================
 function useVisualEngine(
   canvasRef: React.RefObject<HTMLCanvasElement>,
   player: any,
   preset: Preset,
   intensity: number,
-  showVinyl: boolean,
 ) {
   const engineRef = useRef<any>(null);
 
   useEffect(() => {
     if (!canvasRef.current) return;
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
-    camera.position.set(0, 0, 6.6);
+    scene.fog = new THREE.FogExp2(0x05060a, 0.055);
+    const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.set(0, 0, 6.2);
     const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, alpha: true, antialias: false, powerPreference: 'high-performance' });
     renderer.setClearColor(0x000000, 0);
+    // ACES Filmic 色调映射 — 电影级高光压缩，避免过曝发白
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.35));
     renderer.setSize(window.innerWidth, window.innerHeight);
 
-    // 点纹理
+    // 点纹理 — 高斯软核，电影级柔和发光（避免硬边锯齿）
     const makeDotTexture = () => {
-      const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+      const cv = document.createElement('canvas'); cv.width = cv.height = 128;
       const ctx = cv.getContext('2d')!;
-      const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 31);
-      g.addColorStop(0.00, 'rgba(255,255,255,0.96)');
-      g.addColorStop(0.42, 'rgba(255,255,255,0.78)');
-      g.addColorStop(0.72, 'rgba(255,255,255,0.22)');
+      const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+      // 更平滑的指数衰减，中心亮、边缘极软
+      g.addColorStop(0.00, 'rgba(255,255,255,1.00)');
+      g.addColorStop(0.12, 'rgba(255,255,255,0.86)');
+      g.addColorStop(0.30, 'rgba(255,255,255,0.52)');
+      g.addColorStop(0.55, 'rgba(255,255,255,0.18)');
+      g.addColorStop(0.80, 'rgba(255,255,255,0.04)');
       g.addColorStop(1.00, 'rgba(255,255,255,0)');
-      ctx.fillStyle = g; ctx.fillRect(0, 0, 64, 64);
+      ctx.fillStyle = g; ctx.fillRect(0, 0, 128, 128);
       const tex = new THREE.CanvasTexture(cv);
       tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
       return tex;
@@ -146,10 +153,29 @@ function useVisualEngine(
       varying vec3 vColor;
       varying float vAlpha;
       varying float vSourceLum;
+      varying float vDepth;
 
       #define PI 3.14159265
 
       vec2 safeCoverUv(vec2 uv) { return clamp(uv, vec2(0.001), vec2(0.999)); }
+
+      // 联觉配色：低频→深海蓝绿(冷)，高频→暖金粉(暖)，中频过渡
+      // 应用 60-30-10 规则：主色暗冷调，副色封面色，点缀色节拍暖光
+      vec3 synestheticColor(float bass, float mid, float treble, vec3 coverCol, float hasCover) {
+        // 深海基底（60%）：低饱和冷调，画面不刺眼
+        vec3 deepOcean = vec3(0.04, 0.18, 0.28);
+        // 中频过渡（30%）：青蓝
+        vec3 midTone = vec3(0.10, 0.55, 0.72);
+        // 高频暖光（10%）：金粉点缀
+        vec3 warmHigh = vec3(1.0, 0.62, 0.38);
+        vec3 audio = mix(deepOcean, midTone, smoothstep(0.0, 0.5, mid));
+        audio = mix(audio, warmHigh, smoothstep(0.3, 0.8, treble) * 0.55);
+        // 封面色融合（保持音乐身份感）
+        vec3 blended = mix(audio, coverCol, hasCover * 0.45);
+        // 节拍瞬间注入暖光，制造"心跳"感
+        blended += warmHigh * uBeat * 0.18;
+        return blended;
+      }
 
       void main() {
         vec3 pos = position;
@@ -160,13 +186,13 @@ function useVisualEngine(
         vAlpha = 1.0;
         vEdgeBoost = 0.0;
         vSourceLum = 0.5;
+        vDepth = 0.0;
 
         // 封面颜色（新旧渐变，Mineradio同款 uColorMixT）
         vec2 cuv = safeCoverUv(aUv);
         vec3 newCol = texture2D(uCoverTex, cuv).rgb;
         vec3 prevCol = texture2D(uPrevCoverTex, cuv).rgb;
         vec3 coverCol = mix(prevCol, newCol, clamp(uColorMixT, 0.0, 1.0));
-        vColor = mix(vec3(0.6, 0.75, 0.85), coverCol, uHasCover);
         vSourceLum = dot(coverCol, vec3(0.299, 0.587, 0.114));
 
         // 封面深度/边缘纹理（Mineradio同款启发式 depth+edge）
@@ -192,79 +218,120 @@ function useVisualEngine(
           rippleZ += (rRing * 0.8 + rBulge * 0.4) * rStr;
         }
 
+        // 默认应用联觉配色
+        vColor = synestheticColor(uBass, uMid, uTreble, coverCol, uHasCover);
+
         if (preset == 0) {
-          // SILK 丝绸 — xy平面 z涟漪 + 封面深度增强
-          float bassDisp = sin(pos.x * 1.8 + t * 0.6) * cos(pos.y * 1.6 + t * 0.4) * uBass * 1.3;
-          float midDisp = sin(pos.x * 4.0 + t * 1.2) * cos(pos.y * 3.5 + t * 0.9) * uMid * 0.5;
-          float trebleJ = sin(pos.x * 8.0 + t * 2.0) * cos(pos.y * 7.0 + t * 1.6) * uTreble * 0.25;
-          float depthBoost = (depthVal - 0.5) * uHasEdge * 1.2;
-          pos.z = bassDisp + midDisp + trebleJ + sin(t * 0.3 + r1 * 6.28) * uBass * 0.15 + depthBoost + rippleZ * 1.5;
+          // SILK 丝绸 — 流动的丝绸平面，多层正弦叠加，封面深度凸起
+          // 大幅度低频驱动主波，中频叠加细密涟漪，高频添加微抖动
+          float bassWave = sin(pos.x * 1.6 + t * 0.55) * cos(pos.y * 1.4 + t * 0.42) * uBass * 1.4;
+          float midWave = sin(pos.x * 3.6 + t * 1.1) * cos(pos.y * 3.2 + t * 0.85) * uMid * 0.55;
+          float trebleRipple = sin(pos.x * 7.5 + t * 1.9) * cos(pos.y * 6.8 + t * 1.5) * uTreble * 0.22;
+          // 封面深度：中心凸起，营造3D丝绸覆盖感
+          float depthBoost = (depthVal - 0.5) * uHasEdge * 1.4;
+          // 缓慢呼吸漂移，避免静止
+          float breathe = sin(t * 0.28 + r1 * 6.28) * uBass * 0.12;
+          pos.z = bassWave + midWave + trebleRipple + depthBoost + breathe + rippleZ * 1.6;
+          vDepth = clamp(pos.z * 0.3 + 0.5, 0.0, 1.0);
         } else if (preset == 1) {
-          // TUNNEL 隧道 — 圆柱+自旋
-          float spin = t * 0.12;
+          // TUNNEL 隧道 — 优雅圆柱隧道，粒子沿管道流动穿越
+          float spin = t * 0.10;
           float angle = aUv.x * 2.0 * PI + spin;
-          float flow = fract(aUv.y + t * 0.05 + r1 * 0.1);
-          float zPos = (flow - 0.5) * 9.0;
-          float radius = 2.8 + uBass * 0.6;
+          // 沿z方向流动，节奏驱动速度
+          float flow = fract(aUv.y + t * (0.04 + uEnergy * 0.06) + r1 * 0.08);
+          float zPos = (flow - 0.5) * 11.0;
+          // 半径随低频呼吸，节拍扩张
+          float radius = 2.6 + uBass * 0.55 + sin(t * 0.6 + r1 * 4.0) * 0.08;
           pos.x = cos(angle) * radius;
           pos.y = sin(angle) * radius;
           pos.z = zPos;
-          vBright *= 0.6 + flow * 0.4;
+          // 近端粒子更亮，远端淡出，营造纵深
+          float depthFade = smoothstep(0.0, 0.4, flow) * smoothstep(1.0, 0.6, flow);
+          vAlpha = depthFade;
+          vDepth = flow;
         } else if (preset == 2) {
-          // ORBIT 星球 — 球面分布
-          float theta = aUv.x * PI * 2.0 + t * 0.08;
+          // ORBIT 星球 — 球面粒子壳，低频呼吸膨胀，高频闪烁
+          float theta = aUv.x * PI * 2.0 + t * 0.07;
           float phi = aUv.y * PI;
-          float baseR = 2.5;
-          float bassExpand = uBass * 0.8;
-          float trebFlare = sin(t * 3.0 + r1 * 10.0) * uTreble * 0.3;
-          float r = baseR * (1.0 + bassExpand) + trebFlare;
+          float baseR = 2.4;
+          // 节拍呼吸：球体整体随低频脉动
+          float breathe = uBass * 0.65 + sin(t * 0.5) * 0.04;
+          // 高频表面闪烁，模拟大气扰动
+          float surfaceFlare = sin(t * 2.5 + r1 * 12.0) * uTreble * 0.22;
+          float r = baseR * (1.0 + breathe) + surfaceFlare;
           pos.x = r * sin(phi) * cos(theta);
           pos.y = r * sin(phi) * sin(theta);
-          pos.z = r * cos(phi) - 2.0;
+          pos.z = r * cos(phi) - 2.2;
+          // 封面色作为星球主色，联觉色作为大气光晕
+          vColor = mix(coverCol, vColor, 0.4 * (1.0 - uHasCover * 0.5));
+          vDepth = (phi / PI);
         } else if (preset == 3) {
-          // VOID 虚空 — 随机散布深空
-          float spread = 20.0;
-          pos.x = (r1 - 0.5) * spread;
-          pos.y = (r2 - 0.5) * spread;
-          pos.z = -(r3 * 15.0 + 2.0);
-          float twinkle = 0.5 + 0.5 * sin(t * (1.0 + r1 * 3.0) + r1 * 20.0);
-          vBright *= twinkle * (0.3 + uEnergy * 0.7);
-          vAlpha = smoothstep(0.0, 0.3, r3);
+          // VOID 虚空 — 深空星场，多层视差，慢速漂移
+          // 三层深度：近(r3<0.3) 中(0.3-0.6) 远(>0.6)
+          float layer = r3;
+          float spread = 14.0 + layer * 18.0;
+          // 稳定位置（基于aRand哈希），非每帧随机
+          pos.x = (r1 - 0.5) * spread + sin(t * 0.05 + r1 * 6.0) * 0.3;
+          pos.y = (r2 - 0.5) * spread + cos(t * 0.04 + r2 * 6.0) * 0.3;
+          pos.z = -(layer * 16.0 + 1.5);
+          // 慢速闪烁，模拟恒星
+          float twinkle = 0.45 + 0.55 * sin(t * (0.6 + r1 * 2.5) + r1 * 18.0);
+          // 远层更暗更小，近层更亮
+          float layerBright = mix(0.9, 0.25, layer);
+          vBright *= twinkle * layerBright * (0.4 + uEnergy * 0.6);
+          vAlpha = smoothstep(0.0, 0.15, 1.0 - layer) * 0.85 + 0.15;
+          vDepth = layer;
         } else if (preset == 4) {
-          // VINYL 黑胶 — 圆形封面+沟槽
-          float cx = aUv.x - 0.5;
-          float cy = aUv.y - 0.5;
-          float dist = sqrt(cx * cx + cy * cy);
-          if (dist > 0.5) { vAlpha = 0.0; }
-          float groove = sin(dist * 80.0) * 0.5 + 0.5;
-          vColor = mix(coverCol * 0.3, coverCol, groove);
-          pos.z = sin(dist * 40.0 + t * 2.0) * uBass * 0.15 + rippleZ;
-          float spinAngle = t * 0.5;
-          float s = sin(spinAngle), c = cos(spinAngle);
-          pos.x = cx * c - cy * s;
-          pos.y = cx * s + cy * c;
+          // NEBULA 星云 — 体积感云团，粒子绕中心螺旋，封面色染云
+          float angle = aUv.x * PI * 2.0 * 3.0 + t * 0.15;
+          float radius = (0.4 + aUv.y * 2.8) * (1.0 + uBass * 0.25);
+          // 螺旋臂结构
+          float armOffset = sin(aUv.y * PI * 4.0 + t * 0.3) * 0.4;
+          pos.x = cos(angle + armOffset) * radius;
+          pos.y = sin(angle + armOffset) * radius;
+          // z方向云团厚度，低频驱动
+          pos.z = (aUv.y - 0.5) * 3.0 + sin(t * 0.4 + r1 * 8.0) * uBass * 0.6 + rippleZ * 0.8;
+          // 云团中心更亮，边缘淡出
+          float coreGlow = 1.0 - smoothstep(0.0, 2.8, radius);
+          vBright *= 0.5 + coreGlow * 0.8;
+          // 封面色染云团，联觉色补光
+          vColor = mix(vColor, coverCol, uHasCover * (0.4 + coreGlow * 0.3));
+          vAlpha = 0.4 + coreGlow * 0.6;
+          vDepth = 1.0 - coreGlow;
         } else {
-          // WALLPULSE 极光 — 水平带状
-          float band = sin(aUv.y * 6.0 + t * 0.5) * 0.5 + 0.5;
-          float aurora = sin(aUv.x * 3.0 + t * 0.3 + band * 2.0) * uBass * 0.8;
-          pos.z = aurora + sin(t * 0.4 + r1 * 8.0) * uEnergy * 0.2;
-          pos.y += sin(t * 0.2 + r1 * 5.0) * uMid * 0.3;
-          vColor = mix(vec3(0.0, 0.6, 0.5), vec3(0.3, 0.2, 0.8), band);
-          vColor = mix(vColor, coverCol, uHasCover * 0.5);
+          // WALLPULSE 极光 — 水平流动光带，垂直分层
+          float band = sin(aUv.y * 5.0 + t * 0.45) * 0.5 + 0.5;
+          // 极光主波：水平流动 + 垂直调制
+          float aurora = sin(aUv.x * 2.5 + t * 0.28 + band * 2.2) * uBass * 0.9;
+          float aurora2 = cos(aUv.x * 4.0 - t * 0.4 + band * 1.5) * uMid * 0.4;
+          pos.z = aurora + aurora2 + sin(t * 0.35 + r1 * 8.0) * uEnergy * 0.18;
+          // 垂直缓慢漂移
+          pos.y += sin(t * 0.18 + r1 * 5.0) * uMid * 0.25;
+          // 极光配色：底部冷绿，顶部紫蓝，封面色点缀
+          vec3 auroraCol = mix(vec3(0.0, 0.65, 0.55), vec3(0.35, 0.18, 0.78), aUv.y);
+          auroraCol = mix(auroraCol, coverCol, uHasCover * 0.4);
+          // 高频注入顶部暖光
+          auroraCol = mix(auroraCol, vec3(1.0, 0.7, 0.45), uTreble * 0.3 * aUv.y);
+          vColor = auroraCol;
+          vDepth = band;
         }
 
-        // 节拍冲击
-        float beatKick = uBeat * (0.3 + r2 * 0.4);
-        pos.x += sin(r1 * 6.28 + t) * beatKick;
-        pos.y += cos(r2 * 6.28 + t) * beatKick;
+        // 节拍冲击 — 柔和径向脉冲（非抖动），所有预设统一
+        float beatKick = uBeat * (0.25 + r2 * 0.35);
+        vec2 beatDir = normalize(aUv - 0.5 + vec2(0.001));
+        pos.x += beatDir.x * beatKick * 0.6;
+        pos.y += beatDir.y * beatKick * 0.6;
 
+        // 边缘能量增强（克制，避免溢出）
         float edgeDist = length(aUv - 0.5);
-        vEdgeBoost = smoothstep(0.25, 0.5, edgeDist) * uEnergy;
-        vBright = (0.55 + uBass * 0.35 + uEnergy * 0.15 + r3 * 0.1) * uIntensity;
+        vEdgeBoost = smoothstep(0.28, 0.5, edgeDist) * uEnergy * 0.7;
+        // 亮度：基础 + 低频驱动 + 能量，克制上限避免过曝
+        vBright = (0.5 + uBass * 0.38 + uEnergy * 0.14 + r3 * 0.08) * uIntensity;
 
         vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
         gl_Position = projectionMatrix * mvPos;
-        gl_PointSize = (2.0 + uBass * 3.0 + uEnergy * 1.5) * uPixel * (300.0 / max(-mvPos.z, 0.1));
+        // 点大小：近大远小，低频放大，柔和过渡
+        gl_PointSize = (1.8 + uBass * 2.8 + uEnergy * 1.3) * uPixel * (300.0 / max(-mvPos.z, 0.1));
       }
     `;
 
@@ -275,12 +342,24 @@ function useVisualEngine(
       varying float vEdgeBoost;
       varying vec3 vColor;
       varying float vAlpha;
+      varying float vSourceLum;
+      varying float vDepth;
+      // ACES Filmic 近似曲线 — 电影级高光压缩，避免过曝发白
+      vec3 acesFilm(vec3 x) {
+        const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+        return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+      }
       void main() {
         vec4 tex = texture2D(uDotTex, gl_PointCoord);
         if (tex.a < 0.02) discard;
         vec3 col = vColor * vBright;
-        col = mix(col, col * 1.3 + vec3(0.05), vEdgeBoost * 0.35);
-        gl_FragColor = vec4(col, tex.a * uAlpha * vAlpha);
+        // 边缘能量微增亮（克制）
+        col = mix(col, col * 1.25 + vec3(0.04), vEdgeBoost * 0.3);
+        // ACES 色调映射
+        col = acesFilm(col * 1.2);
+        // 深度雾化：远层粒子稍微淡入背景，增强纵深
+        float fogFade = mix(1.0, 0.65, vDepth * 0.6);
+        gl_FragColor = vec4(col, tex.a * uAlpha * vAlpha * fogFade);
       }
     `;
 
@@ -292,15 +371,24 @@ function useVisualEngine(
       varying vec3 vColor;
       varying float vAlpha;
       varying float vSourceLum;
+      varying float vDepth;
+      vec3 acesFilm(vec3 x) {
+        const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+        return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+      }
       void main() {
         vec4 tex = texture2D(uDotTex, gl_PointCoord);
         if (tex.a < 0.02) discard;
-        vec3 col = vColor * vBright * 1.6;
+        vec3 col = vColor * vBright * 1.7;
+        col = acesFilm(col * 1.3);
         // Mineradio同款 keepBlack: 暗粒子不溢光，避免画面发灰
         float keepBlack = 1.0 - smoothstep(0.025, 0.115, vSourceLum);
         float bloomKeep = 1.0 - keepBlack * 0.92;
+        // 平方软化：bloom 层更柔和，避免硬光斑
         float soft = tex.a * tex.a;
-        gl_FragColor = vec4(col, soft * uAlpha * 0.55 * vAlpha * bloomKeep);
+        // 深度衰减：远层 bloom 更弱
+        float depthFade = mix(1.0, 0.5, vDepth * 0.6);
+        gl_FragColor = vec4(col, soft * uAlpha * 0.5 * vAlpha * bloomKeep * depthFade);
       }
     `;
 
@@ -320,57 +408,6 @@ function useVisualEngine(
     bloomParticles.frustumCulled = false; bloomParticles.renderOrder = 0;
     scene.add(bloomParticles);
 
-    // 浮空背景粒子
-    const FLOAT_COUNT = 500;
-    const floatPos = new Float32Array(FLOAT_COUNT * 3);
-    const floatCols = new Float32Array(FLOAT_COUNT * 3);
-    for (let i = 0; i < FLOAT_COUNT; i++) {
-      const r = 10 + Math.random() * 25;
-      const theta = Math.random() * Math.PI * 2;
-      const phi = Math.random() * Math.PI;
-      floatPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
-      floatPos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-      floatPos[i * 3 + 2] = r * Math.cos(phi) - 10;
-      const c = new THREE.Color().setHSL(0.45 + Math.random() * 0.25, 0.6, 0.4 + Math.random() * 0.3);
-      floatCols[i * 3] = c.r; floatCols[i * 3 + 1] = c.g; floatCols[i * 3 + 2] = c.b;
-    }
-    const floatGeo = new THREE.BufferGeometry();
-    floatGeo.setAttribute('position', new THREE.BufferAttribute(floatPos, 3));
-    floatGeo.setAttribute('color', new THREE.BufferAttribute(floatCols, 3));
-    const floatMat = new THREE.PointsMaterial({
-      size: 0.08, vertexColors: true, transparent: true, opacity: 0.3,
-      blending: THREE.AdditiveBlending, sizeAttenuation: true, map: dotTexture,
-    });
-    const floatParticles = new THREE.Points(floatGeo, floatMat);
-    scene.add(floatParticles);
-
-    // === 创新: 3D 黑胶唱片 ===
-    const vinylGroup = new THREE.Group();
-    const vinylGeo = new THREE.CircleGeometry(2.2, 64);
-    const vinylMat = new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.85 });
-    const vinylMesh = new THREE.Mesh(vinylGeo, vinylMat);
-    vinylMesh.position.z = -0.01;
-    vinylGroup.add(vinylMesh);
-    // 中心标签
-    const labelGeo = new THREE.CircleGeometry(0.7, 64);
-    const labelMat = new THREE.MeshBasicMaterial({ color: 0x00f5d4, transparent: true, opacity: 0.8 });
-    const labelMesh = new THREE.Mesh(labelGeo, labelMat);
-    vinylGroup.add(labelMesh);
-    // 中心孔
-    const holeGeo = new THREE.CircleGeometry(0.06, 32);
-    const holeMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
-    const holeMesh = new THREE.Mesh(holeGeo, holeMat);
-    vinylGroup.add(holeMesh);
-    vinylGroup.position.set(3.5, -1.5, -1);
-    vinylGroup.scale.set(0, 0, 0);
-    scene.add(vinylGroup);
-
-    // === 创新: 音波环 ===
-    const ringGeo = new THREE.RingGeometry(3.0, 3.05, 128);
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0x00f5d4, transparent: true, opacity: 0, side: THREE.DoubleSide });
-    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-    scene.add(ringMesh);
-
     gsap.to(uniforms.uAlpha, { value: 1, duration: 1.2, ease: 'power2.out' });
 
     let animId: number;
@@ -380,12 +417,13 @@ function useVisualEngine(
     let beatData: Uint8Array | null = null;
     let smoothBass = 0, smoothMid = 0, smoothTreb = 0, smoothEnergy = 0;
     let beatPulse = 0;
-    let ringPulse = 0;
     // Mineradio同款 peak tracking：低频慢衰减峰值，配合 gamma 归一化让画面在动态范围上更稳定
     let bassPeak = 0.030;
     let prevTime = performance.now();
     let rippleWriteIdx = 0;
     let beatCooldown = 0;
+    // 电影级缓慢相机漂移（替代抖动），呼吸感而非晃动
+    let camDriftX = 0, camDriftY = 0;
 
     // 触发一次涟漪（点击或强节拍）。u=0.5,v=0.5 为画面中心
     const triggerRipple = (u: number, v: number, str: number) => {
@@ -405,7 +443,7 @@ function useVisualEngine(
     player.setAnalyserReadyHandler?.(setupAnalysers);
     setTimeout(setupAnalysers, 500);
 
-    const presetIdx = { silk: 0, tunnel: 1, orbit: 2, void: 3, vinyl: 4, wallpulse: 5 };
+    const presetIdx = { silk: 0, tunnel: 1, orbit: 2, void: 3, nebula: 4, wallpulse: 5 };
     uniforms.uPreset.value = presetIdx[preset];
 
     const animate = () => {
@@ -447,23 +485,17 @@ function useVisualEngine(
         const bassOnset = Math.max(0, bKick - smoothBass * 0.9);
         if (bassOnset > 0.075 && bKick > 0.32 && beatCooldown <= 0) {
           beatPulse = Math.max(beatPulse, Math.min(0.15, bassOnset * 0.2));
-          ringPulse = 1.0;
           // 节拍自动触发涟漪（Mineradio 同款行为），位置随机偏移让画面更生动
           triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, Math.min(1, bassOnset * 4));
           beatCooldown = 0.18;
         }
         beatPulse *= Math.pow(0.36, dt);
-        ringPulse *= Math.pow(0.85, dt);
 
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
         uniforms.uTreble.value = smoothTreb;
         uniforms.uBeat.value = beatPulse;
         uniforms.uEnergy.value = smoothEnergy;
-
-        const shake = beatPulse * 0.3;
-        camera.position.x = Math.sin(now * 0.001) * shake;
-        camera.position.y = Math.cos(now * 0.0007) * shake;
       } else {
         smoothBass *= 0.91; smoothMid *= 0.91; smoothTreb *= 0.91; smoothEnergy *= 0.91; beatPulse *= 0.82;
         bassPeak *= 0.99;
@@ -485,23 +517,18 @@ function useVisualEngine(
       }
       rippleTex.needsUpdate = true;
 
-      particles.rotation.y += dt * 0.05;
-      particles.rotation.x += dt * 0.02;
+      // 缓慢整体旋转，营造流体感（克制速度，避免眩晕）
+      particles.rotation.y += dt * 0.04;
+      particles.rotation.x += dt * 0.015;
       bloomParticles.rotation.copy(particles.rotation);
-      floatParticles.rotation.y += dt * 0.01;
-      floatMat.opacity = 0.15 + smoothEnergy * 0.25;
 
-      // 黑胶旋转
-      vinylGroup.rotation.z += dt * (0.5 + smoothBass * 2.0);
-      const vinylScale = showVinyl ? 1 + smoothBass * 0.05 : 0;
-      gsap.to(vinylGroup.scale, { x: vinylScale, y: vinylScale, z: vinylScale, duration: 0.3, ease: 'power2.out', overwrite: true });
-      labelMesh.material.opacity = 0.6 + smoothEnergy * 0.3;
-
-      // 音波环
-      ringMesh.rotation.z += dt * 0.1;
-      ringMat.opacity = ringPulse * 0.6;
-      const ringScale = 1 + ringPulse * 0.3;
-      ringMesh.scale.set(ringScale, ringScale, 1);
+      // 电影级相机漂移：极慢正弦摆动 + 节拍微推（非抖动）
+      const driftTargetX = Math.sin(now * 0.00012) * 0.35 + beatPulse * 0.12;
+      const driftTargetY = Math.cos(now * 0.00009) * 0.25 + beatPulse * 0.08;
+      camDriftX += (driftTargetX - camDriftX) * Math.min(1, dt * 1.5);
+      camDriftY += (driftTargetY - camDriftY) * Math.min(1, dt * 1.5);
+      camera.position.x = camDriftX;
+      camera.position.y = camDriftY;
 
       camera.lookAt(0, 0, 0);
       renderer.render(scene, camera);
@@ -617,9 +644,7 @@ function useVisualEngine(
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', onResize);
       geo.dispose(); material.dispose(); bloomMaterial.dispose();
-      floatGeo.dispose(); floatMat.dispose(); coverTex.dispose(); dotTexture.dispose();
-      vinylGeo.dispose(); vinylMat.dispose(); labelGeo.dispose(); labelMat.dispose();
-      holeGeo.dispose(); holeMat.dispose(); ringGeo.dispose(); ringMat.dispose();
+      coverTex.dispose(); dotTexture.dispose();
       prevCoverTex.dispose(); edgeTex.dispose(); rippleTex.dispose();
       renderer.dispose();
       delete (window as any).__updateCover;
@@ -630,7 +655,7 @@ function useVisualEngine(
   // 预设切换
   useEffect(() => {
     if (engineRef.current?.uniforms) {
-      const presetIdx = { silk: 0, tunnel: 1, orbit: 2, void: 3, vinyl: 4, wallpulse: 5 };
+      const presetIdx = { silk: 0, tunnel: 1, orbit: 2, void: 3, nebula: 4, wallpulse: 5 };
       engineRef.current.uniforms.uPreset.value = presetIdx[preset];
     }
   }, [preset]);
@@ -685,7 +710,6 @@ const App: React.FC = () => {
   const [serverPort, setServerPort] = useState(0);
   const [preset, setPreset] = useState<Preset>('silk');
   const [intensity, setIntensity] = useState(0.85);
-  const [showVinyl, setShowVinyl] = useState(true);
   const [customBg, setCustomBg] = useState<string | null>(null);
   const [customVideo, setCustomVideo] = useState<string | null>(null);
   const [gestureHint, setGestureHint] = useState<string | null>(null);
@@ -701,7 +725,7 @@ const App: React.FC = () => {
   const moodColors = MOOD_COLORS[mood];
   const bgColor = (customBg || customVideo) ? 'transparent' : moodColors.bg;
 
-  useVisualEngine(canvasRef, player, preset, intensity, showVinyl);
+  useVisualEngine(canvasRef, player, preset, intensity);
 
   useEffect(() => {
     electron?.getServerPort?.().then((port: number) => {
@@ -1338,14 +1362,6 @@ const App: React.FC = () => {
               <input type="range" min="0.2" max="1.5" step="0.05" value={intensity} onChange={(e) => setIntensity(parseFloat(e.target.value))} className="flex-1" />
               <span className="text-[11px] text-white/40 w-8 text-right font-mono">{intensity.toFixed(2)}</span>
             </div>
-          </div>
-
-          {/* 3D黑胶 */}
-          <div>
-            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">3D黑胶唱片</div>
-            <button onClick={() => setShowVinyl(!showVinyl)} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${showVinyl ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
-              {showVinyl ? '已开启' : '已关闭'}
-            </button>
           </div>
 
           {/* AI情绪 */}
