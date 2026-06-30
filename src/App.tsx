@@ -18,12 +18,12 @@ const QUALITY_OPTIONS = [
 const QUALITY_LABELS: Record<string, string> = { standard: '标准', exhigh: '极高', lossless: '无损', hires: 'Hi-Res' };
 
 const PRESETS: { id: Preset; name: string; icon: string }[] = [
-  { id: 'silk', name: '流光', icon: '~' },
-  { id: 'tunnel', name: '星河', icon: '✧' },
-  { id: 'orbit', name: '星系', icon: '◉' },
-  { id: 'void', name: '深海', icon: '◈' },
-  { id: 'nebula', name: '绽放', icon: '✺' },
-  { id: 'wallpulse', name: '极光', icon: '✦' },
+  { id: 'silk', name: '绽放', icon: '✺' },
+  { id: 'tunnel', name: '坍缩', icon: '◉' },
+  { id: 'orbit', name: '冲击波', icon: '◎' },
+  { id: 'void', name: '闪烁', icon: '✦' },
+  { id: 'nebula', name: '漩涡', icon: '◈' },
+  { id: 'wallpulse', name: '震颤', icon: '〰' },
 ];
 
 const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string }> = {
@@ -98,21 +98,33 @@ function useVisualEngine(
     const ripples: { x: number; y: number; age: number; str: number }[] = [];
     for (let i = 0; i < RIPPLE_MAX; i++) ripples.push({ x: 0, y: 0, age: 999, str: 0 });
 
-    // 粒子几何
-    const GRID = 128;
+    // 粒子几何 — 大量自由粒子，3D 体积内均匀随机分布（非固定形状）
+    const GRID = 160;
     const PCOUNT = GRID * GRID;
-    const PLANE_SIZE = 4.8;
     const positions = new Float32Array(PCOUNT * 3);
     const uvs = new Float32Array(PCOUNT * 2);
     const rand = new Float32Array(PCOUNT);
+    // 稳定的哈希随机（基于索引），保证每帧基础位置一致
+    const hhash = (n: number) => {
+      let s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
     for (let i = 0; i < PCOUNT; i++) {
-      const gx = i % GRID, gy = Math.floor(i / GRID);
-      const u = (gx + 0.5) / GRID, v = (gy + 0.5) / GRID;
-      positions[i * 3] = (gx / (GRID - 1) - 0.5) * PLANE_SIZE;
-      positions[i * 3 + 1] = (gy / (GRID - 1) - 0.5) * PLANE_SIZE;
-      positions[i * 3 + 2] = 0;
+      // 3D 球形体积分布（均匀）：球内随机点
+      const r1 = hhash(i * 3 + 1);
+      const r2 = hhash(i * 3 + 2);
+      const r3 = hhash(i * 3 + 3);
+      const radius = Math.cbrt(r1) * 3.2; // 立方根保证体积均匀
+      const theta = r2 * Math.PI * 2;
+      const phi = Math.acos(2 * r3 - 1);
+      positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+      positions[i * 3 + 2] = radius * Math.cos(phi);
+      // aUv 仍用于封面采样（基于 xy 投影归一化）
+      const u = (positions[i * 3] / 3.2) * 0.5 + 0.5;
+      const v = (positions[i * 3 + 1] / 3.2) * 0.5 + 0.5;
       uvs[i * 2] = u; uvs[i * 2 + 1] = v;
-      rand[i] = Math.random();
+      rand[i] = r1;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
@@ -144,6 +156,10 @@ function useVisualEngine(
       uMouse: { value: new THREE.Vector2(0, 0) },
       uMouseVel: { value: new THREE.Vector2(0, 0) },
       uMouseDown: { value: 0 },
+      // 节拍卡点 uniform：uBeat=脉冲值(0-1快衰减), uBeatAge=当前节拍后时长, uBeatCount=累计节拍数
+      uBeatAge: { value: 999 },
+      uBeatCount: { value: 0 },
+      uBeatStrength: { value: 0 },
     };
 
     const vertexShader = `
@@ -151,7 +167,7 @@ function useVisualEngine(
       uniform sampler2D uCoverTex, uPrevCoverTex, uEdgeTex, uRippleTex;
       uniform float uHasCover, uHasEdge, uColorMixT, uRippleCount;
       uniform vec2 uMouse, uMouseVel;
-      uniform float uMouseDown;
+      uniform float uMouseDown, uBeatAge, uBeatCount, uBeatStrength;
       attribute vec2 aUv;
       attribute float aRand;
       varying float vBright;
@@ -160,35 +176,33 @@ function useVisualEngine(
       varying float vAlpha;
       varying float vSourceLum;
       varying float vDepth;
+      varying float vBeatGlow;
 
       #define PI 3.14159265
 
       vec2 safeCoverUv(vec2 uv) { return clamp(uv, vec2(0.001), vec2(0.999)); }
 
-      // 哈希噪声（稳定，基于 aRand）
-      float hash21(vec2 p) {
-        return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+      // 稳定哈希
+      float hash13(vec3 p) {
+        return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
       }
-      // 2D 值噪声（用于流场）
-      float vnoise(vec2 p) {
-        vec2 i = floor(p), f = fract(p);
+      // 3D 值噪声（用于环境漂移）
+      float vnoise3(vec3 p) {
+        vec3 i = floor(p), f = fract(p);
         f = f * f * (3.0 - 2.0 * f);
-        float a = hash21(i);
-        float b = hash21(i + vec2(1.0, 0.0));
-        float c = hash21(i + vec2(0.0, 1.0));
-        float d = hash21(i + vec2(1.0, 1.0));
-        return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-      }
-      // 简化 curl 流场方向（用于流光/深海预设）
-      vec2 curlField(vec2 p, float t) {
-        float n1 = vnoise(p * 0.5 + vec2(t * 0.1, 0.0));
-        float n2 = vnoise(p * 0.5 + vec2(0.0, t * 0.1) + 10.0);
-        // 旋度：旋转梯度 90 度，得到无散度流场
-        return vec2(n2 - 0.5, -(n1 - 0.5)) * 2.0;
+        float n000 = hash13(i + vec3(0,0,0));
+        float n100 = hash13(i + vec3(1,0,0));
+        float n010 = hash13(i + vec3(0,1,0));
+        float n110 = hash13(i + vec3(1,1,0));
+        float n001 = hash13(i + vec3(0,0,1));
+        float n101 = hash13(i + vec3(1,0,1));
+        float n011 = hash13(i + vec3(0,1,1));
+        float n111 = hash13(i + vec3(1,1,1));
+        return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+                   mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
       }
 
       // 联觉配色：低频→深海蓝绿(冷)，高频→暖金粉(暖)，中频过渡
-      // 应用 60-30-10 规则：主色暗冷调，副色封面色，点缀色节拍暖光
       vec3 synestheticColor(float bass, float mid, float treble, vec3 coverCol, float hasCover) {
         vec3 deepOcean = vec3(0.04, 0.18, 0.28);
         vec3 midTone = vec3(0.10, 0.55, 0.72);
@@ -196,27 +210,24 @@ function useVisualEngine(
         vec3 audio = mix(deepOcean, midTone, smoothstep(0.0, 0.5, mid));
         audio = mix(audio, warmHigh, smoothstep(0.3, 0.8, treble) * 0.55);
         vec3 blended = mix(audio, coverCol, hasCover * 0.45);
-        blended += warmHigh * uBeat * 0.18;
+        // 节拍瞬间注入暖光，制造"心跳"感
+        blended += warmHigh * uBeat * 0.25;
         return blended;
       }
 
-      // 鼠标排斥力：粒子被鼠标推开（按下时变吸引）
-      // mpos=粒子世界xy，返回 xy 偏移
-      vec2 mouseForce(vec2 mpos) {
-        vec2 toMouse = mpos - uMouse;
+      // 弱化鼠标排斥力（仅近距离小幅推开）
+      vec3 mouseForceWeak(vec3 mpos) {
+        vec3 toMouse = mpos - vec3(uMouse, 0.0);
         float md = length(toMouse);
-        float radius = 1.6;
-        if (md > radius || md < 0.001) return vec2(0.0);
-        float falloff = 1.0 - md / radius;
-        falloff = falloff * falloff;
-        vec2 dir = toMouse / md;
-        // 默认排斥；按下时吸引
-        float sign = uMouseDown > 0.5 ? -1.0 : 1.0;
-        return dir * falloff * 0.9 * sign;
+        float radius = 1.2;
+        if (md > radius || md < 0.001) return vec3(0.0);
+        float falloff = (1.0 - md / radius) * 0.35; // 弱化
+        return normalize(toMouse) * falloff;
       }
 
       void main() {
-        vec3 pos = position;
+        // basePos = 稳定基础位置（3D 体积自由分布，非固定形状）
+        vec3 basePos = position;
         float t = uTime;
         float r1 = aRand;
         float r2 = fract(r1 * 7.13);
@@ -225,208 +236,138 @@ function useVisualEngine(
         vEdgeBoost = 0.0;
         vSourceLum = 0.5;
         vDepth = 0.0;
+        vBeatGlow = uBeat; // 节拍发光强度，传给 fragment
 
-        // 封面颜色（新旧渐变，Mineradio同款 uColorMixT）
+        // 封面颜色（新旧渐变）
         vec2 cuv = safeCoverUv(aUv);
         vec3 newCol = texture2D(uCoverTex, cuv).rgb;
         vec3 prevCol = texture2D(uPrevCoverTex, cuv).rgb;
         vec3 coverCol = mix(prevCol, newCol, clamp(uColorMixT, 0.0, 1.0));
         vSourceLum = dot(coverCol, vec3(0.299, 0.587, 0.114));
 
-        // 封面深度/边缘纹理（Mineradio同款启发式 depth+edge）
-        vec4 edge = texture2D(uEdgeTex, cuv);
-        float depthVal = edge.r;
-
         int preset = int(uPreset + 0.5);
 
-        // 涟漪系统（Mineradio同款，循环采样涟漪纹理）
-        float rippleZ = 0.0;
-        vec2 rippleXY = vec2(0.0);
-        for (int ri = 0; ri < 8; ri++) {
-          if (float(ri) >= uRippleCount) break;
-          vec4 rp = texture2D(uRippleTex, vec2((float(ri) + 0.5) / 8.0, 0.5));
-          float rAge = rp.z;
-          float rStr = rp.w * exp(-rAge * 2.0);
-          if (rStr < 0.01) continue;
-          // uv 空间距离 → 世界距离（缩放）
-          float rdx = (aUv.x - rp.x) * 4.8;
-          float rdy = (aUv.y - rp.y) * 4.8;
-          float rDist = sqrt(rdx * rdx + rdy * rdy);
-          float rRing = exp(-pow((rDist - rAge * 1.6) * 2.5, 2.0));
-          float rBulge = exp(-rDist * 1.5) * (1.0 - smoothstep(0.0, 0.6, rAge));
-          float amp = (rRing * 0.7 + rBulge * 0.4) * rStr;
-          rippleZ += amp;
-          // 涟漪环的切向位移（水平方向推开）
-          if (rDist > 0.01) {
-            vec2 rdir = vec2(rdx, rdy) / rDist;
-            rippleXY += rdir * rRing * rStr * 0.5;
-          }
-        }
+        // 环境漂移：所有预设共享的缓慢噪声漂移（避免完全静止）
+        // 基于粒子位置和时间，让粒子在基础位置附近轻微浮动
+        vec3 drift = vec3(
+          vnoise3(basePos * 0.4 + vec3(t * 0.08, 0.0, 0.0)),
+          vnoise3(basePos * 0.4 + vec3(0.0, t * 0.08, 0.0)),
+          vnoise3(basePos * 0.4 + vec3(0.0, 0.0, t * 0.08))
+        ) - 0.5;
+        // 低频驱动漂移幅度，高频增加湍流
+        drift *= 0.4 + uBass * 0.8 + uTreble * 0.3;
+
+        // 节拍行为：每个粒子有自己的"响应相位"，基于 aRand 错开
+        // beatPhase 让粒子行为有时间差，避免整体同步呆板
+        float beatPhase = r1 * 0.4; // 0~0.4 的相位差
+        float beatT = max(0.0, uBeatAge - beatPhase); // 该粒子的节拍龄
+        float beatEnv = exp(-beatT * 4.0) * uBeatStrength; // 节拍包络（快速衰减）
+        // 节拍方向（基于粒子哈希，每个粒子有自己的爆发方向）
+        vec3 beatDir = normalize(basePos + vec3(0.001));
+
+        vec3 pos = basePos;
+        float pointScale = 1.0;
+        float brightBoost = 1.0;
 
         // 默认应用联觉配色
         vColor = synestheticColor(uBass, uMid, uTreble, coverCol, uHasCover);
 
         if (preset == 0) {
-          // === SILK 流光 === Curl Noise 流体场，粒子沿无散度流场漂移
-          // 鼠标移动注入额外流速，形成"搅动液体"质感
-          vec2 worldUv = pos.xy;
-          vec2 flow = curlField(worldUv * 0.6, t);
-          // 低频驱动流速，高频添加湍流
-          flow *= 0.6 + uBass * 1.5;
-          flow += curlField(worldUv * 1.8, t * 1.7) * uTreble * 0.4;
-          // 鼠标速度直接注入流场（搅动）
-          flow += uMouseVel * 2.5;
-          // 缓慢累积位移（基于稳定 aRand 错相位，避免整体平移）
-          pos.x += flow.x * (0.3 + r1 * 0.7);
-          pos.y += flow.y * (0.3 + r2 * 0.7);
-          // z 方向波浪 + 封面深度
-          float depthBoost = (depthVal - 0.5) * uHasEdge * 1.2;
-          pos.z = sin(pos.x * 1.5 + t * 0.6) * cos(pos.y * 1.3 + t * 0.5) * uBass * 1.1
-                + depthBoost + rippleZ * 1.3;
-          // 鼠标排斥力
-          vec2 mf = mouseForce(pos.xy);
-          pos.x += mf.x; pos.y += mf.y;
-          // 鼠标附近高亮
-          float mouseGlow = exp(-length(pos.xy - uMouse) * 0.8);
-          vBright *= 1.0 + mouseGlow * 0.6;
-          vColor = mix(vColor, vColor + vec3(0.3, 0.5, 0.6), mouseGlow * 0.5);
-          vDepth = clamp(pos.z * 0.3 + 0.5, 0.0, 1.0);
+          // === BLOOM 绽放 === 节拍时粒子从中心向外爆发，衰减后回归
+          // 爆发距离 = 节拍强度 * 方向，远粒子爆发更猛（视觉冲击）
+          float dist = length(basePos);
+          float burstMag = beatEnv * (1.0 + dist * 0.3) * 2.5;
+          pos = basePos + beatDir * burstMag;
+          // 爆发时变亮变大
+          brightBoost = 1.0 + beatEnv * 2.5;
+          pointScale = 1.0 + beatEnv * 1.8;
+          // 爆发时颜色偏暖
+          vColor = mix(vColor, vec3(1.0, 0.7, 0.4), beatEnv * 0.6);
         } else if (preset == 1) {
-          // === TUNNEL 星河 === 沿 z 轴流动的星河粒子，鼠标控制偏转方向
-          // 粒子从远端流向近端，鼠标位置改变流场中心，形成"穿越星河"
-          float flow = fract(aUv.y + t * (0.05 + uEnergy * 0.08) + r1 * 0.1);
-          float zPos = (flow - 0.5) * 12.0;
-          // 螺旋角，鼠标 x 偏移控制扭转
-          float angle = aUv.x * PI * 2.0 + t * 0.15 + uMouse.x * 0.8;
-          // 半径：低频呼吸 + 随机分层（星河有粗细）
-          float radius = (1.5 + r1 * 2.5) * (1.0 + uBass * 0.4);
-          // 鼠标 y 控制半径整体偏移（上下推动星河粗细）
-          radius *= 1.0 + uMouse.y * 0.3;
-          pos.x = cos(angle) * radius;
-          pos.y = sin(angle) * radius;
-          pos.z = zPos;
-          // 近端亮、远端淡，营造纵深
-          float depthFade = smoothstep(0.0, 0.35, flow) * smoothstep(1.0, 0.55, flow);
-          vAlpha = depthFade;
-          // 鼠标附近粒子加亮（"擦过"星河）
-          float mouseGlow = exp(-length(pos.xy - uMouse) * 0.6);
-          vBright *= 1.0 + mouseGlow * 0.8;
-          vDepth = flow;
+          // === IMPLODE 坍缩 === 节拍时粒子向中心聚拢，衰减后散开
+          // 聚拢 = 位置向中心收缩，远粒子收缩更多
+          float shrink = 1.0 - beatEnv * 0.7;
+          pos = basePos * shrink;
+          // 聚拢时核心变亮（密度增加）
+          brightBoost = 1.0 + beatEnv * 1.8;
+          pointScale = 1.0 + beatEnv * 1.2;
+          vColor = mix(vColor, vec3(0.5, 0.8, 1.0), beatEnv * 0.5);
         } else if (preset == 2) {
-          // === ORBIT 星系 === 螺旋星系盘，多臂结构，鼠标位置扰动旋臂
-          // 中心明亮，外缘淡出，节拍呼吸膨胀
-          float armCount = 3.0;
-          float armIdx = floor(r1 * armCount);
-          float armAngle = aUv.x * PI * 2.0 + armIdx * (PI * 2.0 / armCount);
-          // 半径分层：内密外疏
-          float radius = 0.3 + aUv.y * 3.2;
-          // 旋臂扭曲：随半径增加扭转，节拍增强
-          float twist = radius * 1.2 + t * 0.08 + uBass * 0.5;
-          // 鼠标 x 扰动旋臂角度（"拨动"星系）
-          twist += (uMouse.x) * radius * 0.8;
-          float a = armAngle + twist;
-          pos.x = cos(a) * radius;
-          pos.y = sin(a) * radius;
-          // 盘厚度：z 方向高斯分布（薄盘）
-          pos.z = (r2 - 0.5) * 0.4 * (1.0 + uBass * 0.5) + sin(t * 0.5 + r1 * 6.0) * 0.05;
-          // 中心核球更亮
-          float coreGlow = exp(-radius * 0.8);
-          vBright *= 0.4 + coreGlow * 1.3;
-          // 封面色染星系
-          vColor = mix(vColor, coverCol, uHasCover * (0.3 + coreGlow * 0.4));
-          // 鼠标排斥力（拨开星系）
-          vec2 mf = mouseForce(pos.xy);
-          pos.x += mf.x * 1.5; pos.y += mf.y * 1.5;
-          vAlpha = 0.5 + coreGlow * 0.5;
-          vDepth = radius / 3.5;
+          // === SHOCKWAVE 冲击波 === 节拍时从中心发出环形冲击波，粒子被波推开后回归
+          // 波前半径 = 节拍龄 * 速度
+          float waveRadius = beatT * 4.5;
+          float dist = length(basePos);
+          // 波前附近的粒子被推开（高斯峰）
+          float waveFront = exp(-pow((dist - waveRadius) * 1.8, 2.0));
+          float push = waveFront * uBeatStrength * 2.0;
+          pos = basePos + beatDir * push;
+          // 波前粒子变亮
+          brightBoost = 1.0 + waveFront * uBeatStrength * 3.0;
+          pointScale = 1.0 + waveFront * uBeatStrength * 1.5;
+          // 冲击波颜色：波前暖白，内部冷
+          vColor = mix(vColor, vec3(1.0, 0.9, 0.7), waveFront * uBeatStrength * 0.7);
         } else if (preset == 3) {
-          // === VOID 深海 === 水下粒子群，缓慢上浮气泡 + 鼠标产生涡流
-          // 气泡从底部生成上浮，鼠标移动产生涡流扰动
-          float layer = r3;
-          float spread = 8.0 + layer * 4.0;
-          // 稳定基础位置
-          float baseX = (r1 - 0.5) * spread;
-          float baseY = (r2 - 0.5) * spread;
-          // 上浮：y 随时间增加，循环重置（气泡感）
-          float rise = mod(t * (0.2 + r1 * 0.4) + r1 * 10.0, 6.0) - 3.0;
-          pos.y = baseY + rise;
-          // 水平摆动（气泡左右晃）
-          pos.x = baseX + sin(t * 0.8 + r1 * 8.0) * 0.3;
-          // z 分层
-          pos.z = -layer * 4.0 - 1.0;
-          // 涡流：鼠标移动产生旋转扰动
-          vec2 toMouse = pos.xy - uMouse;
-          float md = length(toMouse);
-          if (md < 2.5 && md > 0.01) {
-            float falloff = 1.0 - md / 2.5;
-            // 切向力（垂直于到鼠标的方向）= 涡流
-            vec2 tangent = vec2(-toMouse.y, toMouse.x) / md;
-            pos.x += tangent.x * falloff * 0.8 + uMouseVel.x * falloff * 1.5;
-            pos.y += tangent.y * falloff * 0.8 + uMouseVel.y * falloff * 1.5;
-          }
-          // 气泡大小随机，亮度和低频联动
-          float bubble = 0.5 + 0.5 * sin(t * 1.5 + r1 * 10.0);
-          vBright *= (0.4 + bubble * 0.6) * (0.5 + uEnergy * 0.5);
-          vAlpha = 0.3 + (1.0 - layer) * 0.5;
-          vDepth = layer;
+          // === FLASH 闪烁 === 节拍时粒子瞬间放大变亮，像萤火虫同步闪烁
+          // 位置基本不动，主要变化大小和亮度
+          // 每个粒子有自己的闪烁阈值（部分粒子不闪，增加层次）
+          float flashThreshold = r2;
+          float flash = step(0.3, flashThreshold) * beatEnv;
+          brightBoost = 1.0 + flash * 4.0;
+          pointScale = 1.0 + flash * 3.0;
+          // 闪烁颜色：暖白
+          vColor = mix(vColor, vec3(1.0, 0.95, 0.8), flash * 0.8);
+          // 非节拍时粒子有呼吸般的明暗变化
+          float breathe = 0.6 + 0.4 * sin(t * 1.2 + r1 * 8.0);
+          brightBoost *= 0.5 + breathe * 0.5;
         } else if (preset == 4) {
-          // === NEBULA 绽放 === 烟花式放射粒子，从中心向外绽放，鼠标位置=绽放中心
-          // 鼠标点击触发额外爆发，节拍驱动绽放速度
-          float angle = aUv.x * PI * 2.0;
-          // 半径随时间脉动（节拍呼吸）
-          float baseR = aUv.y * 3.5;
-          float pulse = sin(t * 0.8 + r1 * 3.0) * 0.3 + uBass * 0.6 + uBeat * 1.2;
-          float radius = baseR * (1.0 + pulse * 0.4);
-          // 鼠标作为绽放中心
-          vec2 center = uMouse * 1.2;
-          pos.x = center.x + cos(angle) * radius;
-          pos.y = center.y + sin(angle) * radius;
-          // z 方向厚度
-          pos.z = (r2 - 0.5) * 0.5 + sin(t * 0.6 + r1 * 6.0) * uBass * 0.3;
-          // 内圈亮，外圈淡
-          float coreGlow = 1.0 - smoothstep(0.0, 3.5, radius);
-          vBright *= 0.5 + coreGlow * 1.2;
-          // 节拍时颜色变暖
-          vColor = mix(vColor, vec3(1.0, 0.7, 0.4), uBeat * 0.5);
-          vColor = mix(vColor, coverCol, uHasCover * (0.3 + coreGlow * 0.4));
-          vAlpha = 0.3 + coreGlow * 0.7;
-          vDepth = radius / 3.5;
+          // === VORTEX 漩涡 === 节拍时粒子绕中心旋转，旋转量随节拍衰减
+          // 旋转角度 = 节拍强度 * (1 + 距离)，远粒子转得更多
+          float dist = length(basePos);
+          float angle = beatEnv * (2.0 + dist * 0.8) * (r1 > 0.5 ? 1.0 : -1.0); // 随机正反向
+          float s = sin(angle), c = cos(angle);
+          // 绕 z 轴旋转
+          pos.x = basePos.x * c - basePos.y * s;
+          pos.y = basePos.x * s + basePos.y * c;
+          pos.z = basePos.z;
+          brightBoost = 1.0 + beatEnv * 1.5;
+          pointScale = 1.0 + beatEnv * 1.0;
+          // 漩涡颜色：旋转时偏冷蓝
+          vColor = mix(vColor, vec3(0.4, 0.7, 1.0), beatEnv * 0.5);
         } else {
-          // === WALLPULSE 极光 === 垂直流动的极光帘幕，鼠标拖动改变波动方向
-          float band = sin(aUv.y * 4.0 + t * 0.4) * 0.5 + 0.5;
-          // 极光主波：水平波动 + 垂直调制，鼠标 x 偏移相位
-          float aurora = sin(aUv.x * 2.5 + t * 0.3 + band * 2.0 + uMouse.x * 3.0) * uBass * 0.9;
-          float aurora2 = cos(aUv.x * 4.0 - t * 0.4 + band * 1.5 + uMouse.y * 2.0) * uMid * 0.4;
-          pos.z = aurora + aurora2 + sin(t * 0.35 + r1 * 8.0) * uEnergy * 0.2;
-          // 鼠标速度推动极光水平流动
-          pos.x += uMouseVel.x * (0.5 + band) * 2.0;
-          pos.y += uMouseVel.y * (0.5 + band) * 2.0;
-          // 涟漪扭曲极光
-          pos.z += rippleZ * 0.6;
-          // 极光配色：底部冷绿，顶部紫蓝，封面色点缀
-          vec3 auroraCol = mix(vec3(0.0, 0.65, 0.55), vec3(0.35, 0.18, 0.78), aUv.y);
-          auroraCol = mix(auroraCol, coverCol, uHasCover * 0.4);
-          auroraCol = mix(auroraCol, vec3(1.0, 0.7, 0.45), uTreble * 0.3 * aUv.y);
-          vColor = auroraCol;
-          vDepth = band;
+          // === TREMOR 震颤 === 节拍时粒子剧烈随机抖动，衰减后平静
+          // 每个粒子有自己的抖动方向（基于哈希），节拍驱动幅度
+          vec3 jitterDir = normalize(vec3(
+            hash13(basePos + vec3(1.0, 0.0, 0.0)) - 0.5,
+            hash13(basePos + vec3(0.0, 1.0, 0.0)) - 0.5,
+            hash13(basePos + vec3(0.0, 0.0, 1.0)) - 0.5
+          ));
+          float tremorMag = beatEnv * 1.2;
+          pos = basePos + jitterDir * tremorMag;
+          // 高频也驱动持续微抖（非节拍时也有活力）
+          pos += jitterDir * uTreble * 0.15;
+          brightBoost = 1.0 + beatEnv * 1.8;
+          pointScale = 1.0 + beatEnv * 1.3;
+          // 震颤颜色：偏暖橙
+          vColor = mix(vColor, vec3(1.0, 0.6, 0.3), beatEnv * 0.5);
         }
 
-        // 节拍冲击 — 柔和径向脉冲（非抖动），所有预设统一
-        float beatKick = uBeat * (0.25 + r2 * 0.35);
-        vec2 beatDir = normalize(aUv - 0.5 + vec2(0.001));
-        pos.x += beatDir.x * beatKick * 0.4;
-        pos.y += beatDir.y * beatKick * 0.4;
+        // 叠加环境漂移（所有预设共享）
+        pos += drift;
+        // 弱化鼠标排斥力
+        pos += mouseForceWeak(pos);
 
-        // 边缘能量增强（克制，避免溢出）
+        // 边缘能量增强（克制）
         float edgeDist = length(aUv - 0.5);
-        vEdgeBoost = smoothstep(0.28, 0.5, edgeDist) * uEnergy * 0.7;
-        // 亮度：基础 + 低频驱动 + 能量，克制上限避免过曝
-        vBright = (0.5 + uBass * 0.38 + uEnergy * 0.14 + r3 * 0.08) * uIntensity;
+        vEdgeBoost = smoothstep(0.28, 0.5, edgeDist) * uEnergy * 0.5;
+        // 亮度：基础 + 低频 + 节拍行为增强，克制上限
+        vBright = (0.45 + uBass * 0.35 + uEnergy * 0.12 + r3 * 0.06) * uIntensity * brightBoost;
+        // 深度（用于雾化）：基于到中心距离
+        vDepth = clamp(length(pos) / 4.0, 0.0, 1.0);
 
         vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
         gl_Position = projectionMatrix * mvPos;
-        // 点大小：近大远小，低频放大，柔和过渡
-        gl_PointSize = (1.8 + uBass * 2.8 + uEnergy * 1.3) * uPixel * (300.0 / max(-mvPos.z, 0.1));
+        // 点大小：近大远小 + 节拍放大
+        gl_PointSize = (1.6 + uBass * 2.2 + uEnergy * 1.0) * pointScale * uPixel * (300.0 / max(-mvPos.z, 0.1));
       }
     `;
 
@@ -439,6 +380,7 @@ function useVisualEngine(
       varying float vAlpha;
       varying float vSourceLum;
       varying float vDepth;
+      varying float vBeatGlow;
       // ACES Filmic 近似曲线 — 电影级高光压缩，避免过曝发白
       vec3 acesFilm(vec3 x) {
         const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
@@ -450,10 +392,12 @@ function useVisualEngine(
         vec3 col = vColor * vBright;
         // 边缘能量微增亮（克制）
         col = mix(col, col * 1.25 + vec3(0.04), vEdgeBoost * 0.3);
+        // 节拍卡点：节拍瞬间增强发光（暖白注入），让卡点视觉冲击明显
+        col += vec3(1.0, 0.9, 0.75) * vBeatGlow * 0.4;
         // ACES 色调映射
         col = acesFilm(col * 1.2);
         // 深度雾化：远层粒子稍微淡入背景，增强纵深
-        float fogFade = mix(1.0, 0.65, vDepth * 0.6);
+        float fogFade = mix(1.0, 0.6, vDepth * 0.6);
         gl_FragColor = vec4(col, tex.a * uAlpha * vAlpha * fogFade);
       }
     `;
@@ -467,6 +411,7 @@ function useVisualEngine(
       varying float vAlpha;
       varying float vSourceLum;
       varying float vDepth;
+      varying float vBeatGlow;
       vec3 acesFilm(vec3 x) {
         const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
         return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
@@ -475,15 +420,19 @@ function useVisualEngine(
         vec4 tex = texture2D(uDotTex, gl_PointCoord);
         if (tex.a < 0.02) discard;
         vec3 col = vColor * vBright * 1.7;
+        // 节拍卡点 bloom 增强
+        col += vec3(1.0, 0.9, 0.75) * vBeatGlow * 0.6;
         col = acesFilm(col * 1.3);
         // Mineradio同款 keepBlack: 暗粒子不溢光，避免画面发灰
         float keepBlack = 1.0 - smoothstep(0.025, 0.115, vSourceLum);
         float bloomKeep = 1.0 - keepBlack * 0.92;
         // 平方软化：bloom 层更柔和，避免硬光斑
         float soft = tex.a * tex.a;
+        // 节拍时 bloom 更强（卡点光晕）
+        float beatBloom = 1.0 + vBeatGlow * 1.2;
         // 深度衰减：远层 bloom 更弱
         float depthFade = mix(1.0, 0.5, vDepth * 0.6);
-        gl_FragColor = vec4(col, soft * uAlpha * 0.5 * vAlpha * bloomKeep * depthFade);
+        gl_FragColor = vec4(col, soft * uAlpha * 0.5 * vAlpha * bloomKeep * depthFade * beatBloom);
       }
     `;
 
@@ -517,6 +466,17 @@ function useVisualEngine(
     let prevTime = performance.now();
     let rippleWriteIdx = 0;
     let beatCooldown = 0;
+    // === Spectral Flux 节拍检测（比单纯低频更准确，参考 R.P.M. 文章）===
+    // 上一帧节拍频谱（用于计算帧间正变化之和 = spectral flux）
+    let prevBeatSpectrum: Float32Array | null = null;
+    // 滚动历史窗口（用于自适应阈值 = mean + 1.5*stdDev）
+    const FLUX_HISTORY_LEN = 43; // 约 0.7s @ 60fps
+    const fluxHistory: number[] = new Array(FLUX_HISTORY_LEN).fill(0);
+    let fluxHistoryIdx = 0;
+    // 上次节拍强度（用于避免极弱节拍触发）
+    let lastBeatFlux = 0;
+    // 节拍后阈值提升的"不应期"，避免单一峰值反复触发
+    let beatRefractory = 0;
     // 电影级缓慢相机漂移（替代抖动），呼吸感而非晃动
     let camDriftX = 0, camDriftY = 0;
     // 鼠标追踪状态（屏幕像素坐标 + 平滑速度）
@@ -593,10 +553,83 @@ function useVisualEngine(
         smoothEnergy = env(smoothEnergy, Math.min(0.72, (bassNorm + mInst + tHigh) / 3), 0.16, 0.055);
 
         const bassOnset = Math.max(0, bKick - smoothBass * 0.9);
+
+        // === Spectral Flux 节拍检测（核心节奏卡点算法）===
+        // 1) 计算 spectral flux：当前帧相对上一帧的频谱正变化之和（只取增量，即 onset）
+        //    使用低频+中频段（kickEnd~midEnd），这是节奏信息最集中的频段
+        // 2) 自适应阈值：用过去 ~0.7s 的 flux 滚动均值 + 1.5*标准差
+        //    这种自适应方法在不同歌曲/响度下都能稳定工作
+        // 3) 触发条件：flux > threshold 且超过不应期（refractory ~250ms）
+        // 4) 触发后：uBeatAge=0 / uBeatCount++ / uBeatStrength=flux归一化值
+        let flux = 0;
+        if (prevBeatSpectrum) {
+          // 限制 flux 计算到节奏频段（约 80Hz ~ 2kHz），避免高频抖动误触发
+          const fluxStart = kickEnd;
+          const fluxEnd = Math.min(midEnd, beatData.length);
+          for (let i = fluxStart; i < fluxEnd; i++) {
+            const cur = beatData[i] / 255;
+            const prev = prevBeatSpectrum[i];
+            const diff = cur - prev;
+            if (diff > 0) flux += diff; // 只累加正变化（onset）
+          }
+          // 归一化到频段数量
+          flux /= Math.max(1, fluxEnd - fluxStart);
+        }
+        // 更新历史窗口（写入当前 flux，供下一帧阈值计算）
+        fluxHistory[fluxHistoryIdx] = flux;
+        fluxHistoryIdx = (fluxHistoryIdx + 1) % FLUX_HISTORY_LEN;
+        // 计算均值与标准差
+        let fluxMean = 0;
+        for (let i = 0; i < FLUX_HISTORY_LEN; i++) fluxMean += fluxHistory[i];
+        fluxMean /= FLUX_HISTORY_LEN;
+        let fluxVar = 0;
+        for (let i = 0; i < FLUX_HISTORY_LEN; i++) {
+          const d = fluxHistory[i] - fluxMean;
+          fluxVar += d * d;
+        }
+        const fluxStd = Math.sqrt(fluxVar / FLUX_HISTORY_LEN);
+        // 自适应阈值：均值 + 1.5 标准差（文献常用 1.0~2.0，1.5 较平衡）
+        const fluxThreshold = fluxMean + fluxStd * 1.5;
+
+        // 复制当前频谱到 prevBeatSpectrum 供下一帧使用
+        if (beatData) {
+          if (!prevBeatSpectrum || prevBeatSpectrum.length !== beatData.length) {
+            prevBeatSpectrum = new Float32Array(beatData.length);
+          }
+          for (let i = 0; i < beatData.length; i++) prevBeatSpectrum[i] = beatData[i] / 255;
+        }
+
+        // 不应期倒计时（避免连续触发）
+        beatRefractory = Math.max(0, beatRefractory - dt);
+
+        // 节拍触发判定：flux 超过自适应阈值 + 不应期结束 + 当前 flux 比上次节拍强（避免弱节拍跟随）
+        // 同时要求 flux 有绝对强度（>0.02），避免静音段噪声误触发
+        const fluxStrength = Math.max(0, flux - fluxThreshold); // 超出阈值的部分
+        if (flux > fluxThreshold && beatRefractory <= 0 && flux > 0.02 && flux > lastBeatFlux * 0.45) {
+          // 触发节拍卡点行为：重置节拍龄，节拍数 +1，记录节拍强度
+          uniforms.uBeatAge.value = 0;
+          uniforms.uBeatCount.value += 1;
+          // 节拍强度：flux 超出阈值的程度 + 低频强度共同决定，钳制到 0~1
+          const strength = Math.min(1, fluxStrength * 6 + bassNorm * 0.3);
+          uniforms.uBeatStrength.value = strength;
+          lastBeatFlux = flux;
+          // 不应期约 250ms（限制最快节拍到 ~240BPM，过滤过高误判）
+          beatRefractory = 0.25;
+          // beatPulse 用于涟漪/相机推近等次级效果（保留原涟漪触发行为）
+          beatPulse = Math.max(beatPulse, Math.min(0.18, fluxStrength * 0.6 + 0.04));
+          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, Math.min(1, strength));
+          beatCooldown = 0.18;
+        } else {
+          // 节拍强度随时间快速衰减（每个粒子 shader 内也会用 beatEnv 衰减）
+          // 这里只对 uBeatStrength 做缓慢清零，实际卡点效果由 uBeatAge 在 shader 里驱动
+          uniforms.uBeatStrength.value *= Math.pow(0.5, dt * 2);
+        }
+        // 节拍龄每帧累加（shader 用它计算 exp(-beatT * 4) 包络）
+        uniforms.uBeatAge.value += dt;
+
+        // 兼容旧逻辑：bassOnset 仍可用于次级效果（这里仅作 beatPulse 备份）
         if (bassOnset > 0.075 && bKick > 0.32 && beatCooldown <= 0) {
-          beatPulse = Math.max(beatPulse, Math.min(0.15, bassOnset * 0.2));
-          // 节拍自动触发涟漪（Mineradio 同款行为），位置随机偏移让画面更生动
-          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, Math.min(1, bassOnset * 4));
+          beatPulse = Math.max(beatPulse, Math.min(0.12, bassOnset * 0.15));
           beatCooldown = 0.18;
         }
         beatPulse *= Math.pow(0.36, dt);
@@ -609,6 +642,9 @@ function useVisualEngine(
       } else {
         smoothBass *= 0.91; smoothMid *= 0.91; smoothTreb *= 0.91; smoothEnergy *= 0.91; beatPulse *= 0.82;
         bassPeak *= 0.99;
+        // 未播放/无分析器时：节拍龄继续累加（让粒子回归静止），节拍强度衰减
+        uniforms.uBeatAge.value += dt;
+        uniforms.uBeatStrength.value *= Math.pow(0.5, dt * 2);
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
         uniforms.uTreble.value = smoothTreb;
