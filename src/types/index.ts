@@ -6,9 +6,12 @@ export interface Song {
   cover: string
   duration: number
   url: string
-  source: 'local' | 'kugou'
+  source: 'local' | 'kugou' | 'netease'
   quality?: 'standard' | 'high' | 'lossless' | 'hires'
   lyrics?: LyricLine[]
+  hash?: string
+  albumId?: string
+  albumAudioId?: string
 }
 
 export interface LyricLine {
