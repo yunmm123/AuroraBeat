@@ -53,6 +53,9 @@ interface PlayerState {
   showKugou: boolean
   kugouUserInfo: { uid: string; token: string; nickname: string } | null
   
+  // Recent play history
+  recentSongs: Song[]
+  
   setCurrentSong: (song: Song | null) => void
   setIsPlaying: (playing: boolean) => void
   togglePlay: () => void
@@ -91,7 +94,8 @@ interface PlayerState {
   addLocalSongs: (songs: Song[]) => void
   removeLocalSong: (id: string) => void
   setSearchQuery: (query: string) => void
-  playSong: (song: Song) => void
+  playSong: (song: Song, queue?: Song[]) => void
+  addToRecent: (song: Song) => void
   refreshLyrics: () => void
   loadFromDB: () => Promise<void>
   
@@ -262,6 +266,9 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   showKugou: false,
   kugouUserInfo: null,
   
+  // Recent play history
+  recentSongs: [],
+  
   setCurrentSong: (song) => set({ currentSong: song }),
   setIsPlaying: (playing) => set({ isPlaying: playing }),
   togglePlay: () => set({ isPlaying: !get().isPlaying }),
@@ -387,13 +394,43 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     set({ searchQuery: query, searchResults: results })
   },
   
-  playSong: (song) => {
-    set({ currentSong: song, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
+  playSong: (song, queue) => {
+    const { addToRecent } = get()
+    addToRecent(song)
+    
+    let newQueue: Song[] = []
+    let newIndex = 0
+    
+    if (queue && queue.length > 0) {
+      newQueue = queue
+      newIndex = Math.max(0, queue.findIndex(s => s.id === song.id))
+      if (newIndex === -1) newIndex = 0
+    } else {
+      newQueue = [song]
+      newIndex = 0
+    }
+    
+    set({ 
+      queue: newQueue,
+      queueIndex: newIndex,
+      currentSong: song, 
+      isPlaying: true, 
+      currentTime: 0, 
+      lyrics: [], 
+      lyricsLoading: true 
+    })
     
     const trackName = song.title.replace(/\.[^.]+$/, '')
     const artistName = song.artist !== '未知艺术家' ? song.artist : ''
     
     loadLyricsForSong(trackName, artistName, song.duration)
+  },
+  
+  addToRecent: (song) => {
+    const { recentSongs } = get()
+    const filtered = recentSongs.filter(s => s.id !== song.id)
+    const newRecent = [song, ...filtered].slice(0, 100)
+    set({ recentSongs: newRecent })
   },
   
   refreshLyrics: () => {
