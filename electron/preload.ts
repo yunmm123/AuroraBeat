@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 本地文件
   selectLocalFiles: () => ipcRenderer.invoke('dialog:selectLocalFiles'),
   selectImageFile: () => ipcRenderer.invoke('dialog:selectImageFile'),
+  selectVideoFile: () => ipcRenderer.invoke('dialog:selectVideoFile'),
   readLocalFile: (filePath: string) => ipcRenderer.invoke('file:readAsBlob', filePath),
   searchLyrics: (title: string, artist: string) => ipcRenderer.invoke('lyrics:search', title, artist),
 

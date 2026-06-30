@@ -520,18 +520,23 @@ const App: React.FC = () => {
   const [intensity, setIntensity] = useState(0.85);
   const [showVinyl, setShowVinyl] = useState(true);
   const [customBg, setCustomBg] = useState<string | null>(null);
+  const [customVideo, setCustomVideo] = useState<string | null>(null);
   const [desktopLyricsOpen, setDesktopLyricsOpen] = useState(false);
   const [likedSet, setLikedSet] = useState<Set<string>>(new Set());
+  const [gestureEnabled, setGestureEnabled] = useState(false);
+  const [gestureHint, setGestureHint] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lyricsRef = useRef<HTMLDivElement>(null);
   const activeLyricRef = useRef<HTMLDivElement>(null);
   const searchSeqRef = useRef(0);
   const electron = (window as any).electronAPI;
+  const gestureVideoRef = useRef<HTMLVideoElement>(null);
+  const gestureHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // AI情绪自动主题
   const mood = useMemo(() => detectMood(player.currentSong), [player.currentSong]);
   const moodColors = MOOD_COLORS[mood];
-  const bgColor = customBg ? 'transparent' : moodColors.bg;
+  const bgColor = (customBg || customVideo) ? 'transparent' : moodColors.bg;
 
   useVisualEngine(canvasRef, player, preset, intensity, showVinyl);
 
@@ -580,6 +585,172 @@ const App: React.FC = () => {
     const u3 = electron.onPlaybackPrev(() => player.prev());
     return () => { u1?.(); u2?.(); u3?.(); };
   }, []);
+
+  // 手势提示气泡
+  const showGestureHint = useCallback((text: string) => {
+    setGestureHint(text);
+    if (gestureHintTimer.current) clearTimeout(gestureHintTimer.current);
+    gestureHintTimer.current = setTimeout(() => setGestureHint(null), 1100);
+  }, []);
+
+  // 键盘快捷键（沉浸式控制）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      switch (e.code) {
+        case 'Space':
+          e.preventDefault(); player.togglePlay(); showGestureHint('播放 / 暂停'); break;
+        case 'ArrowRight':
+          if (e.shiftKey) { player.next(); showGestureHint('下一首'); }
+          else { player.seek(player.currentTime + 5); showGestureHint('+5s'); }
+          break;
+        case 'ArrowLeft':
+          if (e.shiftKey) { player.prev(); showGestureHint('上一首'); }
+          else { player.seek(Math.max(0, player.currentTime - 5)); showGestureHint('-5s'); }
+          break;
+        case 'ArrowUp':
+          e.preventDefault(); { const v = Math.min(1, player.volume + 0.05); player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); } break;
+        case 'ArrowDown':
+          e.preventDefault(); { const v = Math.max(0, player.volume - 0.05); player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); } break;
+        case 'KeyL':
+          if (player.currentSong) {
+            player.toggleLike(player.currentSong).then((liked: boolean) => {
+              setLikedSet((prev) => {
+                const next = new Set(prev);
+                if (liked) next.add(player.currentSong!.id); else next.delete(player.currentSong!.id);
+                return next;
+              });
+            });
+            showGestureHint('红心');
+          } break;
+        case 'KeyF':
+          setShowFx((v) => !v); showGestureHint('FX 面板'); break;
+        case 'KeyM':
+          player.setVolume(player.volume > 0 ? 0 : 0.8); showGestureHint(player.volume > 0 ? '静音' : '取消静音'); break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [player, showGestureHint]);
+
+  // 鼠标手势（在粒子画布区域滑动控制）
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    // 画布默认 pointer-events:none，需要在容器层监听
+    const target = canvas.parentElement as HTMLElement;
+    if (!target) return;
+    let startX = 0, startY = 0, startTime = 0, tracking = false;
+    const onStart = (e: PointerEvent) => {
+      if (e.button !== 0 && e.pointerType === 'mouse') return;
+      // 忽略来自 UI 控件的指针事件
+      const t = e.target as HTMLElement;
+      if (t.closest('button, input, .control-btn, .play-btn, .sidebar-tab, .queue-item, [data-ui]')) return;
+      startX = e.clientX; startY = e.clientY; startTime = Date.now(); tracking = true;
+    };
+    const onEnd = (e: PointerEvent) => {
+      if (!tracking) return;
+      tracking = false;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      const dt = Date.now() - startTime;
+      const absX = Math.abs(dx), absY = Math.abs(dy);
+      // 点击 = 播放/暂停
+      if (absX < 8 && absY < 8 && dt < 280) {
+        player.togglePlay(); showGestureHint('播放 / 暂停'); return;
+      }
+      // 水平滑动 = 上/下一首（需 >110px 且较快）
+      if (absX > 110 && absX > absY * 1.4 && dt < 700) {
+        if (dx < 0) { player.next(); showGestureHint('下一首 →'); }
+        else { player.prev(); showGestureHint('← 上一首'); }
+        return;
+      }
+      // 垂直滑动 = 音量
+      if (absY > 80 && absY > absX * 1.4 && dt < 700) {
+        const delta = -dy / 300;
+        const v = Math.max(0, Math.min(1, player.volume + delta));
+        player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`);
+        return;
+      }
+    };
+    target.addEventListener('pointerdown', onStart);
+    window.addEventListener('pointerup', onEnd);
+    return () => { target.removeEventListener('pointerdown', onStart); window.removeEventListener('pointerup', onEnd); };
+  }, [player, showGestureHint]);
+
+  // 摄像头手势（沉浸式隔空操控，轻量帧差动作检测）
+  useEffect(() => {
+    if (!gestureEnabled) return;
+    const video = gestureVideoRef.current;
+    if (!video) return;
+    let stream: MediaStream | null = null;
+    let raf = 0;
+    let prevFrame: Uint8ClampedArray | null = null;
+    let motionBuffer: { t: number; x: number }[] = [];
+    let lastTrigger = 0;
+    const canvas = document.createElement('canvas');
+    canvas.width = 64; canvas.height = 48;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    const W = canvas.width, H = canvas.height;
+
+    const tick = () => {
+      if (video.readyState >= 2) {
+        ctx.drawImage(video, 0, 0, W, H);
+        const frame = ctx.getImageData(0, 0, W, H).data;
+        if (prevFrame) {
+          // 计算质心横向位移
+          let sumX = 0, sumMotion = 0;
+          for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+              const i = (y * W + x) * 4;
+              const d = Math.abs(frame[i] - prevFrame[i]) + Math.abs(frame[i + 1] - prevFrame[i + 1]) + Math.abs(frame[i + 2] - prevFrame[i + 2]);
+              if (d > 60) { sumX += x; sumMotion++; }
+            }
+          }
+          if (sumMotion > 40) {
+            const cx = sumX / sumMotion;
+            motionBuffer.push({ t: Date.now(), x: cx });
+            // 只保留最近 500ms
+            const cutoff = Date.now() - 500;
+            motionBuffer = motionBuffer.filter((m) => m.t > cutoff);
+            if (motionBuffer.length >= 4 && Date.now() - lastTrigger > 1200) {
+              const first = motionBuffer[0];
+              const last = motionBuffer[motionBuffer.length - 1];
+              const dx = last.x - first.x;
+              if (Math.abs(dx) > 18) {
+                lastTrigger = Date.now();
+                if (dx > 0) { player.next(); showGestureHint('手势 → 下一首'); }
+                else { player.prev(); showGestureHint('上一首 ← 手势'); }
+                motionBuffer = [];
+              }
+            }
+          }
+        }
+        prevFrame = new Uint8ClampedArray(frame);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+
+    navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, facingMode: 'user' }, audio: false })
+      .then((s) => {
+        stream = s;
+        video.srcObject = s;
+        video.play().catch(() => {});
+        raf = requestAnimationFrame(tick);
+      })
+      .catch((e) => {
+        console.warn('[Gesture] 摄像头不可用:', e.message);
+        setGestureEnabled(false);
+        showGestureHint('摄像头不可用');
+      });
+
+    return () => {
+      cancelAnimationFrame(raf);
+      stream?.getTracks().forEach((t) => t.stop());
+      video.srcObject = null;
+    };
+  }, [gestureEnabled, player, showGestureHint]);
 
   useEffect(() => {
     if (!serverPort) return;
@@ -668,7 +839,12 @@ const App: React.FC = () => {
 
   const importCustomBg = async () => {
     const result = await electron?.selectImageFile?.();
-    if (result?.path) setCustomBg(result.path);
+    if (result?.path) { setCustomBg(result.path); setCustomVideo(null); }
+  };
+
+  const importCustomVideo = async () => {
+    const result = await electron?.selectVideoFile?.();
+    if (result?.url) { setCustomVideo(result.url); setCustomBg(null); }
   };
 
   const toggleDesktopLyrics = async () => {
@@ -713,16 +889,41 @@ const App: React.FC = () => {
 
   return (
     <div className="fixed inset-0 overflow-hidden text-white select-none font-sans" style={{ background: bgColor, transition: 'background 1.5s ease' }}>
-      {/* 自定义背景 */}
+      {/* 自定义背景图片 */}
       {customBg && <div className="absolute inset-0 z-0 bg-cover bg-center" style={{ backgroundImage: `url(${customBg})`, opacity: 0.3 }} />}
+      {/* 自定义背景视频（沉浸式循环静音播放） */}
+      {customVideo && (
+        <video
+          key={customVideo}
+          src={customVideo}
+          autoPlay
+          loop
+          muted
+          playsInline
+          className="absolute inset-0 w-full h-full object-cover z-0"
+          style={{ opacity: 0.35 }}
+        />
+      )}
       {/* 专辑模糊背景 */}
-      {player.currentSong?.cover && !customBg && (
+      {player.currentSong?.cover && !customBg && !customVideo && (
         <div className={`album-bg visible`} style={{ backgroundImage: `url(${player.currentSong.cover})` }} />
       )}
       {/* Three.js 粒子画布 */}
       <canvas ref={canvasRef} className="absolute inset-0 z-10 pointer-events-none" />
       {/* 渐变遮罩 */}
       <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: `linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)` }} />
+
+      {/* 摄像头手势检测（隐藏视频源） */}
+      <video ref={gestureVideoRef} className="hidden" playsInline muted />
+
+      {/* 手势提示气泡 */}
+      {gestureHint && (
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[60] pointer-events-none">
+          <div className="px-5 py-2.5 rounded-full bg-black/55 backdrop-blur-xl border border-[#00f5d4]/25 text-[#00f5d4] text-sm font-semibold tracking-wide" style={{ boxShadow: '0 0 30px rgba(0,245,212,0.25)' }}>
+            {gestureHint}
+          </div>
+        </div>
+      )}
 
       {/* 标题栏 */}
       <div className="absolute top-0 left-0 right-0 h-11 z-50 flex items-center justify-between px-4" style={{ WebkitAppRegion: 'drag' } as any}>
@@ -1021,13 +1222,24 @@ const App: React.FC = () => {
                 </div>
               </div>
 
-              {/* 自定义背景 */}
+              {/* 自定义背景（图片/视频） */}
               <div>
-                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">自定义背景</div>
+                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">沉浸背景</div>
                 <div className="flex gap-2">
-                  <button onClick={importCustomBg} className="flex-1 h-9 rounded-xl border border-white/08 bg-white/[0.02] text-xs text-white/50 hover:bg-white/5 transition-all">选择图片</button>
-                  {customBg && <button onClick={() => setCustomBg(null)} className="h-9 px-3 rounded-xl border border-red-500/20 bg-red-500/05 text-xs text-red-400/70 hover:bg-red-500/10 transition-all">清除</button>}
+                  <button onClick={importCustomBg} className={`flex-1 h-9 rounded-xl border text-xs transition-all ${customBg ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}>图片</button>
+                  <button onClick={importCustomVideo} className={`flex-1 h-9 rounded-xl border text-xs transition-all ${customVideo ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}>视频</button>
+                  {(customBg || customVideo) && <button onClick={() => { setCustomBg(null); setCustomVideo(null); }} className="h-9 px-3 rounded-xl border border-red-500/20 bg-red-500/05 text-xs text-red-400/70 hover:bg-red-500/10 transition-all">清除</button>}
                 </div>
+                {customVideo && <div className="text-[10px] text-white/25 mt-1.5">视频将循环静音播放</div>}
+              </div>
+
+              {/* 沉浸手势控制 */}
+              <div>
+                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">隔空手势</div>
+                <button onClick={() => setGestureEnabled((v) => !v)} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${gestureEnabled ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
+                  {gestureEnabled ? '摄像头已开启' : '开启摄像头'}
+                </button>
+                <div className="text-[10px] text-white/25 mt-1.5 leading-relaxed">挥手左/右 = 上/下一首 · 键盘: 空格=播放 ←/→=快进 Shift+←/→=切歌 ↑/↓=音量 L=红心 F=FX</div>
               </div>
 
               {/* 桌面歌词 */}

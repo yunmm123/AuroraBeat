@@ -380,6 +380,21 @@ app.whenReady().then(async () => {
     return { path: `data:image/${mime};base64,${buffer.toString('base64')}` }
   })
 
+  // 视频选择（自定义背景视频，通过本地服务器流式播放）
+  ipcMain.handle('dialog:selectVideoFile', async () => {
+    if (!mainWindow) return { url: '', path: '' }
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [{ name: 'Videos', extensions: ['mp4', 'webm', 'ogg', 'mov', 'mkv', 'avi'] }],
+    })
+    if (result.canceled || result.filePaths.length === 0) return { url: '', path: '' }
+    const filePath = result.filePaths[0]
+    const streamUrl = serverPort
+      ? `http://127.0.0.1:${serverPort}/api/local-video?path=${encodeURIComponent(filePath)}`
+      : ''
+    return { url: streamUrl, path: filePath }
+  })
+
   // 读取本地文件为Blob URL
   ipcMain.handle('file:readAsBlob', async (_e, filePath: string) => {
     try {

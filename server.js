@@ -486,6 +486,59 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // ========== 本地视频流（自定义背景视频，支持 Range 请求）==========
+    if (pn === '/api/local-video') {
+      const filePath = url.searchParams.get('path');
+      if (!filePath) {
+        res.writeHead(400, { 'Access-Control-Allow-Origin': '*' });
+        res.end('Missing path');
+        return;
+      }
+      try {
+        fs.stat(filePath, (err, stats) => {
+          if (err || !stats.isFile()) {
+            res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
+            res.end('File not found');
+            return;
+          }
+          const fileSize = stats.size;
+          const range = req.headers.range;
+          const ext = path.extname(filePath).slice(1).toLowerCase();
+          const mimeMap = { mp4: 'video/mp4', webm: 'video/webm', ogg: 'video/ogg', mov: 'video/quicktime', mkv: 'video/x-matroska', avi: 'video/x-msvideo' };
+          const ct = mimeMap[ext] || 'application/octet-stream';
+          if (range) {
+            const m = range.match(/bytes=(\d*)-(\d*)/);
+            const start = m && m[1] ? parseInt(m[1]) : 0;
+            const end = m && m[2] ? parseInt(m[2]) : fileSize - 1;
+            const chunkSize = end - start + 1;
+            const stream = fs.createReadStream(filePath, { start, end });
+            res.writeHead(206, {
+              'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': chunkSize,
+              'Content-Type': ct,
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'no-store',
+            });
+            stream.pipe(res);
+          } else {
+            res.writeHead(200, {
+              'Content-Length': fileSize,
+              'Content-Type': ct,
+              'Accept-Ranges': 'bytes',
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'no-store',
+            });
+            fs.createReadStream(filePath).pipe(res);
+          }
+        });
+      } catch (e) {
+        res.writeHead(500, { 'Access-Control-Allow-Origin': '*' });
+        res.end('Stream failed');
+      }
+      return;
+    }
+
     // ========== 健康检查 ==========
     if (pn === '/api/health') {
       sendJSON(res, { ok: true, hasCookie: !!userCookie });
