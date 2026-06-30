@@ -229,14 +229,23 @@ function App() {
 
   // Load new song when currentSong changes
   useEffect(() => {
-    if (!audioElementRef.current || !currentSong?.url) return
+    if (!audioElementRef.current || !currentSong) return
     const audio = audioElementRef.current
-    audio.src = currentSong.url
-    audio.load()
-    if (isPlaying) {
-      audio.play().catch(() => {})
+    
+    if (currentSong.url) {
+      // Only change src if URL is different
+      if (audio.src !== currentSong.url) {
+        audio.src = currentSong.url
+        audio.load()
+      }
+      if (isPlaying) {
+        audio.play().catch(() => {})
+      }
+    } else {
+      // Song has no URL yet (e.g. from queue), pause and wait for URL resolution
+      audio.pause()
     }
-  }, [currentSong?.url])
+  }, [currentSong])
 
   // Handle play/pause
   useEffect(() => {
@@ -307,8 +316,8 @@ function App() {
       {showKugou && (
         <KugouMusicPanel
           onClose={toggleKugou}
-          onPlaySong={(song) => {
-            usePlayerStore.getState().playSong(song)
+          onPlaySong={(song, queue) => {
+            usePlayerStore.getState().playSong(song, queue)
           }}
           userInfo={kugouUserInfo}
           onLoginClick={() => setShowKugouLogin(true)}

@@ -162,7 +162,49 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
         quality: song.quality,
         albumId: song.albumId,
       }
-        playSong(fullSong)
+        // Build queue from current context
+        let queue: Song[] = []
+        if (selectedPlaylistId && playlistTracks.length > 0) {
+          queue = playlistTracks.map(s => ({
+            id: s.id,
+            title: s.title,
+            artist: s.artist,
+            album: s.album,
+            cover: s.cover || '',
+            duration: s.duration || 0,
+            url: '',
+            source: 'netease' as const,
+            quality: s.quality,
+            albumId: s.albumId,
+          }))
+        } else if (searchResults.length > 0) {
+          queue = searchResults.map(s => ({
+            id: s.id,
+            title: s.title,
+            artist: s.artist,
+            album: s.album,
+            cover: s.cover || '',
+            duration: s.duration || 0,
+            url: '',
+            source: 'netease' as const,
+            quality: s.quality,
+            albumId: s.albumId,
+          }))
+        } else if (recommendSongs.length > 0) {
+          queue = recommendSongs.map(s => ({
+            id: s.id,
+            title: s.title,
+            artist: s.artist,
+            album: s.album,
+            cover: s.cover || '',
+            duration: s.duration || 0,
+            url: '',
+            source: 'netease' as const,
+            quality: s.quality,
+            albumId: s.albumId,
+          }))
+        }
+        playSong(fullSong, queue.length > 0 ? queue : undefined)
       } else {
         setPlayErrorMsg('无法获取播放地址，可能需要登录')
         setTimeout(() => setPlayErrorMsg(''), 3000)
@@ -286,21 +328,25 @@ export default function NeteaseMusicPanel({ onClose }: { onClose: () => void }) 
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         className="fixed inset-0 z-50 flex items-center justify-center"
-        style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(20px)' }}
+        style={{ background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(15px)' }}
         onClick={onClose}
       >
         <motion.div
           initial={{ scale: 0.95, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.95, opacity: 0 }}
+          transition={{ duration: 0.3, ease: 'easeOut' }}
           onClick={(e) => e.stopPropagation()}
-          className="w-[900px] h-[650px] rounded-2xl flex flex-col overflow-hidden"
+          className="w-[900px] h-[650px] rounded-2xl flex flex-col overflow-hidden relative"
           style={{
-            background: 'rgba(15,15,25,0.95)',
-            border: '1px solid rgba(255,255,255,0.1)',
-            boxShadow: '0 25px 80px rgba(0,0,0,0.6)',
+            background: 'linear-gradient(135deg, rgba(20,20,40,0.95), rgba(15,15,30,0.98))',
+            border: '1px solid rgba(255,255,255,0.12)',
+            boxShadow: '0 30px 80px rgba(0,0,0,0.6), 0 0 120px rgba(236,65,65,0.08), inset 0 1px 0 rgba(255,255,255,0.05)',
           }}
         >
+          {/* Ambient glow decorations */}
+          <div className="absolute -top-20 -left-20 w-60 h-60 rounded-full blur-3xl opacity-20 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(236,65,65,0.5), transparent)' }} />
+          <div className="absolute -bottom-20 -right-20 w-60 h-60 rounded-full blur-3xl opacity-15 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(236,65,65,0.4), transparent)' }} />
           {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
             <div className="flex items-center gap-4">

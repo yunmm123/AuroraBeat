@@ -15,7 +15,7 @@ import type { Song } from '@/types'
 
 interface KugouMusicPanelProps {
   onClose: () => void
-  onPlaySong: (song: Song) => void
+  onPlaySong: (song: Song, queue?: Song[]) => void
   userInfo: { uid: string; token: string; nickname: string } | null
   onLoginClick: () => void
   onLogout: () => void
@@ -168,6 +168,10 @@ export default function KugouMusicPanel({
     loadDiscoverData()
   }, [])
 
+  async function handleRefreshDiscover() {
+    await loadDiscoverData()
+  }
+
   useEffect(() => {
     if (activeTab === 'user' && userInfo) {
       loadUserPlaylists()
@@ -205,9 +209,33 @@ export default function KugouMusicPanel({
           anySuccess = true
         }
       }
-      // Rank list — structure: data.info[] with rankid, rankname, intro
+      // Rank list — try multiple response shapes
       if (rankRes.status === 'fulfilled') {
-        const ranks = rankRes.value?.data?.info || rankRes.value?.data?.list || []
+        let ranks = rankRes.value?.data?.info || rankRes.value?.data?.list || 
+          rankRes.value?.data?.data?.info || rankRes.value?.data?.data?.list ||
+          rankRes.value?.info || rankRes.value?.list || []
+        if (ranks.length === 0 && Array.isArray(rankRes.value?.data)) {
+          ranks = rankRes.value.data
+        }
+        if (ranks.length === 0 && rankRes.value?.data) {
+          // Try to find any array in the response
+          const d = rankRes.value.data
+          for (const key of Object.keys(d)) {
+            const val = d[key]
+            if (Array.isArray(val) && val.length > 0 && val[0]?.rankid) {
+              ranks = val
+              break
+            }
+            if (val && typeof val === 'object' && !Array.isArray(val)) {
+              for (const k2 of Object.keys(val)) {
+                if (Array.isArray(val[k2]) && val[k2].length > 0 && val[k2][0]?.rankid) {
+                  ranks = val[k2]
+                  break
+                }
+              }
+            }
+          }
+        }
         if (ranks.length > 0) {
           setRankList(ranks.slice(0, 12))
           anySuccess = true
@@ -252,11 +280,28 @@ export default function KugouMusicPanel({
     setSearchResults([])
     try {
       const res = await kugouSearch(searchQuery.trim())
-      const rawList = extractSongList(res)
-      if (rawList.length === 0 && (res?.error_code || res?.errcode)) {
-        setSearchError(true)
+      let rawList = extractSongList(res)
+      if (rawList.length === 0) {
+        // If primary search gave no results, try complex search
+        const complexRes = await window.electronAPI?.kugou?.invoke('kg:searchComplex', searchQuery.trim())
+        if (complexRes) {
+          rawList = extractSongList(complexRes)
+          // For complex search, songs are often in data.lists[].info
+          if (rawList.length === 0 && complexRes?.data?.lists && Array.isArray(complexRes.data.lists)) {
+            rawList = []
+            for (const list of complexRes.data.lists) {
+              if (Array.isArray(list.info)) {
+                rawList.push(...list.info)
+              }
+            }
+          }
+        }
       }
       setSearchResults(rawList.map(normalizeSong))
+      // Only show error if we really got zero results after both attempts
+      if (rawList.length === 0) {
+        setSearchError(true)
+      }
     } catch {
       setSearchError(true)
     }
@@ -270,11 +315,25 @@ export default function KugouMusicPanel({
     setSearchResults([])
     try {
       const res = await kugouSearch(keyword)
-      const rawList = extractSongList(res)
-      if (rawList.length === 0 && (res?.error_code || res?.errcode)) {
-        setSearchError(true)
+      let rawList = extractSongList(res)
+      if (rawList.length === 0) {
+        const complexRes = await window.electronAPI?.kugou?.invoke('kg:searchComplex', keyword)
+        if (complexRes) {
+          rawList = extractSongList(complexRes)
+          if (rawList.length === 0 && complexRes?.data?.lists && Array.isArray(complexRes.data.lists)) {
+            rawList = []
+            for (const list of complexRes.data.lists) {
+              if (Array.isArray(list.info)) {
+                rawList.push(...list.info)
+              }
+            }
+          }
+        }
       }
       setSearchResults(rawList.map(normalizeSong))
+      if (rawList.length === 0) {
+        setSearchError(true)
+      }
     } catch {
       setSearchError(true)
     }
@@ -318,8 +377,28 @@ export default function KugouMusicPanel({
           url: playUrl,
           cover: '',
           source: 'kugou' as const,
+          hash: song.Hash,
+          albumId: song.AlbumID,
+          albumAudioId: song.AlbumAudioID,
         }
-        onPlaySong(kugouSong)
+        
+        // 根据当前上下文构建播放队列
+        let queue: Song[] = []
+        if (selectedPlaylistId) {
+          queue = playlistTracks.map(s => normalizeToSong(s))
+        } else if (selectedRankId) {
+          queue = rankSongs.map(s => normalizeToSong(s))
+        } else if (searchResults.length > 0) {
+          queue = searchResults.map(s => normalizeToSong(s))
+        } else if (topSongs.length > 0 && topSongs.some(s => s.Hash === song.Hash)) {
+          // Playing from "新歌速递" section
+          queue = topSongs.map(s => normalizeToSong(s))
+        } else if (recommendSongs.length > 0 && recommendSongs.some(s => s.Hash === song.Hash)) {
+          // Playing from "每日推荐" section
+          queue = recommendSongs.map(s => normalizeToSong(s))
+        }
+        
+        onPlaySong(kugouSong, queue.length > 0 ? queue : undefined)
         onClose()
       } else {
         const isPay = urlRes?.priv_status === 0 || 
@@ -349,7 +428,26 @@ export default function KugouMusicPanel({
     setLoading(true)
     try {
       const res = await kugouRankAudio(n.id, 1)
-      const rawList = extractSongList(res)
+      let rawList = extractSongList(res)
+      // Try additional extraction for rank format
+      if (rawList.length === 0 && res?.data && Array.isArray(res.data.audios)) {
+        rawList = res.data.audios
+      }
+      if (rawList.length === 0 && res?.audios && Array.isArray(res.audios)) {
+        rawList = res.audios
+      }
+      if (rawList.length === 0 && res?.data?.rank_songs && Array.isArray(res.data.rank_songs)) {
+        rawList = res.data.rank_songs
+      }
+      // Extract from info array when in lists format
+      if (rawList.length === 0 && res?.data?.lists && Array.isArray(res.data.lists)) {
+        rawList = []
+        for (const list of res.data.lists) {
+          if (Array.isArray(list.info)) {
+            rawList.push(...list.info)
+          }
+        }
+      }
       setRankSongs(rawList.map(normalizeSong))
       if (rawList.length < 30) setRankHasMore(false)
     } catch {
@@ -364,7 +462,25 @@ export default function KugouMusicPanel({
     try {
       const nextPage = rankPage + 1
       const res = await kugouRankAudio(selectedRankId, nextPage)
-      const rawList = extractSongList(res)
+      let rawList = extractSongList(res)
+      // Same additional extraction as above
+      if (rawList.length === 0 && res?.data && Array.isArray(res.data.audios)) {
+        rawList = res.data.audios
+      }
+      if (rawList.length === 0 && res?.audios && Array.isArray(res.audios)) {
+        rawList = res.audios
+      }
+      if (rawList.length === 0 && res?.data?.rank_songs && Array.isArray(res.data.rank_songs)) {
+        rawList = res.data.rank_songs
+      }
+      if (rawList.length === 0 && res?.data?.lists && Array.isArray(res.data.lists)) {
+        rawList = []
+        for (const list of res.data.lists) {
+          if (Array.isArray(list.info)) {
+            rawList.push(...list.info)
+          }
+        }
+      }
       if (rawList.length > 0) {
         setRankSongs(prev => [...prev, ...rawList.map(normalizeSong)])
         setRankPage(nextPage)
@@ -434,6 +550,22 @@ export default function KugouMusicPanel({
     setLoadingMore(false)
   }
 
+  function normalizeToSong(song: KugouSongItem): Song {
+    return {
+      id: song.Hash,
+      title: song.SongName,
+      artist: song.SingerName,
+      album: song.AlbumName || '酷狗音乐',
+      duration: song.Duration || 0,
+      url: '', // URL will be resolved when played
+      cover: '',
+      source: 'kugou' as const,
+      hash: song.Hash,
+      albumId: song.AlbumID,
+      albumAudioId: song.AlbumAudioID,
+    }
+  }
+
   function formatDuration(seconds: number): string {
     if (!seconds) return '--:--'
     const m = Math.floor(seconds / 60)
@@ -448,18 +580,32 @@ export default function KugouMusicPanel({
   ]
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.85)' }}>
-      <div className="w-[90vw] max-w-[1200px] h-[80vh] rounded-2xl overflow-hidden flex flex-col" style={{ background: '#0d0d1a', border: '1px solid rgba(255,255,255,0.15)', boxShadow: '0 25px 60px rgba(0,0,0,0.8)' }}>
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(12px)' }}>
+      <motion.div
+        initial={{ scale: 0.92, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.92, opacity: 0 }}
+        transition={{ duration: 0.3, ease: 'easeOut' }}
+        className="w-[90vw] max-w-[1200px] h-[80vh] rounded-2xl overflow-hidden flex flex-col relative"
+        style={{
+          background: 'linear-gradient(135deg, rgba(20,20,40,0.95), rgba(15,15,30,0.98))',
+          border: '1px solid rgba(255,255,255,0.12)',
+          boxShadow: '0 30px 80px rgba(0,0,0,0.7), 0 0 120px rgba(139,92,246,0.08), inset 0 1px 0 rgba(255,255,255,0.05)',
+        }}
+      >
+        {/* Ambient glow decorations */}
+        <div className="absolute -top-20 -left-20 w-60 h-60 rounded-full blur-3xl opacity-20 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(139,92,246,0.6), transparent)' }} />
+        <div className="absolute -bottom-20 -right-20 w-60 h-60 rounded-full blur-3xl opacity-15 pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(236,72,153,0.5), transparent)' }} />
         
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 flex-shrink-0" style={{ background: 'linear-gradient(90deg, rgba(59,130,246,0.15), rgba(147,51,234,0.15))', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+        <div className="flex items-center justify-between px-6 py-4 flex-shrink-0 relative z-10" style={{ background: 'linear-gradient(180deg, rgba(139,92,246,0.12), rgba(15,15,30,0))', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #3b82f6, #9333ea)' }}>
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center shadow-lg" style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1)', boxShadow: '0 4px 20px rgba(139,92,246,0.4)' }}>
               <Music size={20} className="text-white" />
             </div>
             <div>
-              <h2 className="text-white font-bold text-lg">酷狗音乐</h2>
-              <p className="text-white/50 text-xs">海量音乐，随心畅听</p>
+              <h2 className="text-white font-bold text-lg tracking-tight">酷狗音乐</h2>
+              <p className="text-white/40 text-xs">海量音乐，随心畅听</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -484,39 +630,46 @@ export default function KugouMusicPanel({
         </div>
 
         {/* Search Bar */}
-        <div className="px-6 py-3 flex-shrink-0">
+        <div className="px-6 py-3 flex-shrink-0 relative z-10">
           <div className="flex gap-2">
             <div className="flex-1 relative">
-              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/40" />
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-white/30" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                 placeholder="搜索歌曲、歌手、专辑..."
-                className="w-full pl-9 pr-4 py-2.5 rounded-xl text-white text-sm placeholder:text-white/40 focus:outline-none transition-colors"
-                style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}
+                className="w-full pl-9 pr-4 py-2.5 rounded-xl text-white text-sm placeholder:text-white/30 focus:outline-none transition-all duration-300"
+                style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.2)' }}
               />
             </div>
-            <button onClick={handleSearch} disabled={loading} className="px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-colors disabled:opacity-50" style={{ background: 'linear-gradient(90deg, #9333ea, #a855f7)' }}>
+            <button onClick={handleSearch} disabled={loading} className="px-5 py-2.5 rounded-xl text-white text-sm font-medium transition-all duration-200 disabled:opacity-50 hover:shadow-lg hover:scale-105 active:scale-95" style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1)', boxShadow: '0 2px 10px rgba(139,92,246,0.3)' }}>
               {loading ? <Loader2 size={16} className="animate-spin" /> : '搜索'}
             </button>
           </div>
         </div>
 
         {/* Tabs */}
-        <div className="flex px-6 gap-1 flex-shrink-0" style={{ borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+        <div className="flex px-6 gap-1 flex-shrink-0 relative z-10" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => { setActiveTab(tab.id); setSearchResults([]) }}
-              className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors ${
-                activeTab === tab.id ? 'text-purple-400' : 'text-white/50 hover:text-white/80'
+              className={`flex items-center gap-1.5 px-5 py-3 text-sm font-medium transition-all duration-200 relative ${
+                activeTab === tab.id ? 'text-purple-300' : 'text-white/40 hover:text-white/70'
               }`}
-              style={activeTab === tab.id ? { borderBottom: '2px solid #a855f7' } : {}}
             >
-              <tab.icon size={14} />
+              <tab.icon size={15} />
               {tab.label}
+              {activeTab === tab.id && (
+                <motion.div
+                  layoutId="activeTab"
+                  className="absolute bottom-0 left-0 right-0 h-0.5 rounded-full"
+                  style={{ background: 'linear-gradient(90deg, #8b5cf6, #6366f1)' }}
+                  transition={{ duration: 0.2 }}
+                />
+              )}
             </button>
           ))}
         </div>
@@ -600,6 +753,17 @@ export default function KugouMusicPanel({
             {/* Discover Tab */}
             {activeTab === 'discover' && searchResults.length === 0 && !apiError && !loading && (
               <motion.div key="discover" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="space-y-6">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-white/80 font-medium flex items-center gap-2">
+                    <Radio size={16} className="text-purple-400" />发现音乐
+                  </h3>
+                  <button
+                    onClick={handleRefreshDiscover}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-white/60 text-xs hover:text-white hover:bg-white/10 transition-all"
+                  >
+                    <RefreshCw size={14} />刷新
+                  </button>
+                </div>
                 {hotKeywords.length > 0 && (
                   <div>
                     <h3 className="text-white/80 font-medium mb-3 flex items-center gap-2"><TrendingUp size={16} className="text-orange-400" />热搜榜</h3>
@@ -810,7 +974,7 @@ export default function KugouMusicPanel({
             )}
           </AnimatePresence>
         </div>
-      </div>
+      </motion.div>
     </div>
   )
 }

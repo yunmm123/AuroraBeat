@@ -182,6 +182,65 @@ function isPureMusic(trackName: string, artistName: string): boolean {
   return keywords.some(k => combined.includes(k))
 }
 
+// Resolve the actual play URL for cloud songs (kugou/netease) when they
+// are navigated to via prev/next. Only cloud songs in the queue don't have URL yet.
+async function resolveSongUrl(song: Song, queueIndex: number) {
+  // For kugou songs: use hash / albumId / albumAudioId to get URL
+  if (song.source === 'kugou') {
+    const hash = (song as any).hash
+    const albumId = (song as any).albumId
+    const albumAudioId = (song as any).albumAudioId
+    if (hash) {
+      try {
+        const urlRes = await window.electronAPI?.kugou?.invoke(
+          'kg:songUrl',
+          hash,
+          albumId,
+          albumAudioId
+        )
+        let playUrl = ''
+        if (urlRes?.play_url) {
+          playUrl = urlRes.play_url
+        } else if (urlRes?.data?.play_url) {
+          playUrl = urlRes.data.play_url
+        } else if (Array.isArray(urlRes?.url) && urlRes.url.length > 0) {
+          playUrl = urlRes.url[0]
+        }
+        if (playUrl) {
+          const state = usePlayerStore.getState()
+          const updatedQueue = [...state.queue]
+          updatedQueue[queueIndex] = { ...updatedQueue[queueIndex], url: playUrl }
+          const updatedSong = { ...song, url: playUrl }
+          usePlayerStore.setState({
+            queue: updatedQueue,
+            currentSong: state.currentSong?.id === song.id ? updatedSong : state.currentSong
+          })
+        }
+      } catch (e) {
+        console.error('Failed to resolve kugou song URL:', e)
+      }
+    }
+  }
+  // For netease songs: resolve the URL
+  if (song.source === 'netease') {
+    try {
+      const urlRes = await window.electronAPI?.netease?.songUrl(song.id, song.quality || 'standard')
+      if (urlRes?.ok && urlRes.url) {
+        const state = usePlayerStore.getState()
+        const updatedQueue = [...state.queue]
+        updatedQueue[queueIndex] = { ...updatedQueue[queueIndex], url: urlRes.url }
+        const updatedSong = { ...song, url: urlRes.url }
+        usePlayerStore.setState({
+          queue: updatedQueue,
+          currentSong: state.currentSong?.id === song.id ? updatedSong : state.currentSong
+        })
+      }
+    } catch (e) {
+      console.error('Failed to resolve netease song URL:', e)
+    }
+  }
+}
+
 async function loadLyricsForSong(trackName: string, artistName: string, duration?: number, hash?: string) {
   if (isPureMusic(trackName, artistName)) {
     usePlayerStore.setState({ 
@@ -227,7 +286,23 @@ async function loadLyricsForSong(trackName: string, artistName: string, duration
     // kugou failed too
   }
   
-  usePlayerStore.setState({ lyricsLoading: false })
+  // Try netease lyric if we have netease song id
+  if ((window as any).currentNeteaseSongId) {
+    try {
+      const neteaseLyric = await window.electronAPI?.netease?.lyric((window as any).currentNeteaseSongId)
+      if (neteaseLyric?.ok && neteaseLyric.lrc) {
+        const lines = parseLrc(neteaseLyric.lrc)
+        if (lines.length > 0) {
+          usePlayerStore.setState({ lyrics: lines, lyricsLoading: false })
+          return
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  
+  usePlayerStore.setState({ lyrics: [], lyricsLoading: false })
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => ({
@@ -308,17 +383,36 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     if (playMode === 'shuffle') {
       nextIndex = Math.floor(Math.random() * queue.length)
     } else if (playMode === 'single') {
-      nextIndex = queueIndex
+      // single mode: replay same song, don't change index
+      set({ currentTime: 0 })
+      return
     } else {
       nextIndex = (queueIndex + 1) % queue.length
     }
-    set({ queueIndex: nextIndex, currentSong: queue[nextIndex], currentTime: 0 })
+    const nextSong = queue[nextIndex]
+    set({ queueIndex: nextIndex, currentSong: nextSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
+    // Resolve URL for kugou/netease songs that don't have URL yet
+    if (!nextSong.url && (nextSong.source === 'kugou' || nextSong.source === 'netease')) {
+      resolveSongUrl(nextSong, nextIndex)
+    }
+    const trackName = nextSong.title.replace(/\.[^.]+$/, '')
+    const artistName = nextSong.artist !== '未知艺术家' ? nextSong.artist : ''
+    const songHash = (nextSong as any).hash || ''
+    loadLyricsForSong(trackName, artistName, nextSong.duration, songHash)
   },
   prevSong: () => {
     const { queue, queueIndex } = get()
     if (queue.length === 0) return
     const prevIndex = queueIndex === 0 ? queue.length - 1 : queueIndex - 1
-    set({ queueIndex: prevIndex, currentSong: queue[prevIndex], currentTime: 0 })
+    const prevSong = queue[prevIndex]
+    set({ queueIndex: prevIndex, currentSong: prevSong, isPlaying: true, currentTime: 0, lyrics: [], lyricsLoading: true })
+    if (!prevSong.url && (prevSong.source === 'kugou' || prevSong.source === 'netease')) {
+      resolveSongUrl(prevSong, prevIndex)
+    }
+    const trackName = prevSong.title.replace(/\.[^.]+$/, '')
+    const artistName = prevSong.artist !== '未知艺术家' ? prevSong.artist : ''
+    const songHash = (prevSong as any).hash || ''
+    loadLyricsForSong(trackName, artistName, prevSong.duration, songHash)
   },
   setQueue: (songs, startIndex = 0) => set({ 
     queue: songs, 
@@ -428,6 +522,10 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       newQueue = queue
       newIndex = Math.max(0, queue.findIndex(s => s.id === song.id))
       if (newIndex === -1) newIndex = 0
+      // Update the current song's URL in the queue if it has one
+      if (song.url && newQueue[newIndex] && !newQueue[newIndex].url) {
+        newQueue[newIndex] = { ...newQueue[newIndex], url: song.url }
+      }
     } else {
       newQueue = [song]
       newIndex = 0
@@ -446,6 +544,13 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     const trackName = song.title.replace(/\.[^.]+$/, '')
     const artistName = song.artist !== '未知艺术家' ? song.artist : ''
     const songHash = (song as any).hash || ''
+    
+    // Store netease song id for lyric fallback
+    if (song.source === 'netease') {
+      (window as any).currentNeteaseSongId = song.id
+    } else {
+      (window as any).currentNeteaseSongId = undefined
+    }
     
     loadLyricsForSong(trackName, artistName, song.duration, songHash)
   },
