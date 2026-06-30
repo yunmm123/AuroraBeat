@@ -97,10 +97,12 @@ function extractSongList(body: any): any[] {
 function normalizeSong(raw: any): KugouSongItem {
   const audioInfo = raw.audio_info || raw.audioInfo || {}
   
-  let hash = raw.Hash || raw.hash || raw.audio_id || raw.id || ''
-  if (!hash && audioInfo.hash_128) hash = audioInfo.hash_128
-  if (!hash && audioInfo.hash) hash = audioInfo.hash
-  if (!hash && raw.hash_128) hash = raw.hash_128
+  let hash = ''
+  if (audioInfo.hash_128) hash = audioInfo.hash_128
+  else if (audioInfo.hash) hash = audioInfo.hash
+  else if (raw.Hash) hash = raw.Hash
+  else if (raw.hash) hash = raw.hash
+  else if (raw.hash_128) hash = raw.hash_128
   
   const songName = raw.SongName || raw.songname || raw.song_name || raw.name || 
     raw.filename || raw.title || audioInfo.songname || ''
@@ -275,6 +277,11 @@ export default function KugouMusicPanel({
   }
 
   async function handlePlaySong(song: KugouSongItem) {
+    if (!song.Hash) {
+      setPlayErrorMsg('歌曲信息不完整，无法播放')
+      setTimeout(() => setPlayErrorMsg(''), 3000)
+      return
+    }
     setPlayingHash(song.Hash)
     setPlayErrorMsg('')
     try {
@@ -304,13 +311,16 @@ export default function KugouMusicPanel({
         onPlaySong(kugouSong)
         onClose()
       } else {
-        console.warn('No play URL found for song:', song.SongName, urlRes)
-        setPlayErrorMsg('无法获取播放地址，请稍后重试')
+        const isPay = urlRes?.priv_status === 0 || 
+          (Array.isArray(urlRes?.fail_process) && urlRes.fail_process.length > 0) ||
+          urlRes?.errcode === 20028
+        console.warn('No play URL found for song:', song.SongName, isPay ? '(付费/VIP)' : '', urlRes)
+        setPlayErrorMsg(isPay ? '该歌曲为付费歌曲，暂不支持播放' : '无法获取播放地址，请稍后重试')
         setTimeout(() => setPlayErrorMsg(''), 3000)
       }
     } catch (e) {
       console.error('Failed to get song URL:', e)
-      setPlayErrorMsg('播放失败，请稍后重试')
+      setPlayErrorMsg('播放失败，请检查网络连接')
       setTimeout(() => setPlayErrorMsg(''), 3000)
     } finally {
       setPlayingHash('')

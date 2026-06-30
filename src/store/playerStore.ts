@@ -112,6 +112,60 @@ const mockSong: Song = {
   quality: 'lossless',
 }
 
+function calcSimilarity(a: string, b: string): number {
+  if (!a || !b) return 0
+  const sa = a.toLowerCase().trim()
+  const sb = b.toLowerCase().trim()
+  if (sa === sb) return 1
+  let matches = 0
+  for (const ch of sa) {
+    if (sb.includes(ch)) matches++
+  }
+  return matches / Math.max(sa.length, sb.length)
+}
+
+function pickBestLyricCandidate(
+  candidates: any[],
+  trackName: string,
+  artistName: string,
+  duration?: number
+): any | null {
+  if (!candidates || candidates.length === 0) return null
+  
+  const targetName = trackName.toLowerCase().trim()
+  const targetArtist = artistName.toLowerCase().trim()
+  
+  let best = candidates[0]
+  let bestScore = -1
+  
+  for (const c of candidates) {
+    const cName = (c.song || c.songname || c.name || '').toLowerCase().trim()
+    const cArtist = (c.singer || c.artist || c.author_name || '').toLowerCase().trim()
+    const cDuration = c.duration || c.timelength || 0
+    
+    let score = 0
+    score += calcSimilarity(targetName, cName) * 0.5
+    if (targetArtist && cArtist) {
+      score += calcSimilarity(targetArtist, cArtist) * 0.3
+    }
+    if (duration && cDuration) {
+      const durDiff = Math.abs(duration - Math.floor(cDuration / 1000))
+      if (durDiff <= 5) score += 0.2
+      else if (durDiff <= 10) score += 0.1
+    }
+    
+    if (targetName && cName.includes(targetName)) score += 0.1
+    if (targetArtist && cArtist.includes(targetArtist)) score += 0.1
+    
+    if (score > bestScore) {
+      bestScore = score
+      best = c
+    }
+  }
+  
+  return best
+}
+
 async function loadLyricsForSong(trackName: string, artistName: string, duration?: number) {
   const keyword = artistName ? `${trackName} ${artistName}` : trackName
   
@@ -132,7 +186,7 @@ async function loadLyricsForSong(trackName: string, artistName: string, duration
     const searchRes = await kugouSearchLyric(keyword, duration)
     const candidates = searchRes?.candidates || searchRes?.data?.candidates || []
     if (candidates.length > 0) {
-      const best = candidates[0]
+      const best = pickBestLyricCandidate(candidates, trackName, artistName, duration)
       if (best?.id && best?.accesskey) {
         const lyricRes = await kugouGetLyricById(String(best.id), best.accesskey)
         const lrcContent = lyricRes?.decodeContent || lyricRes?.data?.decodeContent || ''
