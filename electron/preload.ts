@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 本地文件
   selectLocalFiles: () => ipcRenderer.invoke('dialog:selectLocalFiles'),
+  selectImageFile: () => ipcRenderer.invoke('dialog:selectImageFile'),
   readLocalFile: (filePath: string) => ipcRenderer.invoke('file:readAsBlob', filePath),
   searchLyrics: (title: string, artist: string) => ipcRenderer.invoke('lyrics:search', title, artist),
 
@@ -33,5 +34,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = () => cb()
     ipcRenderer.on('playback:prev', listener)
     return () => ipcRenderer.removeListener('playback:prev', listener)
+  },
+
+  // 桌面歌词
+  openDesktopLyrics: () => ipcRenderer.invoke('desktop-lyrics:open'),
+  closeDesktopLyrics: () => ipcRenderer.invoke('desktop-lyrics:close'),
+  toggleDesktopLyrics: () => ipcRenderer.invoke('desktop-lyrics:toggle'),
+  sendLyricsToDesktop: (data: any) => ipcRenderer.send('desktop-lyrics:update', data),
+  onDesktopLyricsState: (cb: (state: boolean) => void) => {
+    const listener = (_e: any, state: boolean) => cb(state);
+    ipcRenderer.on('desktop-lyrics:state', listener);
+    return () => ipcRenderer.removeListener('desktop-lyrics:state', listener);
   },
 })

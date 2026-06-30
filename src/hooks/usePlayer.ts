@@ -85,6 +85,10 @@ export function usePlayer() {
     playerCore.setServerPort(port);
   }, []);
 
+  const isLiked = useCallback((songId: string) => playerCore.isLiked(songId), []);
+  const toggleLike = useCallback((song: Song) => playerCore.toggleLike(song), []);
+  const fetchLikedList = useCallback(() => playerCore.fetchLikedList(), []);
+
   return {
     ...state,
     playSong,
@@ -106,5 +110,8 @@ export function usePlayer() {
     getAnalyser,
     setAnalyserReadyHandler,
     setServerPort,
+    isLiked,
+    toggleLike,
+    fetchLikedList,
   };
 }

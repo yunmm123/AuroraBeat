@@ -5,12 +5,38 @@ import * as THREE from 'three';
 import { gsap } from 'gsap';
 
 type Panel = 'home' | 'search' | 'library' | 'playlist';
+type Preset = 'silk' | 'tunnel' | 'orbit' | 'void' | 'vinyl' | 'wallpulse';
+type Mood = 'calm' | 'energetic' | 'melancholy' | 'romantic' | 'dark';
+
+const PRESETS: { id: Preset; name: string; icon: string }[] = [
+  { id: 'silk', name: '丝绸', icon: '≈' },
+  { id: 'tunnel', name: '隧道', icon: '◎' },
+  { id: 'orbit', name: '星球', icon: '◉' },
+  { id: 'void', name: '虚空', icon: '◇' },
+  { id: 'vinyl', name: '黑胶', icon: '⬤' },
+  { id: 'wallpulse', name: '极光', icon: '✦' },
+];
+
+const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string }> = {
+  calm: { primary: '#00f5d4', secondary: '#2442ff', bg: '#0a1a1a' },
+  energetic: { primary: '#ff6b35', secondary: '#ffd23f', bg: '#1a0a0a' },
+  melancholy: { primary: '#4a90d9', secondary: '#7b68ee', bg: '#0a0a1a' },
+  romantic: { primary: '#ff5e8a', secondary: '#ff8fab', bg: '#1a0a12' },
+  dark: { primary: '#9d4edd', secondary: '#5a189a', bg: '#08090B' },
+};
 
 // ====================================================================
-// Three.js 封面粒子系统 — 对标 Mineradio ShaderMaterial 粒子
-// 粒子网格映射专辑封面，随音频频谱波动
+// Three.js 视觉引擎 — 6预设 + 3D黑胶 + 音波环 + AI情绪
 // ====================================================================
-function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: any) {
+function useVisualEngine(
+  canvasRef: React.RefObject<HTMLCanvasElement>,
+  player: any,
+  preset: Preset,
+  intensity: number,
+  showVinyl: boolean,
+) {
+  const engineRef = useRef<any>(null);
+
   useEffect(() => {
     if (!canvasRef.current) return;
     const scene = new THREE.Scene();
@@ -36,12 +62,10 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
       return tex;
     };
     const dotTexture = makeDotTexture();
-
-    // 封面纹理
     const coverTex = new THREE.Texture();
     coverTex.minFilter = THREE.LinearFilter; coverTex.magFilter = THREE.LinearFilter;
 
-    // 粒子几何 — grid×grid 平面网格映射封面UV
+    // 粒子几何
     const GRID = 128;
     const PCOUNT = GRID * GRID;
     const PLANE_SIZE = 4.8;
@@ -51,9 +75,8 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
     for (let i = 0; i < PCOUNT; i++) {
       const gx = i % GRID, gy = Math.floor(i / GRID);
       const u = (gx + 0.5) / GRID, v = (gy + 0.5) / GRID;
-      const px = gx / (GRID - 1), py = gy / (GRID - 1);
-      positions[i * 3] = (px - 0.5) * PLANE_SIZE;
-      positions[i * 3 + 1] = (py - 0.5) * PLANE_SIZE;
+      positions[i * 3] = (gx / (GRID - 1) - 0.5) * PLANE_SIZE;
+      positions[i * 3 + 1] = (gy / (GRID - 1) - 0.5) * PLANE_SIZE;
       positions[i * 3 + 2] = 0;
       uvs[i * 2] = u; uvs[i * 2 + 1] = v;
       rand[i] = Math.random();
@@ -63,7 +86,6 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
     geo.setAttribute('aUv', new THREE.BufferAttribute(uvs, 2));
     geo.setAttribute('aRand', new THREE.BufferAttribute(rand, 1));
 
-    // Uniforms
     const uniforms = {
       uTime: { value: 0 },
       uBass: { value: 0 },
@@ -76,13 +98,13 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
       uDotTex: { value: dotTexture },
       uAlpha: { value: 0 },
       uPixel: { value: renderer.getPixelRatio() },
+      uIntensity: { value: intensity },
+      uPreset: { value: 0 },
       uTintColor: { value: new THREE.Color('#9db8cf') },
-      uTintStrength: { value: 0 },
     };
 
-    // 顶点 Shader — 粒子随音频波动 + 封面映射
     const vertexShader = `
-      uniform float uTime, uBass, uMid, uTreble, uBeat, uEnergy, uPixel, uAlpha;
+      uniform float uTime, uBass, uMid, uTreble, uBeat, uEnergy, uPixel, uAlpha, uIntensity, uPreset;
       uniform sampler2D uCoverTex;
       uniform float uHasCover;
       attribute vec2 aUv;
@@ -90,6 +112,9 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
       varying float vBright;
       varying float vEdgeBoost;
       varying vec3 vColor;
+      varying float vAlpha;
+
+      #define PI 3.14159265
 
       void main() {
         vec3 pos = position;
@@ -97,63 +122,116 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
         float r1 = aRand;
         float r2 = fract(r1 * 7.13);
         float r3 = fract(r2 * 11.91);
+        vAlpha = 1.0;
+        vEdgeBoost = 0.0;
 
-        // 封面颜色采样
         vec3 coverCol = texture2D(uCoverTex, aUv).rgb;
         vColor = mix(vec3(0.6, 0.75, 0.85), coverCol, uHasCover);
+        int preset = int(uPreset + 0.5);
 
-        // Z 位移: 低频驱动大波 + 中频细节 + 高频闪烁
-        float bassDisp = sin(pos.x * 1.8 + t * 0.6) * cos(pos.y * 1.6 + t * 0.4) * uBass * 1.2;
-        float midDisp = sin(pos.x * 4.0 + t * 1.2) * cos(pos.y * 3.5 + t * 0.9) * uMid * 0.5;
-        float trebleJ = sin(pos.x * 8.0 + t * 2.0) * cos(pos.y * 7.0 + t * 1.6) * uTreble * 0.25;
-        float bassBreath = sin(t * 0.3 + r1 * 6.28) * uBass * 0.15;
-        pos.z = bassDisp + midDisp + trebleJ + bassBreath;
+        if (preset == 0) {
+          // SILK 丝绸 — xy平面 z涟漪
+          float bassDisp = sin(pos.x * 1.8 + t * 0.6) * cos(pos.y * 1.6 + t * 0.4) * uBass * 1.3;
+          float midDisp = sin(pos.x * 4.0 + t * 1.2) * cos(pos.y * 3.5 + t * 0.9) * uMid * 0.5;
+          float trebleJ = sin(pos.x * 8.0 + t * 2.0) * cos(pos.y * 7.0 + t * 1.6) * uTreble * 0.25;
+          pos.z = bassDisp + midDisp + trebleJ + sin(t * 0.3 + r1 * 6.28) * uBass * 0.15;
+        } else if (preset == 1) {
+          // TUNNEL 隧道 — 圆柱+自旋
+          float spin = t * 0.12;
+          float angle = aUv.x * 2.0 * PI + spin;
+          float flow = fract(aUv.y + t * 0.05 + r1 * 0.1);
+          float zPos = (flow - 0.5) * 9.0;
+          float radius = 2.8 + uBass * 0.6;
+          pos.x = cos(angle) * radius;
+          pos.y = sin(angle) * radius;
+          pos.z = zPos;
+          vBright *= 0.6 + flow * 0.4;
+        } else if (preset == 2) {
+          // ORBIT 星球 — 球面分布
+          float theta = aUv.x * PI * 2.0 + t * 0.08;
+          float phi = aUv.y * PI;
+          float baseR = 2.5;
+          float bassExpand = uBass * 0.8;
+          float trebFlare = sin(t * 3.0 + r1 * 10.0) * uTreble * 0.3;
+          float r = baseR * (1.0 + bassExpand) + trebFlare;
+          pos.x = r * sin(phi) * cos(theta);
+          pos.y = r * sin(phi) * sin(theta);
+          pos.z = r * cos(phi) - 2.0;
+        } else if (preset == 3) {
+          // VOID 虚空 — 随机散布深空
+          float spread = 20.0;
+          pos.x = (r1 - 0.5) * spread;
+          pos.y = (r2 - 0.5) * spread;
+          pos.z = -(r3 * 15.0 + 2.0);
+          float twinkle = 0.5 + 0.5 * sin(t * (1.0 + r1 * 3.0) + r1 * 20.0);
+          vBright *= twinkle * (0.3 + uEnergy * 0.7);
+          vAlpha = smoothstep(0.0, 0.3, r3);
+        } else if (preset == 4) {
+          // VINYL 黑胶 — 圆形封面+沟槽
+          float cx = aUv.x - 0.5;
+          float cy = aUv.y - 0.5;
+          float dist = sqrt(cx * cx + cy * cy);
+          if (dist > 0.5) { vAlpha = 0.0; }
+          float groove = sin(dist * 80.0) * 0.5 + 0.5;
+          vColor = mix(coverCol * 0.3, coverCol, groove);
+          pos.z = sin(dist * 40.0 + t * 2.0) * uBass * 0.15;
+          float spinAngle = t * 0.5;
+          float s = sin(spinAngle), c = cos(spinAngle);
+          pos.x = cx * c - cy * s;
+          pos.y = cx * s + cy * c;
+        } else {
+          // WALLPULSE 极光 — 水平带状
+          float band = sin(aUv.y * 6.0 + t * 0.5) * 0.5 + 0.5;
+          float aurora = sin(aUv.x * 3.0 + t * 0.3 + band * 2.0) * uBass * 0.8;
+          pos.z = aurora + sin(t * 0.4 + r1 * 8.0) * uEnergy * 0.2;
+          pos.y += sin(t * 0.2 + r1 * 5.0) * uMid * 0.3;
+          vColor = mix(vec3(0.0, 0.6, 0.5), vec3(0.3, 0.2, 0.8), band);
+          vColor = mix(vColor, coverCol, uHasCover * 0.5);
+        }
 
-        // 节拍冲击: 粒子向外弹
+        // 节拍冲击
         float beatKick = uBeat * (0.3 + r2 * 0.4);
         pos.x += sin(r1 * 6.28 + t) * beatKick;
         pos.y += cos(r2 * 6.28 + t) * beatKick;
 
-        // 边缘亮度提升
         float edgeDist = length(aUv - 0.5);
         vEdgeBoost = smoothstep(0.25, 0.5, edgeDist) * uEnergy;
-        vBright = 0.55 + uBass * 0.35 + uEnergy * 0.15 + r3 * 0.1;
+        vBright = (0.55 + uBass * 0.35 + uEnergy * 0.15 + r3 * 0.1) * uIntensity;
 
         vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
         gl_Position = projectionMatrix * mvPos;
-        gl_PointSize = (2.0 + uBass * 3.0 + uEnergy * 1.5) * uPixel * (300.0 / -mvPos.z);
+        gl_PointSize = (2.0 + uBass * 3.0 + uEnergy * 1.5) * uPixel * (300.0 / max(-mvPos.z, 0.1));
       }
     `;
 
-    // 片元 Shader
     const fragmentShader = `
       uniform sampler2D uDotTex;
       uniform float uAlpha;
       varying float vBright;
       varying float vEdgeBoost;
       varying vec3 vColor;
-
+      varying float vAlpha;
       void main() {
         vec4 tex = texture2D(uDotTex, gl_PointCoord);
         if (tex.a < 0.02) discard;
         vec3 col = vColor * vBright;
         col = mix(col, col * 1.3 + vec3(0.05), vEdgeBoost * 0.35);
-        gl_FragColor = vec4(col, tex.a * uAlpha);
+        gl_FragColor = vec4(col, tex.a * uAlpha * vAlpha);
       }
     `;
 
-    // Bloom 粒子（加法混合）
     const bloomFragmentShader = `
       uniform sampler2D uDotTex;
       uniform float uAlpha;
       varying float vBright;
       varying float vEdgeBoost;
       varying vec3 vColor;
+      varying float vAlpha;
       void main() {
         vec4 tex = texture2D(uDotTex, gl_PointCoord);
         if (tex.a < 0.02) discard;
         vec3 col = vColor * vBright * 1.6;
-        gl_FragColor = vec4(col, tex.a * uAlpha * 0.45);
+        gl_FragColor = vec4(col, tex.a * uAlpha * 0.45 * vAlpha);
       }
     `;
 
@@ -197,7 +275,33 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
     const floatParticles = new THREE.Points(floatGeo, floatMat);
     scene.add(floatParticles);
 
-    // fade in
+    // === 创新: 3D 黑胶唱片 ===
+    const vinylGroup = new THREE.Group();
+    const vinylGeo = new THREE.CircleGeometry(2.2, 64);
+    const vinylMat = new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.85 });
+    const vinylMesh = new THREE.Mesh(vinylGeo, vinylMat);
+    vinylMesh.position.z = -0.01;
+    vinylGroup.add(vinylMesh);
+    // 中心标签
+    const labelGeo = new THREE.CircleGeometry(0.7, 64);
+    const labelMat = new THREE.MeshBasicMaterial({ color: 0x00f5d4, transparent: true, opacity: 0.8 });
+    const labelMesh = new THREE.Mesh(labelGeo, labelMat);
+    vinylGroup.add(labelMesh);
+    // 中心孔
+    const holeGeo = new THREE.CircleGeometry(0.06, 32);
+    const holeMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+    const holeMesh = new THREE.Mesh(holeGeo, holeMat);
+    vinylGroup.add(holeMesh);
+    vinylGroup.position.set(3.5, -1.5, -1);
+    vinylGroup.scale.set(0, 0, 0);
+    scene.add(vinylGroup);
+
+    // === 创新: 音波环 ===
+    const ringGeo = new THREE.RingGeometry(3.0, 3.05, 128);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x00f5d4, transparent: true, opacity: 0, side: THREE.DoubleSide });
+    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+    scene.add(ringMesh);
+
     gsap.to(uniforms.uAlpha, { value: 1, duration: 1.2, ease: 'power2.out' });
 
     let animId: number;
@@ -207,6 +311,7 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
     let beatData: Uint8Array | null = null;
     let smoothBass = 0, smoothMid = 0, smoothTreb = 0, smoothEnergy = 0;
     let beatPulse = 0;
+    let ringPulse = 0;
     let prevTime = performance.now();
 
     const setupAnalysers = () => {
@@ -217,6 +322,9 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
     };
     player.setAnalyserReadyHandler?.(setupAnalysers);
     setTimeout(setupAnalysers, 500);
+
+    const presetIdx = { silk: 0, tunnel: 1, orbit: 2, void: 3, vinyl: 4, wallpulse: 5 };
+    uniforms.uPreset.value = presetIdx[preset];
 
     const animate = () => {
       animId = requestAnimationFrame(animate);
@@ -229,19 +337,18 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
         analyser.getByteFrequencyData(freqData as any);
         beatAnalyser.getByteFrequencyData(beatData as any);
         const len = freqData.length;
-        // 分频段 — Mineradio同款 kick/vocal/mid/treble
-        const kickEnd = 7;  // 60-150Hz
-        const vocalEnd = Math.min(len, 140);  // 200-3000Hz
-        const midEnd = Math.min(len, 280);  // 3-6kHz
-        let bKick = 0, mInst = 0, tHigh = 0, voc = 0;
+        const kickEnd = 7;
+        const vocalEnd = Math.min(len, 140);
+        const midEnd = Math.min(len, 280);
+        let bKick = 0, mInst = 0, tHigh = 0;
         for (let i = 0; i < kickEnd; i++) bKick += freqData[i] / 255;
-        for (let i = kickEnd; i < vocalEnd; i++) voc += freqData[i] / 255;
+        for (let i = kickEnd; i < vocalEnd; i++) mInst += freqData[i] / 255;
         for (let i = vocalEnd; i < midEnd; i++) mInst += freqData[i] / 255;
         for (let i = midEnd; i < len; i++) tHigh += freqData[i] / 255;
-        bKick /= kickEnd; voc /= (vocalEnd - kickEnd);
-        mInst /= Math.max(1, midEnd - vocalEnd); tHigh /= Math.max(1, len - midEnd);
+        bKick /= kickEnd;
+        mInst /= Math.max(1, midEnd - kickEnd);
+        tHigh /= Math.max(1, len - midEnd);
 
-        // 平滑包络
         const env = (cur: number, target: number, up: number, down: number) =>
           cur + (target > cur ? up : down) * (target - cur);
         smoothBass = env(smoothBass, Math.min(0.82, bKick * 0.78), 0.28, 0.075);
@@ -249,12 +356,13 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
         smoothTreb = env(smoothTreb, Math.min(0.56, tHigh * 0.54), 0.18, 0.055);
         smoothEnergy = env(smoothEnergy, Math.min(0.72, (bKick + mInst + tHigh) / 3), 0.16, 0.055);
 
-        // 节拍检测: 低频突变
         const bassOnset = Math.max(0, bKick - smoothBass * 0.9);
         if (bassOnset > 0.075 && bKick > 0.32) {
           beatPulse = Math.max(beatPulse, Math.min(0.15, bassOnset * 0.2));
+          ringPulse = 1.0;
         }
         beatPulse *= Math.pow(0.36, dt);
+        ringPulse *= Math.pow(0.85, dt);
 
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
@@ -262,12 +370,10 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
         uniforms.uBeat.value = beatPulse;
         uniforms.uEnergy.value = smoothEnergy;
 
-        // 节拍驱动相机微抖
         const shake = beatPulse * 0.3;
         camera.position.x = Math.sin(now * 0.001) * shake;
         camera.position.y = Math.cos(now * 0.0007) * shake;
       } else {
-        // 衰减
         smoothBass *= 0.91; smoothMid *= 0.91; smoothTreb *= 0.91; smoothEnergy *= 0.91; beatPulse *= 0.82;
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
@@ -276,12 +382,23 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
         uniforms.uEnergy.value = smoothEnergy;
       }
 
-      // 粒子旋转
       particles.rotation.y += dt * 0.05;
       particles.rotation.x += dt * 0.02;
       bloomParticles.rotation.copy(particles.rotation);
       floatParticles.rotation.y += dt * 0.01;
       floatMat.opacity = 0.15 + smoothEnergy * 0.25;
+
+      // 黑胶旋转
+      vinylGroup.rotation.z += dt * (0.5 + smoothBass * 2.0);
+      const vinylScale = showVinyl ? 1 + smoothBass * 0.05 : 0;
+      gsap.to(vinylGroup.scale, { x: vinylScale, y: vinylScale, z: vinylScale, duration: 0.3, ease: 'power2.out', overwrite: true });
+      labelMesh.material.opacity = 0.6 + smoothEnergy * 0.3;
+
+      // 音波环
+      ringMesh.rotation.z += dt * 0.1;
+      ringMat.opacity = ringPulse * 0.6;
+      const ringScale = 1 + ringPulse * 0.3;
+      ringMesh.scale.set(ringScale, ringScale, 1);
 
       camera.lookAt(0, 0, 0);
       renderer.render(scene, camera);
@@ -295,7 +412,6 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
     };
     window.addEventListener('resize', onResize);
 
-    // 封面更新函数
     const updateCover = (coverUrl: string) => {
       if (!coverUrl) { uniforms.uHasCover.value = 0; return; }
       const img = new Image();
@@ -310,7 +426,6 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
         coverTex.image = cv;
         coverTex.needsUpdate = true;
         uniforms.uHasCover.value = 1;
-        // 提取主色调
         try {
           const d = ctx.getImageData(0, 0, size, size).data;
           let best = { score: -1, r: 143, g: 233, b: 255 };
@@ -325,28 +440,44 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
             }
           }
           uniforms.uTintColor.value.setRGB(best.r / 255, best.g / 255, best.b / 255);
-          uniforms.uTintStrength.value = 0.5;
         } catch {}
       };
       img.onerror = () => { uniforms.uHasCover.value = 0; };
       img.src = coverUrl;
     };
-
-    // 监听封面变化
+    (window as any).__updateCover = updateCover;
     const coverUrl = player.currentSong?.cover;
     if (coverUrl) updateCover(coverUrl);
-    (window as any).__updateCover = updateCover;
+
+    engineRef.current = { uniforms, updateCover, renderer, scene };
 
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', onResize);
       geo.dispose(); material.dispose(); bloomMaterial.dispose();
       floatGeo.dispose(); floatMat.dispose(); coverTex.dispose(); dotTexture.dispose();
+      vinylGeo.dispose(); vinylMat.dispose(); labelGeo.dispose(); labelMat.dispose();
+      holeGeo.dispose(); holeMat.dispose(); ringGeo.dispose(); ringMat.dispose();
       renderer.dispose();
     };
   }, []);
 
-  // 封面变化时更新粒子
+  // 预设切换
+  useEffect(() => {
+    if (engineRef.current?.uniforms) {
+      const presetIdx = { silk: 0, tunnel: 1, orbit: 2, void: 3, vinyl: 4, wallpulse: 5 };
+      engineRef.current.uniforms.uPreset.value = presetIdx[preset];
+    }
+  }, [preset]);
+
+  // 强度切换
+  useEffect(() => {
+    if (engineRef.current?.uniforms) {
+      engineRef.current.uniforms.uIntensity.value = intensity;
+    }
+  }, [intensity]);
+
+  // 封面更新
   useEffect(() => {
     const coverUrl = player.currentSong?.cover;
     if (coverUrl && (window as any).__updateCover) {
@@ -356,12 +487,26 @@ function useVisualEngine(canvasRef: React.RefObject<HTMLCanvasElement>, player: 
 }
 
 // ====================================================================
+// AI 情绪检测 — 基于歌名/艺术家关键词推断情绪
+// ====================================================================
+function detectMood(song: Song | null): Mood {
+  if (!song) return 'calm';
+  const text = `${song.title} ${song.artist}`.toLowerCase();
+  if (/love|心|恋|情|玫瑰|moonlight|sweet|kiss|拥抱|温柔|浪漫/.test(text)) return 'romantic';
+  if (/rock|燃|fire|power|fight|war|storm|怒|热血|战|break|狂/.test(text)) return 'energetic';
+  if (/sad|泪|lonely|夜|rain|哭|伤|离|lost|alone|空|blue|忧/.test(text)) return 'melancholy';
+  if (/dark|夜|shadow|death|blood|黑|暗|魔|night|demon|evil/.test(text)) return 'dark';
+  return 'calm';
+}
+
+// ====================================================================
 // 主应用
 // ====================================================================
 const App: React.FC = () => {
   const player = usePlayer();
   const [panel, setPanel] = useState<Panel>('home');
   const [showQueue, setShowQueue] = useState(false);
+  const [showFx, setShowFx] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Song[]>([]);
   const [searching, setSearching] = useState(false);
@@ -371,16 +516,25 @@ const App: React.FC = () => {
   const [viewingName, setViewingName] = useState('');
   const [neteaseUser, setNeteaseUser] = useState<NeteaseUser | null>(null);
   const [serverPort, setServerPort] = useState(0);
-  const [bgColor, setBgColor] = useState('#08090B');
+  const [preset, setPreset] = useState<Preset>('silk');
+  const [intensity, setIntensity] = useState(0.85);
+  const [showVinyl, setShowVinyl] = useState(true);
+  const [customBg, setCustomBg] = useState<string | null>(null);
+  const [desktopLyricsOpen, setDesktopLyricsOpen] = useState(false);
+  const [likedSet, setLikedSet] = useState<Set<string>>(new Set());
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lyricsRef = useRef<HTMLDivElement>(null);
   const activeLyricRef = useRef<HTMLDivElement>(null);
   const searchSeqRef = useRef(0);
   const electron = (window as any).electronAPI;
 
-  useVisualEngine(canvasRef, player);
+  // AI情绪自动主题
+  const mood = useMemo(() => detectMood(player.currentSong), [player.currentSong]);
+  const moodColors = MOOD_COLORS[mood];
+  const bgColor = customBg ? 'transparent' : moodColors.bg;
 
-  // 获取服务器端口
+  useVisualEngine(canvasRef, player, preset, intensity, showVinyl);
+
   useEffect(() => {
     electron?.getServerPort?.().then((port: number) => {
       setServerPort(port);
@@ -389,27 +543,6 @@ const App: React.FC = () => {
   }, []);
 
   const apiBase = `http://127.0.0.1:${serverPort}`;
-
-  // 封面色提取 → 背景色
-  useEffect(() => {
-    if (!player.currentSong?.cover) { setBgColor('#08090B'); return; }
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      try {
-        const c = document.createElement('canvas');
-        const ctx = c.getContext('2d'); if (!ctx) return;
-        c.width = 50; c.height = 50; ctx.drawImage(img, 0, 0, 50, 50);
-        const d = ctx.getImageData(0, 0, 50, 50).data;
-        let r = 0, g = 0, b = 0, n = 0;
-        for (let i = 0; i < d.length; i += 16) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
-        r = Math.floor(r / n * 0.25); g = Math.floor(g / n * 0.22); b = Math.floor(b / n * 0.30);
-        setBgColor(`rgb(${Math.max(r, 6)}, ${Math.max(g, 6)}, ${Math.max(b, 10)})`);
-      } catch { setBgColor('#08090B'); }
-    };
-    img.onerror = () => setBgColor('#08090B');
-    img.src = player.currentSong.cover;
-  }, [player.currentSong?.cover]);
 
   // 歌词滚动
   useEffect(() => {
@@ -423,6 +556,22 @@ const App: React.FC = () => {
     }
   }, [player.currentTime]);
 
+  // 桌面歌词同步
+  useEffect(() => {
+    if (!desktopLyricsOpen || !electron) return;
+    let activeText = '';
+    for (let i = 0; i < player.lyrics.length; i++) {
+      if (player.currentTime >= player.lyrics[i].time - 0.3) activeText = player.lyrics[i].text;
+      else break;
+    }
+    const progress = player.duration > 0 ? player.currentTime / player.duration : 0;
+    electron.sendLyricsToDesktop?.({ text: activeText, progress });
+  }, [player.currentTime, player.lyrics, desktopLyricsOpen]);
+
+  useEffect(() => {
+    electron?.onDesktopLyricsState?.((state: boolean) => setDesktopLyricsOpen(state));
+  }, []);
+
   // 媒体键
   useEffect(() => {
     if (!electron) return;
@@ -432,7 +581,6 @@ const App: React.FC = () => {
     return () => { u1?.(); u2?.(); u3?.(); };
   }, []);
 
-  // 初始化
   useEffect(() => {
     if (!serverPort) return;
     checkLogin(); loadHome();
@@ -447,6 +595,12 @@ const App: React.FC = () => {
         const plRes = await fetch(`${apiBase}/api/user/playlists?limit=50`);
         const plData = await plRes.json();
         if (plData.loggedIn) setUserPlaylists(plData.playlists || []);
+        // 获取红心列表
+        const likeRes = await fetch(`${apiBase}/api/song/like/check`);
+        const likeData = await likeRes.json();
+        if (likeData.loggedIn && likeData.liked) {
+          setLikedSet(new Set(Object.keys(likeData.liked)));
+        }
       }
     } catch {}
   };
@@ -459,7 +613,6 @@ const App: React.FC = () => {
     } catch {}
   };
 
-  // 搜索（带竞态节流 — Mineradio同款 searchRequestSeq）
   const handleSearch = useCallback(async () => {
     if (!searchQuery.trim() || !serverPort) return;
     const seq = ++searchSeqRef.current;
@@ -501,7 +654,7 @@ const App: React.FC = () => {
 
   const logoutNetease = async () => {
     await electron?.neteaseClearLogin?.();
-    setNeteaseUser(null); setUserPlaylists([]);
+    setNeteaseUser(null); setUserPlaylists([]); setLikedSet(new Set());
     await loadHome();
   };
 
@@ -511,6 +664,23 @@ const App: React.FC = () => {
       const songs: Song[] = files.map((f: any) => ({ ...f, title: f.title || f.name }));
       player.queue.length === 0 ? player.playTrackAt(0, songs) : player.addSongsToQueue(songs);
     }
+  };
+
+  const importCustomBg = async () => {
+    const result = await electron?.selectImageFile?.();
+    if (result?.path) setCustomBg(result.path);
+  };
+
+  const toggleDesktopLyrics = async () => {
+    const result = await electron?.toggleDesktopLyrics?.();
+    setDesktopLyricsOpen(result?.open ?? false);
+  };
+
+  const handleLike = async (song: Song) => {
+    const newLiked = await player.toggleLike(song);
+    const newSet = new Set(likedSet);
+    if (newLiked) newSet.add(song.id); else newSet.delete(song.id);
+    setLikedSet(newSet);
   };
 
   const formatTime = (s: number) => {
@@ -528,7 +698,7 @@ const App: React.FC = () => {
 
   const playModeIcon = player.playMode === 'single' ? '1' : player.playMode === 'shuffle' ? '⇄' : '↻';
 
-  // GSAP: 列表项入场动画
+  // GSAP 列表入场
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (listRef.current) {
@@ -539,27 +709,32 @@ const App: React.FC = () => {
     }
   }, [searchResults, viewingTracks, panel, player.queue]);
 
+  const isCurrentLiked = player.currentSong ? likedSet.has(player.currentSong.id) : false;
+
   return (
-    <div className="fixed inset-0 overflow-hidden text-white select-none font-sans" style={{ background: bgColor, transition: 'background 1.2s ease' }}>
-      {/* 专辑模糊背景 — Mineradio同款 #album-bg */}
-      {player.currentSong?.cover && (
+    <div className="fixed inset-0 overflow-hidden text-white select-none font-sans" style={{ background: bgColor, transition: 'background 1.5s ease' }}>
+      {/* 自定义背景 */}
+      {customBg && <div className="absolute inset-0 z-0 bg-cover bg-center" style={{ backgroundImage: `url(${customBg})`, opacity: 0.3 }} />}
+      {/* 专辑模糊背景 */}
+      {player.currentSong?.cover && !customBg && (
         <div className={`album-bg visible`} style={{ backgroundImage: `url(${player.currentSong.cover})` }} />
       )}
-
       {/* Three.js 粒子画布 */}
       <canvas ref={canvasRef} className="absolute inset-0 z-10 pointer-events-none" />
-
       {/* 渐变遮罩 */}
-      <div className="absolute inset-0 z-20 pointer-events-none"
-        style={{ background: 'linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)' }} />
+      <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: `linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)` }} />
 
       {/* 标题栏 */}
       <div className="absolute top-0 left-0 right-0 h-11 z-50 flex items-center justify-between px-4" style={{ WebkitAppRegion: 'drag' } as any}>
         <div className="flex items-center gap-2">
-          <div className="w-2.5 h-2.5 rounded-full" style={{ background: 'linear-gradient(135deg, #00f5d4, #2442ff)' }} />
+          <div className="w-2.5 h-2.5 rounded-full" style={{ background: `linear-gradient(135deg, ${moodColors.primary}, ${moodColors.secondary})` }} />
           <span className="text-[11px] font-semibold tracking-[0.2em] text-white/40 uppercase">AuroraBeat</span>
+          <span className="text-[10px] text-white/20 ml-2">{mood}</span>
         </div>
         <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
+          <button onClick={() => setShowFx(!showFx)} className={`glass-btn w-[38px] h-[30px] flex items-center justify-center ${showFx ? '!text-[#00f5d4]' : ''}`} title="特效面板">
+            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          </button>
           <button onClick={() => electron?.minimize?.()} className="glass-btn w-[38px] h-[30px] flex items-center justify-center">
             <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="6" width="8" height="1" fill="currentColor"/></svg>
           </button>
@@ -583,13 +758,11 @@ const App: React.FC = () => {
               { id: 'search', icon: 'M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z', label: '搜索' },
               { id: 'library', icon: 'M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10', label: '我的音乐' },
             ].map((item) => (
-              <button key={item.id} onClick={() => { setPanel(item.id as Panel); setViewingTracks([]); }}
-                className={`sidebar-tab ${panel === item.id ? 'active' : ''}`}>
+              <button key={item.id} onClick={() => { setPanel(item.id as Panel); setViewingTracks([]); }} className={`sidebar-tab ${panel === item.id ? 'active' : ''}`}>
                 <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d={item.icon} /></svg>
                 <span>{item.label}</span>
               </button>
             ))}
-
             {userPlaylists.length > 0 && (
               <>
                 <div className="text-[10px] font-bold tracking-[0.12em] text-white/25 uppercase px-3 mt-4 mb-2">我的歌单</div>
@@ -601,13 +774,11 @@ const App: React.FC = () => {
                 ))}
               </>
             )}
-
             <div className="flex-1" />
             <button onClick={importLocal} className="sidebar-tab">
               <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24"><path d="M12 4v16m8-8H4"/></svg>
               <span>导入本地</span>
             </button>
-
             <div className="px-2 py-3">
               {neteaseUser ? (
                 <div className="flex items-center gap-2 px-2">
@@ -630,9 +801,9 @@ const App: React.FC = () => {
               <div className="flex-1 overflow-y-auto p-6 space-y-6">
                 <div className="relative min-h-[200px] rounded-[28px] overflow-hidden border border-white/[0.06] bg-gradient-to-br from-[#12151a]/70 to-[#08090d]/80 backdrop-blur-2xl p-8 flex items-center">
                   <div>
-                    <div className="text-[10px] font-bold tracking-[0.14em] text-[#00f5d4]/70 uppercase mb-3">Welcome</div>
+                    <div className="text-[10px] font-bold tracking-[0.14em] uppercase mb-3" style={{ color: moodColors.primary }}>Welcome</div>
                     <div className="text-[42px] font-bold leading-none tracking-tight mb-3">AuroraBeat</div>
-                    <div className="text-sm text-white/50 max-w-md">沉浸式音乐播放器 · 搜索或导入一首歌即可播放</div>
+                    <div className="text-sm text-white/50 max-w-md">沉浸式音乐播放器 · 粒子可视化 · 逐字歌词 · AI情绪主题</div>
                     <div className="flex gap-3 mt-5">
                       <button onClick={() => setPanel('search')} className="h-9 px-5 rounded-full bg-white text-black text-xs font-semibold hover:shadow-lg hover:shadow-white/20 transition-all">开始探索</button>
                       <button onClick={importLocal} className="h-9 px-5 rounded-full border border-white/15 text-white/70 text-xs font-medium hover:bg-white/5 hover:text-white transition-all">导入音乐</button>
@@ -676,11 +847,15 @@ const App: React.FC = () => {
                   ) : (
                     viewingTracks.map((song, i) => {
                       const isCurrent = player.currentSong?.id === song.id;
+                      const isLiked = likedSet.has(song.id);
                       return (
-                        <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''} px-6`} onClick={() => player.playTrackAt(i, viewingTracks)}>
+                        <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''} px-6 group`} onClick={() => player.playTrackAt(i, viewingTracks)}>
                           <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
                           <div className="flex-1 min-w-0"><div className={`text-sm truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/85'}`}>{song.title}</div></div>
                           <div className="w-36 text-xs text-white/35 truncate">{song.artist}</div>
+                          <button onClick={(e) => { e.stopPropagation(); handleLike(song); }} className={`w-6 h-6 flex items-center justify-center transition-all ${isLiked ? 'text-[#ff5e8a]' : 'text-white/15 hover:text-white/50'}`}>
+                            <svg width="14" height="14" fill={isLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
+                          </button>
                           <div className="w-12 text-xs text-white/25 text-right">{formatTime(song.duration)}</div>
                         </div>
                       );
@@ -709,13 +884,17 @@ const App: React.FC = () => {
                   )}
                   {searchResults.map((song, i) => {
                     const isCurrent = player.currentSong?.id === song.id;
+                    const isLiked = likedSet.has(song.id);
                     return (
-                      <div key={song.id + i} className="search-result-item" onClick={() => player.playSong(song, searchResults)}>
+                      <div key={song.id + i} className="search-result-item group" onClick={() => player.playSong(song, searchResults)}>
                         {song.cover ? <div className="w-10 h-10 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${song.cover})` }} /> : <div className="w-10 h-10 rounded-lg bg-white/[0.05] flex items-center justify-center flex-shrink-0 text-white/20">♪</div>}
                         <div className="flex-1 min-w-0">
                           <div className={`text-[13px] font-medium truncate ${isCurrent ? 'text-[#00f5d4]' : 'text-white/90'}`}>{song.title}</div>
                           <div className="text-[11px] text-white/35 truncate">{song.artist}</div>
                         </div>
+                        <button onClick={(e) => { e.stopPropagation(); handleLike(song); }} className={`w-6 h-6 flex items-center justify-center transition-all ${isLiked ? 'text-[#ff5e8a]' : 'text-white/15 hover:text-white/50'}`}>
+                          <svg width="14" height="14" fill={isLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
+                        </button>
                         <div className="text-[11px] text-white/25 w-12 text-right">{formatTime(song.duration)}</div>
                       </div>
                     );
@@ -753,7 +932,7 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {/* 舞台歌词 — Mineradio同款渐变文字 + 居中 */}
+            {/* 舞台歌词 */}
             {player.currentSong && player.showLyrics && panel === 'home' && (
               <div className="absolute left-0 right-0 top-0 bottom-24 flex items-center justify-center pointer-events-none stage-lyrics-container">
                 <div ref={lyricsRef} className="w-full max-w-2xl h-80 overflow-y-auto px-8 pointer-events-auto" style={{ scrollbarWidth: 'none' }}>
@@ -762,8 +941,21 @@ const App: React.FC = () => {
                     {player.lyrics.length === 0 && !player.lyricsLoading && <div className="text-center text-white/15 text-sm py-8">暂无歌词</div>}
                     {player.lyrics.map((line, i) => {
                       const isActive = i === activeLyricIdx;
+                      // YRC逐字高亮
+                      const words = line.words;
+                      const wordProgress = isActive && words ? Math.min(1, Math.max(0, (player.currentTime * 1000 - words[0]?.startMs) / (words[words.length - 1]?.startMs + words[words.length - 1]?.durationMs - words[0]?.startMs))) : 0;
                       return (
-                        <div key={i} ref={isActive ? activeLyricRef : null} className={`lyrics-line ${isActive ? 'active' : i < activeLyricIdx ? 'past' : 'future'}`}>{line.text || '♪'}</div>
+                        <div key={i} ref={isActive ? activeLyricRef : null} className={`lyrics-line ${isActive ? 'active' : i < activeLyricIdx ? 'past' : 'future'}`}>
+                          {isActive && words && words.length > 0 ? (
+                            <span>
+                              {words.map((w: any, wi: number) => {
+                                const wordTime = w.startMs / 1000;
+                                const isWordActive = player.currentTime >= wordTime - 0.05;
+                                return <span key={wi} style={{ opacity: isWordActive ? 1 : 0.4, transition: 'opacity 0.15s' }}>{w.text}</span>;
+                              })}
+                            </span>
+                          ) : (line.text || '♪')}
+                        </div>
                       );
                     })}
                   </div>
@@ -780,6 +972,73 @@ const App: React.FC = () => {
               </div>
             )}
           </div>
+
+          {/* FX 面板 */}
+          {showFx && (
+            <div className="w-[280px] border-l border-white/[0.04] bg-black/40 backdrop-blur-2xl flex flex-col p-4 gap-4 overflow-y-auto">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-bold">视觉特效</div>
+                <button onClick={() => setShowFx(false)} className="w-7 h-7 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center">×</button>
+              </div>
+
+              {/* 粒子预设 */}
+              <div>
+                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">粒子预设</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {PRESETS.map((p) => (
+                    <button key={p.id} onClick={() => setPreset(p.id)} className={`h-16 rounded-xl border flex flex-col items-center justify-center gap-1 transition-all ${preset === p.id ? 'border-[#00f5d4]/40 bg-[#00f5d4]/08 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40 hover:bg-white/[0.05]'}`}>
+                      <span className="text-lg">{p.icon}</span>
+                      <span className="text-[10px]">{p.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 强度滑块 */}
+              <div>
+                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">粒子强度</div>
+                <div className="flex items-center gap-2">
+                  <input type="range" min="0.2" max="1.5" step="0.05" value={intensity} onChange={(e) => setIntensity(parseFloat(e.target.value))} className="flex-1" />
+                  <span className="text-[11px] text-white/40 w-8 text-right font-mono">{intensity.toFixed(2)}</span>
+                </div>
+              </div>
+
+              {/* 3D黑胶 */}
+              <div>
+                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">3D黑胶唱片</div>
+                <button onClick={() => setShowVinyl(!showVinyl)} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${showVinyl ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
+                  {showVinyl ? '已开启' : '已关闭'}
+                </button>
+              </div>
+
+              {/* AI情绪 */}
+              <div>
+                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">AI情绪主题</div>
+                <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/[0.03] border border-white/05">
+                  <div className="w-3 h-3 rounded-full" style={{ background: moodColors.primary }} />
+                  <span className="text-xs text-white/60">{mood}</span>
+                  <span className="text-[10px] text-white/25 ml-auto">自动检测</span>
+                </div>
+              </div>
+
+              {/* 自定义背景 */}
+              <div>
+                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">自定义背景</div>
+                <div className="flex gap-2">
+                  <button onClick={importCustomBg} className="flex-1 h-9 rounded-xl border border-white/08 bg-white/[0.02] text-xs text-white/50 hover:bg-white/5 transition-all">选择图片</button>
+                  {customBg && <button onClick={() => setCustomBg(null)} className="h-9 px-3 rounded-xl border border-red-500/20 bg-red-500/05 text-xs text-red-400/70 hover:bg-red-500/10 transition-all">清除</button>}
+                </div>
+              </div>
+
+              {/* 桌面歌词 */}
+              <div>
+                <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">桌面歌词</div>
+                <button onClick={toggleDesktopLyrics} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${desktopLyricsOpen ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
+                  {desktopLyricsOpen ? '已开启' : '已关闭'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* 播放队列 */}
           {showQueue && (
@@ -807,7 +1066,7 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* 底部控制条 — Mineradio同款玻璃 */}
+        {/* 底部控制条 */}
         <div className="h-24 px-6 bottom-bar flex items-center gap-6">
           <div className="flex items-center gap-4 w-[260px] flex-shrink-0">
             {player.currentSong?.cover ? (
@@ -819,6 +1078,11 @@ const App: React.FC = () => {
               <div className="text-sm font-medium truncate">{player.currentSong?.title || '未播放'}</div>
               <div className="text-[11px] text-white/35 truncate">{player.currentSong?.artist || '选择一首歌开始'}</div>
             </div>
+            {player.currentSong && (
+              <button onClick={() => handleLike(player.currentSong!)} className={`w-9 h-9 flex items-center justify-center transition-all ${isCurrentLiked ? 'text-[#ff5e8a]' : 'text-white/30 hover:text-white/60'}`}>
+                <svg width="16" height="16" fill={isCurrentLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
+              </button>
+            )}
           </div>
 
           <div className="flex-1 flex flex-col items-center gap-2 max-w-2xl mx-auto">

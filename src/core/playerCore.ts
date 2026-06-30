@@ -1,4 +1,4 @@
-import type { Song, LyricsLine } from '../types';
+import type { Song, LyricsLine, YrcWord } from '../types';
 
 export type PlayMode = 'list' | 'single' | 'shuffle';
 
@@ -15,6 +15,7 @@ export interface PlayerState {
   lyrics: LyricsLine[];
   lyricsLoading: boolean;
   showLyrics: boolean;
+  likedSongs: Set<string>;
 }
 
 type Listener = (state: PlayerState) => void;
@@ -36,6 +37,7 @@ class PlayerCore {
     lyrics: [],
     lyricsLoading: false,
     showLyrics: true,
+    likedSongs: new Set(),
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -243,19 +245,55 @@ class PlayerCore {
   async fetchLyrics(song: Song): Promise<LyricsLine[]> {
     try {
       let lrc = '';
+      let yrc = '';
       if (song.source === 'netease' && this.serverPort) {
         const res = await fetch(`${this.apiBase}/api/lyric?id=${song.id}`);
         const data = await res.json();
         lrc = data.lyric || '';
+        yrc = data.yrc || '';
       } else if (song.source === 'local') {
         const result = await (window as any).electronAPI?.searchLyrics?.(song.title || song.name || '', song.artist);
         lrc = result?.lyric || '';
       }
-      return this.parseLyrics(lrc);
+      // Prefer YRC (word-by-word) if available, fallback to LRC
+      const yrcLines = yrc ? this.parseYrc(yrc) : [];
+      return yrcLines.length > 0 ? yrcLines : this.parseLyrics(lrc);
     } catch (e) {
       console.error('[PlayerCore] fetchLyrics error:', e);
       return [];
     }
+  }
+
+  private parseYrc(yrcString: string): LyricsLine[] {
+    if (!yrcString) return [];
+    const lines: LyricsLine[] = [];
+    const lineRegex = /\[(\d+),(\d+)\](.*)/g;
+    const wordRegex = /\((\d+),(\d+),\d+\)([^()]*)/g;
+    let lineMatch;
+    while ((lineMatch = lineRegex.exec(yrcString)) !== null) {
+      const lineStartMs = parseInt(lineMatch[1], 10);
+      const lineDurMs = parseInt(lineMatch[2], 10);
+      const body = lineMatch[3] || '';
+      const words: YrcWord[] = [];
+      let fullText = '';
+      let wordMatch;
+      wordRegex.lastIndex = 0;
+      while ((wordMatch = wordRegex.exec(body)) !== null) {
+        const wordText = (wordMatch[3] || '').trim();
+        if (!wordText) continue;
+        const wordStartMs = parseInt(wordMatch[1], 10);
+        const wordDurMs = parseInt(wordMatch[2], 10);
+        words.push({ text: wordText, startMs: wordStartMs, durationMs: wordDurMs });
+        fullText += wordText;
+      }
+      if (!fullText.trim()) continue;
+      lines.push({
+        time: lineStartMs / 1000,
+        text: fullText,
+        words,
+      });
+    }
+    return lines.sort((a, b) => a.time - b.time);
   }
 
   private parseLyrics(lrcString: string): LyricsLine[] {
@@ -536,6 +574,56 @@ class PlayerCore {
     this.state.duration = 0;
     this.state.lyrics = [];
     this.notify();
+  }
+
+  isLiked(songId: string): boolean {
+    return this.state.likedSongs.has(songId);
+  }
+
+  setLikedSongs(ids: string[]) {
+    this.state.likedSongs = new Set(ids);
+    this.notify();
+  }
+
+  async toggleLike(song: Song): Promise<boolean> {
+    if (!this.serverPort) return false;
+    const liked = this.state.likedSongs.has(song.id);
+    try {
+      const res = await fetch(`${this.apiBase}/api/song/like`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: song.id, like: !liked }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        const newSet = new Set(this.state.likedSongs);
+        if (liked) newSet.delete(song.id);
+        else newSet.add(song.id);
+        this.state.likedSongs = newSet;
+        this.notify();
+        return !liked;
+      }
+    } catch (e) {
+      console.error('[PlayerCore] toggleLike error:', e);
+    }
+    return liked;
+  }
+
+  async fetchLikedList(): Promise<string[]> {
+    if (!this.serverPort) return [];
+    try {
+      const res = await fetch(`${this.apiBase}/api/song/like/check`);
+      const data = await res.json();
+      if (data.loggedIn && data.liked) {
+        const ids = Object.keys(data.liked);
+        this.state.likedSongs = new Set(ids);
+        this.notify();
+        return ids;
+      }
+    } catch (e) {
+      console.error('[PlayerCore] fetchLikedList error:', e);
+    }
+    return [];
   }
 }
 

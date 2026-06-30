@@ -13,10 +13,17 @@ export interface Song {
   fee?: number
 }
 
+export interface YrcWord {
+  text: string
+  startMs: number
+  durationMs: number
+}
+
 export interface LyricsLine {
   time: number
   text: string
   translation?: string
+  words?: YrcWord[]
 }
 
 export type LyricLine = LyricsLine
