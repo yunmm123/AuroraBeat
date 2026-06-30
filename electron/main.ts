@@ -3,7 +3,6 @@ import path from 'path'
 import { spawn } from 'child_process'
 
 let mainWindow: BrowserWindow | null = null
-let desktopLyricsWindow: BrowserWindow | null = null
 let serverProcess: ReturnType<typeof spawn> | null = null
 let serverPort = 0
 
@@ -192,123 +191,6 @@ function createMainWindow() {
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
-function createDesktopLyricsWindow() {
-  if (desktopLyricsWindow && !desktopLyricsWindow.isDestroyed()) {
-    desktopLyricsWindow.close()
-    desktopLyricsWindow = null
-  }
-
-  const { screen } = require('electron')
-  const display = screen.getPrimaryDisplay()
-  const { width } = display.workAreaSize
-
-  desktopLyricsWindow = new BrowserWindow({
-    width: width,
-    height: 140,
-    x: 0,
-    y: display.workAreaSize.height - 160,
-    frame: false,
-    transparent: true,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    resizable: false,
-    hasShadow: false,
-    focusable: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  })
-
-  desktopLyricsWindow.setIgnoreMouseEvents(true, { forward: true })
-
-  // Load inline HTML for desktop lyrics
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: transparent;
-    overflow: hidden;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: "Noto Sans SC", "PingFang SC", sans-serif;
-    -webkit-font-smoothing: antialiased;
-  }
-  #lyric {
-    font-size: 52px;
-    font-weight: 900;
-    text-align: center;
-    letter-spacing: 2px;
-    text-shadow: 0 2px 8px rgba(0,0,0,0.8), 0 0 20px rgba(0,245,212,0.3);
-    background: linear-gradient(180deg, #f6fdff 0%, #a8f6ff 55%, #7ecdff 100%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    opacity: 0.95;
-    transition: opacity 0.3s, transform 0.4s cubic-bezier(.16,1,.3,1);
-    padding: 0 40px;
-    max-width: 90vw;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  #lyric.empty { opacity: 0; }
-  #progress-bar {
-    position: fixed;
-    bottom: 0;
-    left: 10%;
-    right: 10%;
-    height: 2px;
-    background: rgba(255,255,255,0.1);
-    border-radius: 1px;
-  }
-  #progress-fill {
-    height: 100%;
-    background: linear-gradient(90deg, rgba(0,245,212,0.8), rgba(255,255,255,0.6));
-    border-radius: 1px;
-    width: 0%;
-    transition: width 0.15s linear;
-    box-shadow: 0 0 8px rgba(0,245,212,0.4);
-  }
-</style>
-</head>
-<body>
-  <div id="lyric" class="empty">AuroraBeat</div>
-  <div id="progress-bar"><div id="progress-fill"></div></div>
-  <script>
-    const { ipcRenderer } = require('electron');
-    const lyricEl = document.getElementById('lyric');
-    const progressEl = document.getElementById('progress-fill');
-
-    ipcRenderer.on('desktop-lyrics:data', (_e, data) => {
-      if (data.text) {
-        lyricEl.textContent = data.text;
-        lyricEl.classList.remove('empty');
-      } else {
-        lyricEl.classList.add('empty');
-      }
-      if (data.progress !== undefined) {
-        progressEl.style.width = (data.progress * 100) + '%';
-      }
-    });
-  </script>
-</body>
-</html>`;
-
-  desktopLyricsWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
-
-  desktopLyricsWindow.on('closed', () => {
-    desktopLyricsWindow = null
-    mainWindow?.webContents.send('desktop-lyrics:state', false)
-  })
-
-  mainWindow?.webContents.send('desktop-lyrics:state', true)
-}
-
 // ========== App 生命周期 ==========
 app.whenReady().then(async () => {
   // 启动本地服务器
@@ -452,33 +334,6 @@ app.whenReady().then(async () => {
   globalShortcut.register('MediaPlayPause', togglePlay)
   globalShortcut.register('MediaNextTrack', nextTrack)
   globalShortcut.register('MediaPreviousTrack', prevTrack)
-
-  // 桌面歌词
-  ipcMain.handle('desktop-lyrics:open', () => {
-    createDesktopLyricsWindow()
-    return { ok: true }
-  })
-  ipcMain.handle('desktop-lyrics:close', () => {
-    if (desktopLyricsWindow && !desktopLyricsWindow.isDestroyed()) {
-      desktopLyricsWindow.close()
-      desktopLyricsWindow = null
-    }
-    return { ok: true }
-  })
-  ipcMain.handle('desktop-lyrics:toggle', () => {
-    if (desktopLyricsWindow && !desktopLyricsWindow.isDestroyed()) {
-      desktopLyricsWindow.close()
-      desktopLyricsWindow = null
-      return { ok: true, open: false }
-    }
-    createDesktopLyricsWindow()
-    return { ok: true, open: true }
-  })
-  ipcMain.on('desktop-lyrics:update', (_e, data) => {
-    if (desktopLyricsWindow && !desktopLyricsWindow.isDestroyed()) {
-      desktopLyricsWindow.webContents.send('desktop-lyrics:data', data)
-    }
-  })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow()

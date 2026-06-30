@@ -322,23 +322,28 @@ class PlayerCore {
     return result.sort((a, b) => a.time - b.time);
   }
 
-  // 解析 LRC 并估算逐字时间（按字数比例分配行时长）
+  // 解析 LRC 并估算逐字时间（按字符权重+句末停顿分配）
   private parseLyricsWithWords(lrcString: string): LyricsLine[] {
     const lines = this.parseLyrics(lrcString);
     if (lines.length === 0) return [];
-    // 为每行生成 words，按字符数比例分配行时长
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const nextTime = i + 1 < lines.length ? lines[i + 1].time : line.time + 4;
-      const lineDuration = Math.max(1, (nextTime - line.time) * 1000);
+      // 句末预留 15% 停顿时间，让逐字更贴合实际演唱节奏
+      const lineDuration = Math.max(1, (nextTime - line.time) * 1000 * 0.85);
       const chars = Array.from(line.text);
       if (chars.length === 0) continue;
-      // 按字符长度比例分配，留一点呼吸时间
-      const totalLen = chars.reduce((s, c) => s + (c.trim() ? 1 : 0.3), 0) || 1;
+      // 字符权重：汉字/字母=1，标点=0.25，空格=0.15
+      const charWeight = (c: string): number => {
+        if (/\s/.test(c)) return 0.15;
+        if (/[，。、；：！？,.!?;:—…～~]/.test(c)) return 0.25;
+        return 1;
+      };
+      const totalWeight = chars.reduce((s, c) => s + charWeight(c), 0) || 1;
       let elapsed = 0;
       line.words = chars.map((c) => {
-        const charWeight = c.trim() ? 1 : 0.3;
-        const wordDur = (charWeight / totalLen) * lineDuration;
+        const w = charWeight(c);
+        const wordDur = (w / totalWeight) * lineDuration;
         const word: YrcWord = {
           text: c,
           startMs: Math.round(line.time * 1000 + elapsed),

@@ -532,16 +532,12 @@ const App: React.FC = () => {
   const [showVinyl, setShowVinyl] = useState(true);
   const [customBg, setCustomBg] = useState<string | null>(null);
   const [customVideo, setCustomVideo] = useState<string | null>(null);
-  const [desktopLyricsOpen, setDesktopLyricsOpen] = useState(false);
-  const [likedSet, setLikedSet] = useState<Set<string>>(new Set());
-  const [gestureEnabled, setGestureEnabled] = useState(false);
   const [gestureHint, setGestureHint] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lyricsRef = useRef<HTMLDivElement>(null);
   const activeLyricRef = useRef<HTMLDivElement>(null);
   const searchSeqRef = useRef(0);
   const electron = (window as any).electronAPI;
-  const gestureVideoRef = useRef<HTMLVideoElement>(null);
   const gestureHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // AI情绪自动主题
@@ -571,22 +567,6 @@ const App: React.FC = () => {
       gsap.to(container, { scrollTop: container.scrollTop + offset, duration: 0.4, ease: 'power2.out' });
     }
   }, [player.currentTime]);
-
-  // 桌面歌词同步
-  useEffect(() => {
-    if (!desktopLyricsOpen || !electron) return;
-    let activeText = '';
-    for (let i = 0; i < player.lyrics.length; i++) {
-      if (player.currentTime >= player.lyrics[i].time - 0.3) activeText = player.lyrics[i].text;
-      else break;
-    }
-    const progress = player.duration > 0 ? player.currentTime / player.duration : 0;
-    electron.sendLyricsToDesktop?.({ text: activeText, progress });
-  }, [player.currentTime, player.lyrics, desktopLyricsOpen]);
-
-  useEffect(() => {
-    electron?.onDesktopLyricsState?.((state: boolean) => setDesktopLyricsOpen(state));
-  }, []);
 
   // 媒体键
   useEffect(() => {
@@ -626,15 +606,10 @@ const App: React.FC = () => {
           e.preventDefault(); { const v = Math.max(0, player.volume - 0.05); player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); } break;
         case 'KeyL':
           if (player.currentSong) {
-            player.toggleLike(player.currentSong).then((liked: boolean) => {
-              setLikedSet((prev) => {
-                const next = new Set(prev);
-                if (liked) next.add(player.currentSong!.id); else next.delete(player.currentSong!.id);
-                return next;
-              });
-            });
+            handleLike(player.currentSong);
             showGestureHint('红心');
-          } break;
+          }
+          break;
         case 'KeyF':
           setShowFx((v) => !v); showGestureHint('FX 面板'); break;
         case 'KeyM':
@@ -644,135 +619,6 @@ const App: React.FC = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [player, showGestureHint]);
-
-  // 鼠标手势（在粒子画布区域滑动控制）
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    // 画布默认 pointer-events:none，需要在容器层监听
-    const target = canvas.parentElement as HTMLElement;
-    if (!target) return;
-    let startX = 0, startY = 0, startTime = 0, tracking = false;
-    const onStart = (e: PointerEvent) => {
-      if (e.button !== 0 && e.pointerType === 'mouse') return;
-      // 忽略来自 UI 控件的指针事件
-      const t = e.target as HTMLElement;
-      if (t.closest('button, input, .control-btn, .play-btn, .sidebar-tab, .queue-item, [data-ui]')) return;
-      startX = e.clientX; startY = e.clientY; startTime = Date.now(); tracking = true;
-    };
-    const onEnd = (e: PointerEvent) => {
-      if (!tracking) return;
-      tracking = false;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      const dt = Date.now() - startTime;
-      const absX = Math.abs(dx), absY = Math.abs(dy);
-      // 点击 = 播放/暂停
-      if (absX < 8 && absY < 8 && dt < 280) {
-        player.togglePlay(); showGestureHint('播放 / 暂停'); return;
-      }
-      // 水平滑动 = 上/下一首（需 >110px 且较快）
-      if (absX > 110 && absX > absY * 1.4 && dt < 700) {
-        if (dx < 0) { player.next(); showGestureHint('下一首 →'); }
-        else { player.prev(); showGestureHint('← 上一首'); }
-        return;
-      }
-      // 垂直滑动 = 音量
-      if (absY > 80 && absY > absX * 1.4 && dt < 700) {
-        const delta = -dy / 300;
-        const v = Math.max(0, Math.min(1, player.volume + delta));
-        player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`);
-        return;
-      }
-    };
-    target.addEventListener('pointerdown', onStart);
-    window.addEventListener('pointerup', onEnd);
-    return () => { target.removeEventListener('pointerdown', onStart); window.removeEventListener('pointerup', onEnd); };
-  }, [player, showGestureHint]);
-
-  // 摄像头手势（沉浸式隔空操控，轻量帧差动作检测）
-  useEffect(() => {
-    if (!gestureEnabled) return;
-    const video = gestureVideoRef.current;
-    if (!video) return;
-    let stream: MediaStream | null = null;
-    let raf = 0;
-    let prevFrame: Uint8ClampedArray | null = null;
-    let motionBuffer: { t: number; x: number }[] = [];
-    let lastTrigger = 0;
-    let stableFrames = 0;
-    const canvas = document.createElement('canvas');
-    canvas.width = 80; canvas.height = 60;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-    const W = canvas.width, H = canvas.height;
-
-    const tick = () => {
-      if (video.readyState >= 2 && video.videoWidth > 0) {
-        ctx.drawImage(video, 0, 0, W, H);
-        const frame = ctx.getImageData(0, 0, W, H).data;
-        if (prevFrame) {
-          // 计算运动质心横向位置
-          let sumX = 0, sumMotion = 0;
-          for (let y = 0; y < H; y++) {
-            for (let x = 0; x < W; x++) {
-              const i = (y * W + x) * 4;
-              const d = Math.abs(frame[i] - prevFrame[i]) + Math.abs(frame[i + 1] - prevFrame[i + 1]) + Math.abs(frame[i + 2] - prevFrame[i + 2]);
-              if (d > 40) { sumX += x; sumMotion++; }
-            }
-          }
-          if (sumMotion > 20) {
-            const cx = sumX / sumMotion;
-            motionBuffer.push({ t: Date.now(), x: cx });
-            stableFrames = 0;
-          } else {
-            // 无明显运动时也记录（用于检测挥手结束）
-            stableFrames++;
-          }
-          // 只保留最近 700ms 的运动数据
-          const cutoff = Date.now() - 700;
-          motionBuffer = motionBuffer.filter((m) => m.t > cutoff);
-
-          // 当有足够的运动数据且运动刚结束（stableFrames 检测挥手收手），或缓冲区够大时判定方向
-          const shouldDetect = (stableFrames > 3 && motionBuffer.length >= 3) || motionBuffer.length >= 6;
-          if (shouldDetect && motionBuffer.length >= 3 && Date.now() - lastTrigger > 800) {
-            // 用首尾平均位置计算方向，更稳定
-            const firstAvg = motionBuffer.slice(0, Math.min(3, motionBuffer.length)).reduce((s, m) => s + m.x, 0) / Math.min(3, motionBuffer.length);
-            const lastAvg = motionBuffer.slice(-Math.min(3, motionBuffer.length)).reduce((s, m) => s + m.x, 0) / Math.min(3, motionBuffer.length);
-            const dx = lastAvg - firstAvg;
-            if (Math.abs(dx) > 12) {
-              lastTrigger = Date.now();
-              if (dx > 0) { player.next(); showGestureHint('手势 → 下一首'); }
-              else { player.prev(); showGestureHint('上一首 ← 手势'); }
-              motionBuffer = [];
-              stableFrames = 0;
-            }
-          }
-        }
-        prevFrame = new Uint8ClampedArray(frame);
-      }
-      raf = requestAnimationFrame(tick);
-    };
-
-    navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, facingMode: 'user' }, audio: false })
-      .then((s) => {
-        stream = s;
-        video.srcObject = s;
-        video.play().catch(() => {});
-        raf = requestAnimationFrame(tick);
-        showGestureHint('手势已开启 · 挥手切歌');
-      })
-      .catch((e) => {
-        console.warn('[Gesture] 摄像头不可用:', e.message);
-        setGestureEnabled(false);
-        showGestureHint('摄像头不可用');
-      });
-
-    return () => {
-      cancelAnimationFrame(raf);
-      stream?.getTracks().forEach((t) => t.stop());
-      video.srcObject = null;
-    };
-  }, [gestureEnabled, player, showGestureHint]);
 
   useEffect(() => {
     if (!serverPort) return;
@@ -789,11 +635,7 @@ const App: React.FC = () => {
         const plData = await plRes.json();
         if (plData.loggedIn) setUserPlaylists(plData.playlists || []);
         // 获取红心列表
-        const likeRes = await fetch(`${apiBase}/api/song/like/check`);
-        const likeData = await likeRes.json();
-        if (likeData.loggedIn && likeData.liked) {
-          setLikedSet(new Set(Object.keys(likeData.liked)));
-        }
+        await player.fetchLikedList();
       }
     } catch {}
   };
@@ -847,7 +689,7 @@ const App: React.FC = () => {
 
   const logoutNetease = async () => {
     await electron?.neteaseClearLogin?.();
-    setNeteaseUser(null); setUserPlaylists([]); setLikedSet(new Set());
+    setNeteaseUser(null); setUserPlaylists([]);
     await loadHome();
   };
 
@@ -869,16 +711,8 @@ const App: React.FC = () => {
     if (result?.url) { setCustomVideo(result.url); setCustomBg(null); }
   };
 
-  const toggleDesktopLyrics = async () => {
-    const result = await electron?.toggleDesktopLyrics?.();
-    setDesktopLyricsOpen(result?.open ?? false);
-  };
-
   const handleLike = async (song: Song) => {
-    const newLiked = await player.toggleLike(song);
-    const newSet = new Set(likedSet);
-    if (newLiked) newSet.add(song.id); else newSet.delete(song.id);
-    setLikedSet(newSet);
+    await player.toggleLike(song);
   };
 
   const formatTime = (s: number) => {
@@ -907,7 +741,7 @@ const App: React.FC = () => {
     }
   }, [searchResults, viewingTracks, panel, player.queue]);
 
-  const isCurrentLiked = player.currentSong ? likedSet.has(player.currentSong.id) : false;
+  const isCurrentLiked = player.currentSong ? player.likedSongs.has(player.currentSong.id) : false;
 
   return (
     <div className="fixed inset-0 overflow-hidden text-white select-none font-sans" style={{ background: bgColor, transition: 'background 1.5s ease' }}>
@@ -934,9 +768,6 @@ const App: React.FC = () => {
       <canvas ref={canvasRef} className="absolute inset-0 z-10 pointer-events-none" />
       {/* 渐变遮罩 */}
       <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: `linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)` }} />
-
-      {/* 摄像头手势检测（隐藏视频源） */}
-      <video ref={gestureVideoRef} className="fixed opacity-0 pointer-events-none" style={{ width: 1, height: 1, top: -10, left: -10 }} playsInline muted />
 
       {/* 手势提示气泡 */}
       {gestureHint && (
@@ -1208,7 +1039,7 @@ const App: React.FC = () => {
                     ) : (
                       viewingTracks.map((song, i) => {
                         const isCurrent = player.currentSong?.id === song.id;
-                        const isLiked = likedSet.has(song.id);
+                        const isLiked = player.likedSongs.has(song.id);
                         return (
                           <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''} px-6 group`} onClick={() => { player.playTrackAt(i, viewingTracks); setShowOverlay(false); }}>
                             <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
@@ -1245,7 +1076,7 @@ const App: React.FC = () => {
                     )}
                     {searchResults.map((song, i) => {
                       const isCurrent = player.currentSong?.id === song.id;
-                      const isLiked = likedSet.has(song.id);
+                      const isLiked = player.likedSongs.has(song.id);
                       return (
                         <div key={song.id + i} className="search-result-item group" onClick={() => { player.playSong(song, searchResults); setShowOverlay(false); }}>
                           {song.cover ? <div className="w-10 h-10 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${song.cover})` }} /> : <div className="w-10 h-10 rounded-lg bg-white/[0.05] flex items-center justify-center flex-shrink-0 text-white/20">♪</div>}
@@ -1267,10 +1098,38 @@ const App: React.FC = () => {
               {/* 我的音乐 */}
               {panel === 'library' && (
                 <div className="flex-1 overflow-y-auto p-6">
-                  <div className="text-[13px] font-bold text-white/80 mb-4">播放列表</div>
+                  <div className="text-[13px] font-bold text-white/80 mb-4">我喜欢</div>
+                  {(() => {
+                    const likedInQueue = player.queue.filter((s) => player.likedSongs.has(s.id));
+                    if (likedInQueue.length === 0) {
+                      return (
+                        <div className="flex flex-col items-center justify-center h-40 text-white/25">
+                          <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-3"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
+                          <div className="text-sm">点击歌曲旁的红心加入我喜欢</div>
+                        </div>
+                      );
+                    }
+                    return likedInQueue.map((song) => {
+                      const isCurrent = player.currentSong?.id === song.id;
+                      const isLiked = true;
+                      return (
+                        <div key={song.id} className={`queue-item ${isCurrent ? 'current' : ''}`} onClick={() => { const idx = player.queue.findIndex((s) => s.id === song.id); if (idx >= 0) { player.playTrackAt(idx); setShowOverlay(false); } }}>
+                          <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-[#ff5e8a]'}`}>♥</div>
+                          {song.cover && <div className="w-9 h-9 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${song.cover})` }} />}
+                          <div className="flex-1 min-w-0">
+                            <div className={`text-sm truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/85'}`}>{song.title}</div>
+                            <div className="text-[11px] text-white/35 truncate">{song.artist}</div>
+                          </div>
+                          <div className="text-[11px] text-white/25 w-12 text-right">{formatTime(song.duration)}</div>
+                        </div>
+                      );
+                    });
+                  })()}
+
+                  <div className="text-[13px] font-bold text-white/80 mb-4 mt-8">播放列表</div>
                   {player.queue.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center h-80 text-white/25">
-                      <svg width="48" height="48" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-4"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                    <div className="flex flex-col items-center justify-center h-40 text-white/25">
+                      <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-3"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
                       <div className="text-sm">暂无播放记录</div>
                     </div>
                   ) : (
@@ -1362,23 +1221,6 @@ const App: React.FC = () => {
               {(customBg || customVideo) && <button onClick={() => { setCustomBg(null); setCustomVideo(null); }} className="h-9 px-3 rounded-xl border border-red-500/20 bg-red-500/05 text-xs text-red-400/70 hover:bg-red-500/10 transition-all">清除</button>}
             </div>
             {customVideo && <div className="text-[10px] text-white/25 mt-1.5">视频将循环静音播放</div>}
-          </div>
-
-          {/* 沉浸手势控制 */}
-          <div>
-            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">隔空手势</div>
-            <button onClick={() => setGestureEnabled((v) => !v)} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${gestureEnabled ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
-              {gestureEnabled ? '摄像头已开启' : '开启摄像头'}
-            </button>
-            <div className="text-[10px] text-white/25 mt-1.5 leading-relaxed">挥手左/右 = 上/下一首 · 键盘: 空格=播放 ←/→=快进 Shift+←/→=切歌 ↑/↓=音量 L=红心 F=FX</div>
-          </div>
-
-          {/* 桌面歌词 */}
-          <div>
-            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">桌面歌词</div>
-            <button onClick={toggleDesktopLyrics} className={`w-full h-9 rounded-xl border text-xs font-medium transition-all ${desktopLyricsOpen ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/40'}`}>
-              {desktopLyricsOpen ? '已开启' : '已关闭'}
-            </button>
           </div>
         </div>
       )}

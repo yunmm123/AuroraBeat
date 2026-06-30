@@ -403,8 +403,13 @@ const server = http.createServer(async (req, res) => {
       if (!id) { sendJSON(res, { error: 'Missing id' }, 400); return; }
       const info = await getLoginInfo();
       if (!info.loggedIn) { sendJSON(res, { error: 'LOGIN_REQUIRED' }, 401); return; }
-      await like_song({ trackId: id, like, cookie: userCookie, timestamp: Date.now() });
-      sendJSON(res, { ok: true, liked: like });
+      try {
+        await like_song({ trackId: id, like, cookie: userCookie, timestamp: Date.now() });
+        sendJSON(res, { ok: true, liked: like });
+      } catch (e) {
+        console.error('[Like] error:', e.message);
+        sendJSON(res, { ok: false, error: e.message }, 500);
+      }
       return;
     }
 
@@ -412,11 +417,16 @@ const server = http.createServer(async (req, res) => {
     if (pn === '/api/song/like/check') {
       const info = await getLoginInfo();
       if (!info.loggedIn) { sendJSON(res, { loggedIn: false, liked: {} }); return; }
-      const r = await likelist({ uid: info.userId, cookie: userCookie, timestamp: Date.now() });
-      const likedIds = (r.body?.ids || []).map(String);
-      const liked = {};
-      likedIds.forEach(id => { liked[id] = true; });
-      sendJSON(res, { loggedIn: true, liked });
+      try {
+        const r = await likelist({ uid: info.userId, cookie: userCookie, timestamp: Date.now() });
+        const likedIds = (r.body?.ids || []).map(String);
+        const liked = {};
+        likedIds.forEach(id => { liked[id] = true; });
+        sendJSON(res, { loggedIn: true, liked });
+      } catch (e) {
+        console.error('[Likelist] error:', e.message);
+        sendJSON(res, { loggedIn: true, liked: {} });
+      }
       return;
     }
 

@@ -36,15 +36,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('playback:prev', listener)
     return () => ipcRenderer.removeListener('playback:prev', listener)
   },
-
-  // 桌面歌词
-  openDesktopLyrics: () => ipcRenderer.invoke('desktop-lyrics:open'),
-  closeDesktopLyrics: () => ipcRenderer.invoke('desktop-lyrics:close'),
-  toggleDesktopLyrics: () => ipcRenderer.invoke('desktop-lyrics:toggle'),
-  sendLyricsToDesktop: (data: any) => ipcRenderer.send('desktop-lyrics:update', data),
-  onDesktopLyricsState: (cb: (state: boolean) => void) => {
-    const listener = (_e: any, state: boolean) => cb(state);
-    ipcRenderer.on('desktop-lyrics:state', listener);
-    return () => ipcRenderer.removeListener('desktop-lyrics:state', listener);
-  },
 })
