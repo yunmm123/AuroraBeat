@@ -53,6 +53,10 @@ export function usePlayer() {
     playerCore.toggleLyrics();
   }, []);
 
+  const setQuality = useCallback((quality: any) => {
+    playerCore.setQuality(quality);
+  }, []);
+
   const setQueue = useCallback((queue: Song[]) => {
     playerCore.setQueue(queue);
   }, []);
@@ -102,6 +106,7 @@ export function usePlayer() {
     setPlayMode,
     togglePlayMode,
     toggleLyrics,
+    setQuality,
     setQueue,
     addToQueue,
     addSongsToQueue,

@@ -8,6 +8,15 @@ type Panel = 'home' | 'search' | 'library' | 'playlist';
 type Preset = 'silk' | 'tunnel' | 'orbit' | 'void' | 'vinyl' | 'wallpulse';
 type Mood = 'calm' | 'energetic' | 'melancholy' | 'romantic' | 'dark';
 
+// 音质选项
+const QUALITY_OPTIONS = [
+  { value: 'standard' as const, label: '标准' },
+  { value: 'exhigh' as const, label: '极高' },
+  { value: 'lossless' as const, label: '无损' },
+  { value: 'hires' as const, label: 'Hi-Res' },
+];
+const QUALITY_LABELS: Record<string, string> = { standard: '标准', exhigh: '极高', lossless: '无损', hires: 'Hi-Res' };
+
 const PRESETS: { id: Preset; name: string; icon: string }[] = [
   { id: 'silk', name: '丝绸', icon: '≈' },
   { id: 'tunnel', name: '隧道', icon: '◎' },
@@ -508,6 +517,7 @@ const App: React.FC = () => {
   const [showQueue, setShowQueue] = useState(false);
   const [showFx, setShowFx] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
+  const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Song[]>([]);
   const [searching, setSearching] = useState(false);
@@ -972,14 +982,26 @@ const App: React.FC = () => {
                 {player.lyrics.map((line, i) => {
                   const isActive = i === activeLyricIdx;
                   const words = line.words;
+                  // 找到当前正在唱的字索引
+                  const activeWordIdx = isActive && words ? words.findIndex((w: any, wi: number) => {
+                    const start = w.startMs / 1000;
+                    const end = (w.startMs + w.durationMs) / 1000;
+                    return player.currentTime >= start - 0.05 && player.currentTime < end + 0.1;
+                  }) : -1;
                   return (
                     <div key={i} ref={isActive ? activeLyricRef : null} className={`lyrics-line ${isActive ? 'active' : i < activeLyricIdx ? 'past' : 'future'}`}>
                       {isActive && words && words.length > 0 ? (
-                        <span>
+                        <span className="lyric-words">
                           {words.map((w: any, wi: number) => {
                             const wordTime = w.startMs / 1000;
-                            const isWordActive = player.currentTime >= wordTime - 0.05;
-                            return <span key={wi} style={{ opacity: isWordActive ? 1 : 0.4, transition: 'opacity 0.15s' }}>{w.text}</span>;
+                            const isSung = player.currentTime >= wordTime - 0.05;
+                            const isActiveWord = wi === activeWordIdx;
+                            return (
+                              <span key={wi} className={`lyric-word ${isActiveWord ? 'active' : isSung ? 'sung' : ''}`}>
+                                {isActiveWord && <span className="word-indicator" />}
+                                {w.text}
+                              </span>
+                            );
                           })}
                         </span>
                       ) : (line.text || '♪')}
@@ -1055,12 +1077,31 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-3 w-[260px] justify-end flex-shrink-0">
+          <div className="flex items-center gap-3 w-[320px] justify-end flex-shrink-0">
             <div className="flex items-center gap-2">
               <button className="control-btn" onClick={() => player.setVolume(player.volume === 0 ? 0.8 : 0)}>
                 {player.volume === 0 ? '🔇' : player.volume < 0.5 ? '🔉' : '🔊'}
               </button>
               <input type="range" min="0" max="1" step="0.01" value={player.volume} onChange={(e) => player.setVolume(parseFloat(e.target.value))} className="w-20" />
+            </div>
+            {/* 音质选择 */}
+            <div className="relative" data-ui>
+              <button onClick={() => setShowQualityMenu(!showQualityMenu)} className="control-btn !px-2.5 text-[10px] font-bold tracking-wide" title="音质">
+                {QUALITY_LABELS[player.quality] || '极高'}
+              </button>
+              {showQualityMenu && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setShowQualityMenu(false)} />
+                  <div className="absolute bottom-12 right-0 z-50 w-32 rounded-xl border border-white/[0.08] bg-black/80 backdrop-blur-2xl py-1.5 shadow-2xl">
+                    {QUALITY_OPTIONS.map((q) => (
+                      <button key={q.value} onClick={() => { player.setQuality(q.value); setShowQualityMenu(false); }} className={`w-full px-4 py-2 text-left text-xs flex items-center justify-between transition-all ${player.quality === q.value ? 'text-[#00f5d4] bg-[#00f5d4]/05' : 'text-white/60 hover:text-white hover:bg-white/05'}`}>
+                        <span>{q.label}</span>
+                        {player.quality === q.value && <span>✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
             <button onClick={() => setShowQueue(!showQueue)} className={`control-btn ${showQueue ? 'active' : ''}`}>
               <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>

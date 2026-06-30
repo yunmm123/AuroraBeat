@@ -193,8 +193,14 @@ async function handleSearch(keywords, limit) {
 }
 
 async function handleSongUrl(id, quality) {
-  // 尝试多个音质
-  const levels = quality ? [quality, 'exhigh', 'standard'] : ['exhigh', 'standard', 'lossless'];
+  // 按用户选择的音质优先，找不到则逐级降级
+  const qualityFallbackMap = {
+    hires: ['hires', 'lossless', 'exhigh', 'standard'],
+    lossless: ['lossless', 'exhigh', 'standard'],
+    exhigh: ['exhigh', 'standard'],
+    standard: ['standard'],
+  };
+  const levels = quality && qualityFallbackMap[quality] ? qualityFallbackMap[quality] : ['exhigh', 'standard', 'lossless'];
   let trialFallback = null;
   for (const level of levels) {
     try {

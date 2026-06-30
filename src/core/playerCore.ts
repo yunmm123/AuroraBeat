@@ -1,6 +1,7 @@
 import type { Song, LyricsLine, YrcWord } from '../types';
 
 export type PlayMode = 'list' | 'single' | 'shuffle';
+export type AudioQuality = 'standard' | 'exhigh' | 'lossless' | 'hires';
 
 export interface PlayerState {
   queue: Song[];
@@ -16,6 +17,7 @@ export interface PlayerState {
   lyricsLoading: boolean;
   showLyrics: boolean;
   likedSongs: Set<string>;
+  quality: AudioQuality;
 }
 
 type Listener = (state: PlayerState) => void;
@@ -38,6 +40,7 @@ class PlayerCore {
     lyricsLoading: false,
     showLyrics: true,
     likedSongs: new Set(),
+    quality: 'exhigh' as AudioQuality,
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -228,7 +231,7 @@ class PlayerCore {
     // 网易云歌曲通过本地服务器获取URL，再走音频代理（解决CORS）
     if (song.source === 'netease' && this.serverPort) {
       try {
-        const res = await fetch(`${this.apiBase}/api/song/url?id=${song.id}`);
+        const res = await fetch(`${this.apiBase}/api/song/url?id=${song.id}&quality=${this.state.quality}`);
         const data = await res.json();
         if (data.url) {
           // 通过本地服务器代理音频流（Mineradio同款 /api/audio?url=...）
@@ -255,9 +258,10 @@ class PlayerCore {
         const result = await (window as any).electronAPI?.searchLyrics?.(song.title || song.name || '', song.artist);
         lrc = result?.lyric || '';
       }
-      // Prefer YRC (word-by-word) if available, fallback to LRC
+      // 优先使用 YRC 逐字时间，否则解析 LRC 并估算逐字时间
       const yrcLines = yrc ? this.parseYrc(yrc) : [];
-      return yrcLines.length > 0 ? yrcLines : this.parseLyrics(lrc);
+      if (yrcLines.length > 0) return yrcLines;
+      return this.parseLyricsWithWords(lrc);
     } catch (e) {
       console.error('[PlayerCore] fetchLyrics error:', e);
       return [];
@@ -316,6 +320,35 @@ class PlayerCore {
       }
     }
     return result.sort((a, b) => a.time - b.time);
+  }
+
+  // 解析 LRC 并估算逐字时间（按字数比例分配行时长）
+  private parseLyricsWithWords(lrcString: string): LyricsLine[] {
+    const lines = this.parseLyrics(lrcString);
+    if (lines.length === 0) return [];
+    // 为每行生成 words，按字符数比例分配行时长
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const nextTime = i + 1 < lines.length ? lines[i + 1].time : line.time + 4;
+      const lineDuration = Math.max(1, (nextTime - line.time) * 1000);
+      const chars = Array.from(line.text);
+      if (chars.length === 0) continue;
+      // 按字符长度比例分配，留一点呼吸时间
+      const totalLen = chars.reduce((s, c) => s + (c.trim() ? 1 : 0.3), 0) || 1;
+      let elapsed = 0;
+      line.words = chars.map((c) => {
+        const charWeight = c.trim() ? 1 : 0.3;
+        const wordDur = (charWeight / totalLen) * lineDuration;
+        const word: YrcWord = {
+          text: c,
+          startMs: Math.round(line.time * 1000 + elapsed),
+          durationMs: Math.round(wordDur),
+        };
+        elapsed += wordDur;
+        return word;
+      });
+    }
+    return lines;
   }
 
   async playTrackAt(index: number, queue?: Song[]): Promise<boolean> {
@@ -519,6 +552,11 @@ class PlayerCore {
 
   toggleLyrics() {
     this.state.showLyrics = !this.state.showLyrics;
+    this.notify();
+  }
+
+  setQuality(quality: AudioQuality) {
+    this.state.quality = quality;
     this.notify();
   }
 
