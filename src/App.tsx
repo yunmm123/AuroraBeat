@@ -34,18 +34,17 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v2.3 — 质感说话 + 视觉层次增强 + 节拍流动响应
-// 核心一句话：少，但每一帧都呼吸。在 v2.1 克制美学上增加层次而非堆砌。
-//   1. 单一柔光核心体（IcosahedronGeometry + fbm 位移 + 菲涅尔辉光）—— 唯一焦点
-//   1b. 核心体外层光环 halo（backside fresnel 球壳，beat 脉冲）—— 新增层次
-//   1c. 频谱径向细线（64 条，长度随频谱拉伸，加性混合）—— 新增层次
-//   2. 背景慢速色域流动（全屏 quad 正交，fbm UV 偏移，替代 raymarch 体积云）
-//   3. 分层粒子（2500 颗 = 近层尘埃 1500 + 远景星点 800 + 偶发光斑 200；curl noise 漂移 + beat 冲出）
-//   4. 克制后处理：UnrealBloom(strength 0.85, threshold 0.85) + RGBShift + FilmGrain + Vignette + ACES
-// 节拍真正驱动视觉：beat 触发核心体蓄力收缩→弹开 + halo 脉冲 + bloom spike 1.3 + 色差脉冲
-// 节拍检测：离线预分析（beatAnalyzer.ts，fetch→decodeAudioData→OfflineAudioContext lowpass→峰值检测→BPM+beats[]）
-//           播放时 player.onBeat 查表跟随；失败回退 RealtimeKickDetector
-// 封面取色：K-Means 主色 tint + 副色 accent，驱动 shader 色调
+// Three.js 视觉引擎 v3.0 — 四层异质架构（跳出粒子范式）
+// 核心一句话：主体-环境-氛围-交互四层异质，每一层都呼吸，鼠标即手指搅动空间。
+//   层1 主体：液态变形核心（IcosahedronGeometry(1.6,7) + fbm 位移 + domain warping
+//             + 菲涅尔金属辉光 + 鼠标局部扭曲 + 点击涟漪）—— 画面绝对焦点
+//   层2 环境：体积星云深渊背景（全屏 quad，FBM 密度 + 封面色染色 + 鼠标 domain warp）
+//   层3 氛围：屏幕空间体积光束（径向模糊 ShaderPass，从核心辐射 god rays）
+//   层4 交互：鼠标移动扭曲空间 + 点击涟漪 + 拖拽相机轨道（惯性衰减）
+//   后处理：GodRays + UnrealBloom(strength 0.7+energy*0.3, threshold 0.7) + RGBShift + FilmGrain + Vignette + ACES
+// 节拍驱动：保留 v2.3 蓄能池 energy + ADSR 包络 env，所有 uniform 走低通流动响应（无闪烁）
+// 节拍检测：离线预分析（beatAnalyzer.ts，Spectral Flux + DP）+ realtime fallback（beatDetector.ts）
+// 封面取色：K-Means 主色 tint + 副色 accent，驱动核心金属色 + 星云染色 + 光束色
 // ====================================================================
 
 // ashima/webgl-noise simplex noise（共享 GLSL 片段，核心体位移用）
@@ -90,7 +89,7 @@ function useVisualEngine(
     if (!canvasRef.current) return;
 
     // ==================================================================
-    // v2.1 克制版基础 scene/camera/renderer
+    // v3.0 基础 scene/camera/renderer（保留 v2.x 配置）
     // ==================================================================
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
@@ -107,65 +106,55 @@ function useVisualEngine(
     // 封面主色（K-Means 提取，驱动 tint + accent 双色）
     const tintColor = new THREE.Color('#7a8fa6');
     const accentColor = new THREE.Color('#c8a87a');
-    // 核心体固定主色（低饱和暖橙金 #E8B27A + 奶油金辉光 #F4D4A8）
-    const coreColor = new THREE.Color('#E8B27A');
+    // 核心体辉光色（奶油金 #F4D4A8）
     const glowColor = new THREE.Color('#F4D4A8');
 
-    // 软核点纹理 — 高斯 sprite，粒子用
-    const makeDotTexture = () => {
-      const cv = document.createElement('canvas'); cv.width = cv.height = 128;
-      const ctx = cv.getContext('2d')!;
-      const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-      g.addColorStop(0.00, 'rgba(255,255,255,1.00)');
-      g.addColorStop(0.18, 'rgba(255,255,255,0.55)');
-      g.addColorStop(0.45, 'rgba(255,255,255,0.15)');
-      g.addColorStop(0.80, 'rgba(255,255,255,0.02)');
-      g.addColorStop(1.00, 'rgba(255,255,255,0)');
-      ctx.fillStyle = g; ctx.fillRect(0, 0, 128, 128);
-      const tex = new THREE.CanvasTexture(cv);
-      tex.minFilter = THREE.LinearFilter; tex.magFilter = THREE.LinearFilter;
-      return tex;
-    };
-    const dotTexture = makeDotTexture();
-
-    // hash 函数（粒子初始分布用）
-    const hhash = (n: number) => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
-
     // ==================================================================
-    // 元素2 — 背景慢速色域流动（全屏 quad，正交相机，替代 raymarch 体积云）
-    // 封面 tint + accent 双色径向渐变 + fbm 噪声缓慢 UV 偏移，12-20s 循环，大幅压暗
+    // 层2 — 体积星云深渊背景（全屏 quad，正交相机，FBM 密度 + 封面色染色 + 鼠标 domain warp）
+    // 用 2D FBM + 深度感模拟体积云（不做真 raymarch），营造无限纵深
     // ==================================================================
     const bgUniforms = {
       uTime: { value: 0 }, uBass: { value: 0 }, uBeat: { value: 0 }, uAlpha: { value: 0 },
+      uTreble: { value: 0 },
       uTintColor: { value: tintColor }, uAccentColor: { value: accentColor },
       uAspect: { value: window.innerWidth / window.innerHeight },
+      uMouseUV: { value: new THREE.Vector2(0.5, 0.5) },
+      uMouseStrength: { value: 0 },
     };
     const bgFS = `
-      uniform float uTime, uBass, uBeat, uAlpha, uAspect;
+      uniform float uTime, uBass, uBeat, uAlpha, uAspect, uTreble, uMouseStrength;
       uniform vec3 uTintColor, uAccentColor;
+      uniform vec2 uMouseUV;
       varying vec2 vUv;
       ${NOISE_GLSL}
       void main() {
-        vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0);
-        float t = uTime * 0.05; // ~20s 慢循环
-        // fbm 噪声缓慢 UV 偏移
-        float n1 = fbm(vec3(p * 1.4, t));
-        vec2 q = p + vec2(n1, fbm(vec3(p * 1.4 + 5.2, t * 0.8))) * 0.28;
-        // 双色径向渐变（tint 冷 + accent 暖）
-        float r1 = length(q - vec2(-0.18, 0.12));
-        float r2 = length(q - vec2(0.22, -0.16));
-        float g1 = smoothstep(0.75, 0.05, r1);
-        float g2 = smoothstep(0.65, 0.03, r2);
-        vec3 col = uTintColor * 0.16 * g1 + uAccentColor * 0.13 * g2;
-        // bass 微提亮
-        col += uAccentColor * uBass * 0.05;
-        // beat 微高光
-        col += uTintColor * uBeat * 0.04;
-        // 大幅压暗（×0.25）做背景
-        col *= 0.25;
-        // 深处基底 #0B0E14 近黑深蓝灰
-        col += vec3(0.043, 0.055, 0.078);
-        gl_FragColor = vec4(col, uAlpha);
+        vec2 uv = vUv;
+        vec2 p = (uv - 0.5) * vec2(uAspect, 1.0);
+        // 鼠标 domain warping：鼠标附近像被手指搅动
+        float mDist = distance(uv, uMouseUV);
+        vec2 mWarp = vec2(
+          snoise(vec3(p * 2.0, uTime * 0.1)),
+          snoise(vec3(p * 2.0 + 17.3, uTime * 0.1))
+        ) * uMouseStrength * 0.15 * smoothstep(0.5, 0.0, mDist);
+        p += mWarp;
+        // FBM 星云密度（多层叠加，沿 z 缓慢演化模拟体积感）
+        float t = uTime * 0.05;
+        float density = fbm(vec3(p * 1.5, t));
+        density += 0.5 * fbm(vec3(p * 3.0 + 5.2, t * 0.8));
+        density = smoothstep(-0.2, 0.9, density);
+        density = pow(density, 1.5) * (0.6 + uBeat * 0.5);
+        // 深空基底色 + 封面色染色
+        vec3 deepSpace = mix(vec3(0.018, 0.025, 0.05), uTintColor * 0.25, 0.35);
+        vec3 nebulaCol = mix(deepSpace, uAccentColor * 0.55, density);
+        // 远景星点闪烁（高频驱动，稀疏高亮）
+        float stars = pow(max(snoise(vec3(uv * 200.0, uTime * 0.2)), 0.0), 12.0);
+        stars += 0.5 * pow(max(snoise(vec3(uv * 350.0 + 50.0, uTime * 0.3)), 0.0), 18.0);
+        nebulaCol += vec3(stars) * (0.6 + uTreble * 0.8);
+        // bass 微辉光（节拍时星云亮起）
+        nebulaCol += uAccentColor * uBass * 0.08;
+        // 整体压暗做背景（×0.4），保留纵深
+        nebulaCol *= 0.4;
+        gl_FragColor = vec4(nebulaCol * uAlpha, uAlpha);
       }
     `;
     const bgMat = new THREE.ShaderMaterial({
@@ -181,42 +170,81 @@ function useVisualEngine(
     bgScene.add(bgMesh);
 
     // ==================================================================
-    // 元素1 — 单个柔光核心体（唯一焦点）
-    // IcosahedronGeometry(1.4, 6) + fbm 顶点位移（低频大形变）+ bass 膨胀 + beat 脉冲
-    // fragment：菲涅尔边缘辉光 + 核心色 #E8B27A + 位移大处偏 #F4D4A8 + 封面 tint 混入
-    // 克制：base 色系数低（0.3-0.4），不刺眼；呼吸 4000-6000ms，beat 蓄力收缩→弹开
+    // 层1 — 液态变形核心（画面绝对焦点）
+    // IcosahedronGeometry(1.6, 7) 高细分 + fbm 顶点位移 + domain warping
+    // 低频驱动大形变，中频漂移，高频表面沸腾；节拍 onset 触发爆发性形变（ADSR env）
+    // fragment：菲涅尔金属辉光 + 封面色驱动金属色 + 位移大处偏热色
+    // 鼠标交互：移动时附近局部扭曲，点击产生涟漪波纹沿表面扩散
     // ==================================================================
+    const RIPPLE_MAX = 5;
     const coreUniforms = {
       uTime: { value: 0 }, uBass: { value: 0 }, uMid: { value: 0 }, uTreble: { value: 0 },
-      uBeat: { value: 0 },
+      uBeat: { value: 0 }, uEnergy: { value: 0 }, uIntensity: { value: intensity },
       uTintColor: { value: tintColor }, uAccentColor: { value: accentColor },
-      uCoreColor: { value: coreColor }, uGlowColor: { value: glowColor },
+      uGlowColor: { value: glowColor },
+      uMousePos: { value: new THREE.Vector3(999, 999, 999) },
+      uMouseStrength: { value: 0 },
+      uRipples: { value: Array.from({ length: RIPPLE_MAX }, () => new THREE.Vector4(0, 0, 0, -10)) },
+      uRippleCount: { value: 0 },
     };
     const coreVS = `
-      uniform float uTime, uBass, uMid, uTreble, uBeat;
+      uniform float uTime, uBass, uMid, uTreble, uBeat, uEnergy, uMouseStrength;
+      uniform vec3 uMousePos;
+      uniform vec4 uRipples[5];
+      uniform int uRippleCount;
       varying vec3 vNormal;
       varying vec3 vViewDir;
       varying float vDisp;
       ${NOISE_GLSL}
+      // 鼠标点击涟漪：从点击点向外衰减的圆形波纹
+      float rippleEffect(vec3 pos) {
+        float total = 0.0;
+        for (int i = 0; i < 5; i++) {
+          if (i >= uRippleCount) break;
+          vec4 r = uRipples[i];
+          float age = uTime - r.w;
+          if (age < 0.0 || age > 2.0) continue;
+          float d = distance(pos, r.xyz);
+          float wave = sin(d * 7.0 - age * 14.0) * exp(-d * 1.2) * exp(-age * 1.6);
+          total += wave * 0.12;
+        }
+        return total;
+      }
       void main() {
         vec3 pos = position;
         float t = uTime * 0.15;
-        // fbm 低频大形变位移
-        float n = fbm(pos * 0.8 + vec3(t, t * 0.7, t * 0.5));
-        float n2 = fbm(pos * 1.6 + vec3(-t * 0.5, t * 0.3, -t * 0.4));
-        // bass 膨胀 + beat 脉冲
-        float disp = n * 0.16 + n2 * 0.05 + uBass * 0.22 + uBeat * 0.10;
-        pos += normal * disp;
+        // 整体膨胀：bass + env 驱动
+        float inflate = 1.0 + uBass * 0.25 + uBeat * 0.15;
+        // domain warping：用 noise 偏移采样坐标，产生液态流动感
+        float warpAmt = 0.35 + uEnergy * 0.35;
+        vec3 warped = pos + vec3(
+          snoise(pos * 1.5 + vec3(t, 0.0, 0.0)),
+          snoise(pos * 1.5 + vec3(0.0, t, 31.4)),
+          snoise(pos * 1.5 + vec3(0.0, 73.2, t))
+        ) * warpAmt;
+        // fbm 多层叠加位移：低频大形变 + 中频细节
+        float n = fbm(warped * (1.1 + uMid * 0.4) + vec3(t * 0.8, t * 0.6, t * 0.4));
+        float n2 = fbm(warped * 2.8 + vec3(-t * 0.5, t * 0.3, -t * 0.4)) * 0.3;
+        float disp = (n + n2) * (0.32 + uBass * 0.4 + uBeat * 0.3);
+        // 高频驱动表面细节沸腾
+        disp += snoise(pos * 6.0 + t * 2.0) * uTreble * 0.06;
+        // 鼠标局部扭曲：鼠标位置附近增加位移
+        float mDist = distance(pos, uMousePos);
+        float mouseWarp = exp(-mDist * 2.0) * uMouseStrength * 0.3;
+        disp += mouseWarp;
+        // 涟漪：鼠标点击产生的波纹沿表面扩散
+        disp += rippleEffect(pos);
+        vec3 newPos = pos * inflate + normal * disp;
         vDisp = disp;
         vNormal = normalize(normalMatrix * normal);
-        vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+        vec4 mv = modelViewMatrix * vec4(newPos, 1.0);
         vViewDir = normalize(-mv.xyz);
         gl_Position = projectionMatrix * mv;
       }
     `;
     const coreFS = `
-      uniform vec3 uTintColor, uAccentColor, uCoreColor, uGlowColor;
-      uniform float uBeat, uBass, uMid;
+      uniform vec3 uTintColor, uAccentColor, uGlowColor;
+      uniform float uBeat, uBass, uEnergy, uIntensity;
       varying vec3 vNormal;
       varying vec3 vViewDir;
       varying float vDisp;
@@ -224,198 +252,70 @@ function useVisualEngine(
         vec3 N = normalize(vNormal);
         vec3 V = normalize(vViewDir);
         float fres = pow(1.0 - max(dot(N, V), 0.0), 2.5);
-        // base 色系数低 0.3-0.4，避免中心过亮
-        vec3 base = uCoreColor * 0.36;
-        // 位移大处偏 #F4D4A8 奶油金
-        base = mix(base, uGlowColor * 0.5, smoothstep(0.06, 0.26, vDisp));
-        // 封面 tint 混入（克制 0.25）
-        base = mix(base, uTintColor * 0.4, 0.25);
-        // 菲涅尔边缘辉光
-        vec3 rim = uGlowColor * fres * (1.0 + uBeat * 0.8);
-        vec3 col = base * (0.5 + uBass * 0.3) + rim * (0.85 + uBeat * 0.6);
-        // v2.3: 去瞬白，改为向辉光色缓变（幅度 0.06，由包络驱动而非脉冲）
-        col = mix(col, uGlowColor, uBeat * 0.06);
+        // 金属感：菲涅尔混色（封面 tint → accent），假 env 反射近似
+        vec3 metalCol = mix(uTintColor, uAccentColor, fres);
+        // base 色系数低 0.4，避免中心过亮
+        vec3 col = metalCol * (0.40 + uEnergy * 0.30);
+        // 边缘菲涅尔辉光
+        col += uGlowColor * fres * (0.55 + uEnergy * 0.80);
+        // 节拍时偏向辉光色（非瞬白，幅度 0.1）
+        col = mix(col, uGlowColor, uBeat * 0.10);
+        // 位移大处偏热色（金色→暖橙）
+        col = mix(col, col * vec3(1.4, 0.85, 0.5), clamp(vDisp * 1.8, 0.0, 0.55));
         // 整体压低避免过曝
-        col *= 0.86;
-        gl_FragColor = vec4(col, 1.0);
+        col *= 0.92;
+        // intensity 控制可见度
+        float a = mix(0.5, 1.0, clamp((uIntensity - 0.2) / 1.3, 0.0, 1.0));
+        gl_FragColor = vec4(col * a, 1.0);
       }
     `;
     const coreMat = new THREE.ShaderMaterial({
       uniforms: coreUniforms, vertexShader: coreVS, fragmentShader: coreFS,
       transparent: false,
     });
-    const coreGeo = new THREE.IcosahedronGeometry(1.4, 6);
+    const coreGeo = new THREE.IcosahedronGeometry(1.6, 7);
     const coreMesh = new THREE.Mesh(coreGeo, coreMat);
     scene.add(coreMesh);
 
     // ==================================================================
-    // 元素1b — 核心体外层光环 halo（backside fresnel 球壳，beat 脉冲）
-    // 让核心体有"光晕"质感，v1.x 有过的层次，v2.1 砍掉，v2.2 加回（更克制）
+    // 层3 — 屏幕空间体积光束（后处理 ShaderPass，径向模糊从核心辐射 god rays）
+    // 低频驱动明灭，节拍驱动脉冲；光束色用封面暖色
     // ==================================================================
-    const haloUniforms = {
-      uTime: { value: 0 }, uBeat: { value: 0 }, uBass: { value: 0 },
-      uGlowColor: { value: glowColor }, uTintColor: { value: tintColor },
+    const GodRaysShader = {
+      uniforms: {
+        tDiffuse: { value: null },
+        uCenter: { value: new THREE.Vector2(0.5, 0.5) },
+        uBeamIntensity: { value: 0.0 },
+        uBeat: { value: 0.0 },
+        uBeamColor: { value: new THREE.Color(0xffd9a0) },
+      },
+      vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform vec2 uCenter;
+        uniform float uBeamIntensity, uBeat;
+        uniform vec3 uBeamColor;
+        varying vec2 vUv;
+        void main() {
+          vec4 base = texture2D(tDiffuse, vUv);
+          vec2 dir = vUv - uCenter;
+          float decay = 1.0;
+          vec3 col = vec3(0.0);
+          const int SAMPLES = 32;
+          for (int i = 0; i < SAMPLES; i++) {
+            vec2 sampleUv = vUv - dir * (float(i) * 0.012);
+            col += texture2D(tDiffuse, sampleUv).rgb * decay;
+            decay *= 0.93;
+          }
+          col /= float(SAMPLES);
+          float beam = uBeamIntensity * (0.4 + uBeat * 0.6);
+          gl_FragColor = vec4(base.rgb + col * uBeamColor * beam, 1.0);
+        }
+      `,
     };
-    const haloFS = `
-      uniform vec3 uGlowColor, uTintColor; uniform float uBeat, uBass;
-      varying vec3 vNormal; varying vec3 vViewDir;
-      void main() {
-        float fres = pow(1.0 - max(dot(normalize(vNormal), normalize(vViewDir)), 0.0), 3.0);
-        vec3 col = mix(uGlowColor, uTintColor, 0.30) * fres * (1.15 + uBeat * 1.0 + uBass * 0.4);
-        float a = fres * (0.32 + uBeat * 0.32);
-        gl_FragColor = vec4(col, a);
-      }
-    `;
-    const haloMat = new THREE.ShaderMaterial({
-      uniforms: haloUniforms,
-      vertexShader: `varying vec3 vNormal; varying vec3 vViewDir;
-        void main(){ vNormal=normalize(normalMatrix*normal); vec4 mv=modelViewMatrix*vec4(position,1.0); vViewDir=normalize(-mv.xyz); gl_Position=projectionMatrix*mv; }`,
-      fragmentShader: haloFS,
-      transparent: true, depthWrite: false, side: THREE.BackSide, blending: THREE.AdditiveBlending,
-    });
-    const haloGeo = new THREE.SphereGeometry(2.0, 48, 48);
-    const haloMesh = new THREE.Mesh(haloGeo, haloMat);
-    scene.add(haloMesh);
 
     // ==================================================================
-    // 元素1c — 频谱径向细线（64 条，从核心体向外辐射，长度随频谱拉伸，加性混合）
-    // 比 v2.0 频谱柱更精致克制，圆环面朝相机，极缓旋转
-    // ==================================================================
-    const LINE_COUNT = 64;
-    const lineGeo = new THREE.BufferGeometry();
-    const linePositions = new Float32Array(LINE_COUNT * 2 * 3);
-    lineGeo.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
-    const lineUniforms = { uColor: { value: glowColor }, uAlpha: { value: 0 }, uBeat: { value: 0 } };
-    const lineMat = new THREE.ShaderMaterial({
-      uniforms: lineUniforms,
-      vertexShader: `varying float vT; attribute float aT; void main(){ vT=aT; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
-      fragmentShader: `uniform vec3 uColor; uniform float uAlpha, uBeat; varying float vT;
-        void main(){ float a = uAlpha * mix(0.35, 1.0, vT) * (1.0 + uBeat * 0.6); gl_FragColor = vec4(uColor, a); }`,
-      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-    });
-    // aT: 0 = 内端（暗），1 = 外端（亮），用于沿线渐变
-    const lineT = new Float32Array(LINE_COUNT * 2);
-    for (let i = 0; i < LINE_COUNT; i++) { lineT[i * 2] = 0.0; lineT[i * 2 + 1] = 1.0; }
-    lineGeo.setAttribute('aT', new THREE.BufferAttribute(lineT, 1));
-    const lineSegs = new THREE.LineSegments(lineGeo, lineMat);
-    lineSegs.frustumCulled = false;
-    scene.add(lineSegs);
-
-    // ==================================================================
-    // 元素3 — 分层粒子（2500 颗，非 26 万也非 800）
-    // THREE.Points + ShaderMaterial，CPU 初始化球壳分布，shader curl noise 缓慢漂移
-    // 分层：核心体周围微光尘埃 1500 + 远景星点 800 + 偶发光斑 200；beat 沿径向冲出
-    // ==================================================================
-    const PCOUNT = 2500;
-    const NEAR_COUNT = 1500;
-    const FAR_COUNT = 800;
-    const particleGeo = new THREE.BufferGeometry();
-    const basePos = new Float32Array(PCOUNT * 3);
-    const seeds = new Float32Array(PCOUNT);
-    const sizes = new Float32Array(PCOUNT);
-    for (let i = 0; i < PCOUNT; i++) {
-      const r1 = hhash(i * 3 + 1), r2 = hhash(i * 3 + 2), r4 = hhash(i * 5 + 7);
-      // 三层分布：近层尘埃(r=1.8-2.8) / 远景星点(r=4-6) / 偶发光斑(r=3-5,大尺寸)
-      let R: number, sz: number;
-      if (i < NEAR_COUNT) {
-        R = 1.8 + r1 * 1.0;
-        sz = 0.6 + hhash(i * 11 + 5) * 1.4;
-      } else if (i < NEAR_COUNT + FAR_COUNT) {
-        R = 4.0 + r1 * 2.0;
-        sz = 0.3 + hhash(i * 11 + 5) * 0.7;
-      } else {
-        R = 3.0 + r1 * 2.0;
-        sz = 2.0 + hhash(i * 11 + 5) * 2.0;
-      }
-      const theta = r2 * Math.PI * 2;
-      const phi = Math.acos(2 * r4 - 1);
-      basePos[i * 3]     = R * Math.sin(phi) * Math.cos(theta);
-      basePos[i * 3 + 1] = R * Math.sin(phi) * Math.sin(theta) * 0.85;
-      basePos[i * 3 + 2] = R * Math.cos(phi) * 0.75;
-      seeds[i] = hhash(i * 7 + 13);
-      sizes[i] = sz;
-    }
-    particleGeo.setAttribute('position', new THREE.BufferAttribute(basePos, 3));
-    particleGeo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
-    particleGeo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
-
-    const particleUniforms = {
-      uTime: { value: 0 }, uBass: { value: 0 }, uMid: { value: 0 }, uTreble: { value: 0 },
-      uBeat: { value: 0 }, uAlpha: { value: 0 }, uPixel: { value: renderer.getPixelRatio() },
-      uIntensity: { value: intensity }, uTintColor: { value: tintColor }, uAccentColor: { value: accentColor },
-      uDotTex: { value: dotTexture },
-    };
-    const particleVS = `
-      uniform float uTime, uBass, uMid, uTreble, uBeat, uPixel, uIntensity;
-      attribute float aSeed, aSize;
-      varying float vBeat, vDepth, vSeed, vBass;
-      ${NOISE_GLSL}
-      // curl noise：取 noise 梯度的旋度，无散度流场（缓慢漂移用）
-      vec3 curlNoise(vec3 p) {
-        const float e = 0.1;
-        vec3 dx = vec3(e, 0.0, 0.0);
-        vec3 dy = vec3(0.0, e, 0.0);
-        vec3 dz = vec3(0.0, 0.0, e);
-        float p_x0 = snoise(p - dx), p_x1 = snoise(p + dx);
-        float p_y0 = snoise(p - dy), p_y1 = snoise(p + dy);
-        float p_z0 = snoise(p - dz), p_z1 = snoise(p + dz);
-        float x = p_y1 - p_y0 - (p_z1 - p_z0);
-        float y = p_z1 - p_z0 - (p_x1 - p_x0);
-        float z = p_x1 - p_x0 - (p_y1 - p_y0);
-        return normalize(vec3(x, y, z) + 1e-5);
-      }
-      void main() {
-        vec3 pos = position;
-        // curl noise 缓慢漂移（低强度）
-        float t = uTime * 0.1;
-        vec3 flow = curlNoise(pos * 0.3 + t) * 0.3;
-        pos += flow;
-        // bass 径向轻微膨胀
-        float r = length(pos);
-        vec3 dir = r > 0.001 ? pos / r : normalize(pos + vec3(0.001));
-        pos += dir * uBass * 0.3;
-        // v2.3: beat 沿径向外推（幅度砍到 1/4，由包络驱动，不冲出）
-        pos += dir * uBeat * 0.15;
-        vBeat = uBeat; vSeed = aSeed; vBass = uBass;
-        vDepth = clamp(r / 7.0, 0.0, 1.0);
-        vec4 mv = modelViewMatrix * vec4(pos, 1.0);
-        gl_Position = projectionMatrix * mv;
-        // intensity 控制可见度/大小衰减：低强度压低 size
-        float intensityScale = mix(0.4, 1.0, clamp((uIntensity - 0.2) / 1.3, 0.0, 1.0));
-        gl_PointSize = aSize * (1.0 + uTreble * 0.6 + uBeat * 0.5) * uPixel * (180.0 / max(-mv.z, 0.1)) * intensityScale;
-      }
-    `;
-    const particleFS = `
-      uniform sampler2D uDotTex;
-      uniform float uBass, uMid, uTreble, uBeat, uIntensity;
-      uniform vec3 uTintColor, uAccentColor;
-      varying float vBeat, vDepth, vSeed, vBass;
-      void main() {
-        vec4 tex = texture2D(uDotTex, gl_PointCoord);
-        if (tex.a < 0.02) discard;
-        // tint + accent 混色
-        vec3 col = mix(uTintColor, uAccentColor, clamp(vBass * 0.6 + vSeed * 0.4 - vDepth * 0.2, 0.0, 1.0));
-        // beat 闪白（0.3 上限）
-        col = mix(col, vec3(1.0), vBeat * 0.3);
-        col *= (1.0 + vBeat * 0.8 + vBass * 0.3);
-        // intensity 控制 alpha 衰减
-        float intensityScale = mix(0.4, 1.0, clamp((uIntensity - 0.2) / 1.3, 0.0, 1.0));
-        float fogFade = mix(1.0, 0.4, vDepth * 0.7);
-        gl_FragColor = vec4(col, tex.a * fogFade * 0.6 * intensityScale);
-      }
-    `;
-    const particleMat = new THREE.ShaderMaterial({
-      uniforms: particleUniforms, vertexShader: particleVS, fragmentShader: particleFS,
-      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-    });
-    const particles = new THREE.Points(particleGeo, particleMat);
-    particles.frustumCulled = false;
-    scene.add(particles);
-
-    // ==================================================================
-    // 元素4 — 克制后处理
-    // RenderPass(bg + main) + UnrealBloom(threshold 0.85) + RGBShift + FilmGrain + Vignette + ACES
-    // 砍掉 BokehPass（CSS blur 做歌词景深）/ FXAA（pixelRatio 上限 2）/ Godrays / SSR
+    // 后处理链：RenderPass(bg+main) + GodRays + UnrealBloom + RGBShift + FilmGrain + Vignette + ACES
     // ==================================================================
     const composer = new EffectComposer(renderer);
     // 背景层先渲染（正交相机，独立 scene）到 composer render target
@@ -425,18 +325,21 @@ function useVisualEngine(
     const mainRenderPass = new RenderPass(scene, camera);
     mainRenderPass.clear = false;
     composer.addPass(mainRenderPass);
-    // Bloom 高阈值 0.85 —— 只让核心体边缘/辉光发光，非满屏太阳；v2.2 strength 0.7→0.85 略增亮
+    // 层3 光束（径向模糊从核心辐射）
+    const godRaysPass = new ShaderPass(GodRaysShader);
+    composer.addPass(godRaysPass);
+    // Bloom threshold 0.7 —— 核心边缘/辉光发光，energy 低通驱动 strength（峰值 ~1.0）
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.85, 0.5, 0.85, // strength 0.85, radius 0.5, threshold 0.85
+      0.70, 0.55, 0.70, // strength 0.7, radius 0.55, threshold 0.7
     );
     composer.addPass(bloomPass);
-    // RGBShift 0.001 常驻，beat 脉冲 0.003
+    // RGBShift 0.0008 常驻 + energy*0.0006 低通
     const rgbShiftPass = new ShaderPass(RGBShiftShader);
-    rgbShiftPass.uniforms.amount.value = 0.001;
+    rgbShiftPass.uniforms.amount.value = 0.0008;
     composer.addPass(rgbShiftPass);
-    // FilmPass 0.12 颗粒（电影感 + 抗 banding）
-    const filmPass = new FilmPass(0.12, 0.012, 648, false);
+    // FilmPass 0.1 颗粒（电影感 + 抗 banding）
+    const filmPass = new FilmPass(0.1, 0.012, 648, false);
     composer.addPass(filmPass);
     // Vignette
     const vignettePass = new ShaderPass(VignetteShader);
@@ -448,17 +351,16 @@ function useVisualEngine(
     composer.setPixelRatio(renderer.getPixelRatio());
     composer.setSize(window.innerWidth, window.innerHeight);
 
-    // 入场渐显
+    // 入场渐显（背景渐显，核心体即时显现）
     gsap.to(bgUniforms.uAlpha, { value: 1, duration: 1.8, ease: 'power2.out' });
-    gsap.to(particleUniforms.uAlpha, { value: 1, duration: 2.2, ease: 'power2.out', delay: 0.5 });
 
     let animId: number;
     let analyser: AnalyserNode | null = null;
     let freqData: Uint8Array | null = null;
     let smoothBass = 0, smoothMid = 0, smoothTreb = 0, smoothEnergy = 0;
-    // === v2.3 视觉响应：蓄能池 energy + ADSR 包络 env（取代阶跃式 beatPulse/bloomKick/shiftKick） ===
-    //   energy：低通积累，驱动后处理(bloom/rgbShift) + 持续型 uniform(halo/bg/line)
-    //   env：ADSR 包络，驱动核心体/粒子等节拍型 uniform；平滑趋近，无任何瞬时阶跃
+    // === v2.3 视觉响应：蓄能池 energy + ADSR 包络 env（保留，无阶跃） ===
+    //   energy：低通积累，驱动后处理(bloom/rgbShift) + 持续型 uniform(bg/godRays)
+    //   env：ADSR 包络，驱动核心体等节拍型 uniform；平滑趋近，无任何瞬时阶跃
     let energy = 0;
     let env = 0;
     let envPhase: 'idle' | 'att' | 'dec' | 'sus' | 'rel' = 'idle';
@@ -469,8 +371,21 @@ function useVisualEngine(
     let prevTime = performance.now();
     let beatCount = 0;
 
+    // === 层4 鼠标交互状态（低延迟反馈） ===
+    const raycaster = new THREE.Raycaster();
+    const mouseNDC = new THREE.Vector2();
+    const mousePos = new THREE.Vector3(999, 999, 999);
+    const mouseUV = new THREE.Vector2(0.5, 0.5);
+    let mouseVelocity = 0;
+    let mouseStrength = 0;
+    let lastPointerX = 0, lastPointerY = 0, lastPointerT = 0;
+    let isDragging = false;
+    let orbitTheta = 0, orbitPhi = 0;
+    let velTheta = 0, velPhi = 0;
+    const ripples: { pos: THREE.Vector3; time: number }[] = [];
+
     // === 节拍来源：player.onBeat（离线预分析为主，realtime 为 fallback） ===
-    //   v2.3：onBeat 改为"注入能量 + 触发包络"，不再阶跃赋值。
+    //   保留 v2.3：onBeat "注入能量 + 触发包络"，不阶跃赋值。
     const offBeat = player.onBeat((time: number) => {
       const impulse = 0.5 + smoothBass * 0.5;
       energy = energy * 0.92 + impulse * 0.08;   // 注入非赋值（低通积累）
@@ -488,6 +403,62 @@ function useVisualEngine(
     player.setAnalyserReadyHandler?.(setupAnalysers);
     setTimeout(setupAnalysers, 500);
 
+    // === 层4 鼠标事件（移动扭曲空间 + 点击涟漪 + 拖拽相机轨道） ===
+    const onPointerMove = (e: PointerEvent) => {
+      const nowMs = performance.now();
+      const dx = e.clientX - lastPointerX;
+      const dy = e.clientY - lastPointerY;
+      const dtMs = Math.max(1, nowMs - lastPointerT);
+      // 鼠标速度（像素/ms），低通跟随
+      const speed = Math.sqrt(dx * dx + dy * dy) / dtMs;
+      mouseVelocity = mouseVelocity * 0.7 + speed * 0.3;
+      lastPointerX = e.clientX; lastPointerY = e.clientY; lastPointerT = nowMs;
+      // 更新 mouseUV（0~1，y 翻转）
+      mouseUV.set(e.clientX / window.innerWidth, 1.0 - e.clientY / window.innerHeight);
+      bgUniforms.uMouseUV.value.copy(mouseUV);
+      // raycast 到核心球面，取本地坐标用于 shader 鼠标扭曲
+      mouseNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouseNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouseNDC, camera);
+      const hits = raycaster.intersectObject(coreMesh);
+      if (hits.length > 0) {
+        coreMesh.worldToLocal(mousePos.copy(hits[0].point));
+      } else {
+        mousePos.set(999, 999, 999);
+      }
+      coreUniforms.uMousePos.value.copy(mousePos);
+      // 拖拽：更新相机轨道角度
+      if (isDragging) {
+        velTheta = -dx * 0.005;
+        velPhi = dy * 0.005;
+        orbitTheta += velTheta;
+        orbitPhi += velPhi;
+      }
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      // 仅 canvas 自身接收事件时触发（UI 元素由更高 z-index 拦截）
+      if (e.target !== canvasRef.current) return;
+      isDragging = true;
+      lastPointerX = e.clientX; lastPointerY = e.clientY; lastPointerT = performance.now();
+      // 涟漪：raycast 点击点到核心表面，记录本地坐标 + 时间戳
+      mouseNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouseNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
+      raycaster.setFromCamera(mouseNDC, camera);
+      const hits = raycaster.intersectObject(coreMesh);
+      if (hits.length > 0) {
+        const p = new THREE.Vector3();
+        coreMesh.worldToLocal(p.copy(hits[0].point));
+        ripples.push({ pos: p, time: performance.now() });
+        if (ripples.length > RIPPLE_MAX) ripples.shift();
+      }
+    };
+    const onPointerUp = () => { isDragging = false; };
+    const onPointerLeaveWin = () => { isDragging = false; mouseVelocity *= 0.3; };
+    window.addEventListener('pointermove', onPointerMove, { passive: true });
+    canvasRef.current?.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('blur', onPointerLeaveWin);
+
     const animate = () => {
       animId = requestAnimationFrame(animate);
       const now = performance.now();
@@ -495,8 +466,6 @@ function useVisualEngine(
       prevTime = now;
       bgUniforms.uTime.value += dt;
       coreUniforms.uTime.value += dt;
-      haloUniforms.uTime.value += dt;
-      particleUniforms.uTime.value += dt;
 
       if (analyser && freqData && player.isPlaying) {
         analyser.getByteFrequencyData(freqData as any);
@@ -506,29 +475,11 @@ function useVisualEngine(
         smoothMid = smoothLerp(smoothMid, bands.mid, 0.15);
         smoothTreb = smoothLerp(smoothTreb, bands.treble, 0.18);
         smoothEnergy = smoothLerp(smoothEnergy, bands.level, 0.15);
-
-        // === 频谱径向细线：64 条长度随频谱拉伸（对数采样低中频段） ===
-        const baseR = 1.65;
-        for (let i = 0; i < LINE_COUNT; i++) {
-          const frac = i / (LINE_COUNT - 1);
-          const binIdx = Math.min(freqData.length - 1, Math.floor(Math.pow(frac, 1.6) * (freqData.length * 0.25)));
-          const v = freqData[binIdx] / 255;
-          const angle = (i / LINE_COUNT) * Math.PI * 2;
-          const len = 0.15 + v * 1.4;
-          const ca = Math.cos(angle), sa = Math.sin(angle);
-          linePositions[i * 6]     = ca * baseR;
-          linePositions[i * 6 + 1] = sa * baseR;
-          linePositions[i * 6 + 2] = 0;
-          linePositions[i * 6 + 3] = ca * (baseR + len);
-          linePositions[i * 6 + 4] = sa * (baseR + len);
-          linePositions[i * 6 + 5] = 0;
-        }
-        lineGeo.attributes.position.needsUpdate = true;
       } else {
         smoothBass *= 0.94; smoothMid *= 0.94; smoothTreb *= 0.94; smoothEnergy *= 0.94;
       }
 
-      // === v2.3 蓄能池慢释放 + ADSR 包络（平滑趋近，无阶跃） ===
+      // === v2.3 蓄能池慢释放 + ADSR 包络（保留，平滑趋近，无阶跃） ===
       energy *= Math.pow(0.55, dt);   // 慢释放
       envT += dt;
       let envTarget = 0;
@@ -543,50 +494,75 @@ function useVisualEngine(
       const breath = 1.0 + Math.sin(coreUniforms.uTime.value * 1.4) * 0.02;
       coreMesh.scale.setScalar(breath + env * 0.08);
 
-      // === halo 光环：随蓄能池平滑缩放（不再脉冲阶跃） ===
-      haloMesh.scale.setScalar(1.0 + energy * 0.05);
-
-      // === 频谱细线：极缓旋转 + 透明度入场 ===
-      lineSegs.rotation.z = now * 0.00002;
-      lineUniforms.uAlpha.value = Math.min(1, (lineUniforms.uAlpha.value as number) + dt * 0.5);
-      lineUniforms.uBeat.value = energy * 0.3;
+      // === 层4 鼠标交互更新（低延迟） ===
+      // 鼠标速度→扭曲强度（低通跟随）
+      const mouseTarget = Math.min(mouseVelocity * 0.12, 1.0);
+      mouseStrength += (mouseTarget - mouseStrength) * (1 - Math.exp(-dt / 0.15));
+      // 涟漪 age 更新，超过 2s 移除（FIFO）
+      for (let i = ripples.length - 1; i >= 0; i--) {
+        if ((now - ripples[i].time) / 1000 > 2.0) ripples.splice(i, 1);
+      }
+      // 同步涟漪 uniform（xyz=点击点本地坐标, w=startTime 秒）
+      const rippleArr = coreUniforms.uRipples.value as THREE.Vector4[];
+      for (let i = 0; i < RIPPLE_MAX; i++) {
+        if (i < ripples.length) {
+          const r = ripples[i];
+          rippleArr[i].set(r.pos.x, r.pos.y, r.pos.z, r.time / 1000);
+        } else {
+          rippleArr[i].set(0, 0, 0, -10);
+        }
+      }
+      coreUniforms.uRippleCount.value = ripples.length;
 
       // === 更新所有层 uniforms（全部读 energy/env，无瞬时阶跃） ===
       coreUniforms.uBass.value = smoothBass;
       coreUniforms.uMid.value = smoothMid;
       coreUniforms.uTreble.value = smoothTreb;
       coreUniforms.uBeat.value = env;
-
-      haloUniforms.uBass.value = smoothBass;
-      haloUniforms.uBeat.value = energy;
+      coreUniforms.uEnergy.value = energy;
+      coreUniforms.uMouseStrength.value = mouseStrength;
 
       bgUniforms.uBass.value = smoothBass;
       bgUniforms.uBeat.value = energy;
+      bgUniforms.uTreble.value = smoothTreb;
+      bgUniforms.uMouseStrength.value = mouseStrength;
 
-      particleUniforms.uBass.value = smoothBass;
-      particleUniforms.uMid.value = smoothMid;
-      particleUniforms.uTreble.value = smoothTreb;
-      particleUniforms.uBeat.value = env;
+      // 层3 光束：energy 驱动明灭，封面 accent 染色，bass 驱动基础强度
+      godRaysPass.uniforms.uBeat.value = energy;
+      (godRaysPass.uniforms.uBeamColor.value as THREE.Color).copy(accentColor);
+      godRaysPass.uniforms.uBeamIntensity.value = 0.15 + smoothBass * 0.5;
+      godRaysPass.uniforms.uCenter.value.set(0.5, 0.5);
 
       // === 后处理低通跟随（禁止瞬时赋值） ===
-      // v2.3: bloom 峰值 ~1.0（0.70 常驻 + energy*0.30），400ms 低通达峰
+      // bloom 峰值 ~1.0（0.70 常驻 + energy*0.30），400ms 低通达峰
       const bloomTarget = 0.70 + energy * 0.30;
       bloomPass.strength += (bloomTarget - bloomPass.strength) * (1 - Math.exp(-dt / 0.4));
       // RGBShift 峰值 ~0.0014（0.0008 常驻 + energy*0.0006），250ms 低通
       const shiftTarget = 0.0008 + energy * 0.0006;
       rgbShiftPass.uniforms.amount.value += (shiftTarget - rgbShiftPass.uniforms.amount.value) * (1 - Math.exp(-dt / 0.25));
 
-      // === 相机极缓漂移 + 蓄能微推近 ===
-      camera.position.x = Math.sin(now * 0.00006) * 0.18;
-      camera.position.y = Math.cos(now * 0.00005) * 0.10;
-      camera.position.z = 6.0 + energy * 0.015;
+      // === 相机轨道（拖拽惯性 + 自动慢漂移） ===
+      // 自动慢漂移（叠加到 orbit 角度）
+      orbitTheta += dt * 0.02;
+      // 惯性衰减（拖拽松手后缓慢停止）
+      orbitTheta += velTheta;
+      orbitPhi += velPhi;
+      velTheta *= Math.pow(0.02, dt);
+      velPhi *= Math.pow(0.02, dt);
+      orbitPhi = Math.max(-0.5, Math.min(0.5, orbitPhi));
+      const camR = 6.0 + energy * 0.02;
+      camera.position.set(
+        Math.sin(orbitTheta) * Math.cos(orbitPhi) * camR,
+        Math.sin(orbitPhi) * camR,
+        Math.cos(orbitTheta) * Math.cos(orbitPhi) * camR,
+      );
       camera.lookAt(0, 0, 0);
 
-      // 调试信息（v2.3: 显示 env/energy，不再是 beatPulse）
+      // 调试信息
       (window as any).__beatDebug = {
         count: beatCount, beat: env, energy: energy, bass: smoothBass,
         mid: smoothMid, treble: smoothTreb, bloom: bloomPass.strength,
-        particles: PCOUNT, lines: LINE_COUNT,
+        ripples: ripples.length, mouse: mouseStrength,
       };
       // 同步 CSS 变量驱动沉浸式歌词（beat 脉冲 + 封面色辉光）— 用平滑 energy
       const rootStyle = document.documentElement.style;
@@ -596,7 +572,7 @@ function useVisualEngine(
       rootStyle.setProperty('--cover-accent',
         `rgb(${(accentColor.r * 255) | 0},${(accentColor.g * 255) | 0},${(accentColor.b * 255) | 0})`);
 
-      // 背景层先渲染（正交），composer 渲染主 scene 叠加
+      // 背景层先渲染（正交），composer 渲染主 scene 叠加 + 光束 + bloom
       composer.render();
     };
     animate();
@@ -669,18 +645,20 @@ function useVisualEngine(
     const coverUrl = player.currentSong?.cover;
     if (coverUrl) updateCover(coverUrl);
 
-    engineRef.current = { particleUniforms, coreUniforms, bgUniforms, updateCover, renderer, scene };
+    engineRef.current = { coreUniforms, bgUniforms, godRaysPass, updateCover, renderer, scene };
 
     return () => {
       cancelAnimationFrame(animId);
       offBeat();
       window.removeEventListener('resize', onResize);
-      particleGeo.dispose(); particleMat.dispose();
+      // 层4 鼠标事件清理
+      window.removeEventListener('pointermove', onPointerMove);
+      canvasRef.current?.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('blur', onPointerLeaveWin);
+      // 几何/材质清理（粒子/halo/线已删除）
       coreGeo.dispose(); coreMat.dispose();
-      haloGeo.dispose(); haloMat.dispose();
-      lineGeo.dispose(); lineMat.dispose();
       bgGeo.dispose(); bgMat.dispose();
-      dotTexture.dispose();
       composer.dispose();
       renderer.dispose();
       delete (window as any).__updateCover;
@@ -688,10 +666,10 @@ function useVisualEngine(
     };
   }, []);
 
-  // 强度切换：v2.1 shader 里用 uIntensity 控制 alpha/size 衰减，不重建粒子
+  // 强度切换：v3.0 core shader 用 uIntensity 控制核心体可见度，不重建场景
   useEffect(() => {
     const eng = engineRef.current;
-    if (eng?.particleUniforms) eng.particleUniforms.uIntensity.value = intensity;
+    if (eng?.coreUniforms) eng.coreUniforms.uIntensity.value = intensity;
   }, [intensity]);
 
   // 媒体上传时隐藏特效 canvas，清除后恢复
@@ -1030,8 +1008,8 @@ const App: React.FC = () => {
       {player.currentSong?.cover && !customBg && !customVideo && (
         <div className={`album-bg visible`} style={{ backgroundImage: `url(${player.currentSong.cover})` }} />
       )}
-      {/* Three.js 粒子画布 */}
-      <canvas ref={canvasRef} className="absolute inset-0 z-10 pointer-events-none" />
+      {/* Three.js 视觉画布（接收鼠标交互：拖拽轨道 + 点击涟漪；UI 层 z-30+ 拦截控件） */}
+      <canvas ref={canvasRef} className="absolute inset-0 z-10" />
       {/* 节拍调试显示（按需，默认关闭） */}
       <BeatDebugOverlay visible={showDebug} bpm={player.bpm} analyzing={player.beatAnalyzing} />
       {/* 渐变遮罩 */}
@@ -1051,7 +1029,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full" style={{ background: `linear-gradient(135deg, ${moodColors.primary}, ${moodColors.secondary})` }} />
           <span className="text-[11px] font-semibold tracking-[0.2em] text-white/40 uppercase">AuroraBeat</span>
-          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v2.3.0</span>
+          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v3.0.0</span>
           <span className="text-[10px] text-white/20 ml-2">{mood}</span>
         </div>
         <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
@@ -1429,7 +1407,7 @@ const App: React.FC = () => {
 
           {/* 强度滑块 */}
           <div>
-            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">粒子强度</div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">视觉强度</div>
             <div className="flex items-center gap-2">
               <input type="range" min="0.2" max="1.5" step="0.05" value={intensity} onChange={(e) => setIntensity(parseFloat(e.target.value))} className="flex-1" />
               <span className="text-[11px] text-white/40 w-8 text-right font-mono">{intensity.toFixed(2)}</span>
