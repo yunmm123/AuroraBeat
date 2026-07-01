@@ -891,6 +891,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full" style={{ background: `linear-gradient(135deg, ${moodColors.primary}, ${moodColors.secondary})` }} />
           <span className="text-[11px] font-semibold tracking-[0.2em] text-white/40 uppercase">AuroraBeat</span>
+          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v1.1.1</span>
           <span className="text-[10px] text-white/20 ml-2">{mood}</span>
         </div>
         <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
