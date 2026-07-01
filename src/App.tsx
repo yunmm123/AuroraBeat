@@ -94,7 +94,8 @@ function useVisualEngine(
     // 整个画面就是一个全屏 shader quad（正交相机），无几何体、无粒子
     // ==================================================================
     const scene = new THREE.Scene();
-    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    // near=-1 确保平面（z=0）在视锥内，避免近平面裁剪导致黑屏
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
     const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, alpha: true, antialias: false, powerPreference: 'high-performance' });
     renderer.setClearColor(0x000000, 0);
     // ACES tone mapping（OutputPass 末段应用，避免过曝白斑）
@@ -113,7 +114,7 @@ function useVisualEngine(
     // FBM 多层流动渐变云雾 + 鼠标 domain warping + 点击涟漪 + 节拍呼吸
     // 封面色 tint + accent 驱动云雾颜色（深处压暗，高密度提亮）
     // ==================================================================
-    const RIPPLE_MAX = 5;
+    const RIPPLE_MAX = 3;
     const uniforms = {
       uTime: { value: 0 },
       uBass: { value: 0 }, uMid: { value: 0 }, uTreble: { value: 0 },
@@ -123,15 +124,16 @@ function useVisualEngine(
       uMouseUV: { value: new THREE.Vector2(0.5, 0.5) },
       uMouseStrength: { value: 0 },
       uCamPan: { value: new THREE.Vector2(0, 0) },
-      uRipples: { value: Array.from({ length: RIPPLE_MAX }, () => new THREE.Vector4(0, 0, -10, 0)) },
-      uRippleCount: { value: 0 },
+      // 用 3 个单独 vec4 代替数组 uniform（避免 GLSL ES 1.00 数组 uniform 驱动兼容问题）
+      uRipple0: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uRipple1: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uRipple2: { value: new THREE.Vector4(0, 0, -10, 0) },
     };
     const fieldFS = `
       uniform float uTime, uBass, uMid, uTreble, uEnergy, uEnv, uAlpha, uIntensity, uMouseStrength;
       uniform vec3 uTint, uAccent;
       uniform vec2 uMouseUV, uCamPan;
-      uniform vec4 uRipples[5];
-      uniform int uRippleCount;
+      uniform vec4 uRipple0, uRipple1, uRipple2;
       varying vec2 vUv;
       ${NOISE_GLSL}
       void main() {
@@ -145,15 +147,19 @@ function useVisualEngine(
           snoise(vec3(uv * 1.5 + 17.3, uTime * 0.08))
         ) * uMouseStrength * 0.12 * smoothstep(0.6, 0.0, mDist);
         uv += mouseWarp;
-        // 2. 点击涟漪：从点击点向外波动扩散（sin 衰减波）
+        // 2. 点击涟漪：3 个单独 vec4（xy=点击uv, z=startTime秒, w=是否激活）
         float ripple = 0.0;
-        for (int i = 0; i < 5; i++) {
-          if (i >= uRippleCount) break;
-          vec4 r = uRipples[i];
-          float age = uTime - r.z;
-          if (age < 0.0 || age > 2.5) continue;
-          float d = distance(uv, r.xy);
-          ripple += sin(d * 30.0 - age * 8.0) * exp(-age * 1.5) * 0.15;
+        vec4 rps[3];
+        rps[0] = uRipple0; rps[1] = uRipple1; rps[2] = uRipple2;
+        for (int i = 0; i < 3; i++) {
+          vec4 r = rps[i];
+          if (r.w > 0.5) {
+            float age = uTime - r.z;
+            if (age >= 0.0 && age <= 2.5) {
+              float d = distance(uv, r.xy);
+              ripple += sin(d * 30.0 - age * 8.0) * exp(-age * 1.5) * 0.15;
+            }
+          }
         }
         // 3. 多层 FBM 流动渐变云雾
         float t = uTime * 0.06;
@@ -180,7 +186,9 @@ function useVisualEngine(
         float vignette = smoothstep(1.2, 0.4, length(vUv - 0.5) * 1.4);
         col *= vignette;
         // 7. 高频星点闪烁（极少，克制）
-        float stars = pow(snoise(uv * 150.0), 18.0) * (0.3 + uTreble * 0.5);
+        // pow 用 max(0.0,...) 钳制负值——多数 GPU 驱动用 exp2(y*log2(x)) 实现 pow，
+        //   log2(负数)=NaN 会传播到 col 导致整屏变黑
+        float stars = pow(max(0.0, snoise(uv * 150.0)), 18.0) * (0.3 + uTreble * 0.5);
         col += vec3(stars * 0.5);
         // 8. intensity 控制（亮度系数）
         float a = mix(0.5, 1.0, clamp((uIntensity - 0.2) / 1.3, 0.0, 1.0));
@@ -227,7 +235,7 @@ function useVisualEngine(
     composer.setPixelRatio(renderer.getPixelRatio());
     composer.setSize(window.innerWidth, window.innerHeight);
 
-    // 入场渐显（场域渐显）
+    // 入场渐显（场域渐显）+ fallback 确保 uAlpha 不卡在 0
     gsap.to(uniforms.uAlpha, { value: 1, duration: 1.8, ease: 'power2.out' });
 
     let animId: number;
@@ -325,6 +333,10 @@ function useVisualEngine(
       const dt = Math.min((now - prevTime) / 1000, 0.05);
       prevTime = now;
       uniforms.uTime.value += dt;
+      // uAlpha fallback：确保不卡在 0（gsap 万一没执行也能渐显）
+      if (uniforms.uAlpha.value < 0.999) {
+        uniforms.uAlpha.value = Math.min(1, uniforms.uAlpha.value + dt * 0.6);
+      }
 
       if (analyser && freqData && player.isPlaying) {
         analyser.getByteFrequencyData(freqData as any);
@@ -408,17 +420,16 @@ function useVisualEngine(
       for (let i = ripples.length - 1; i >= 0; i--) {
         if ((now - ripples[i].time) / 1000 > 2.5) ripples.splice(i, 1);
       }
-      // 同步涟漪 uniform（xy=点击 uv, z=startTime 秒, w=占位）
-      const rippleArr = uniforms.uRipples.value as THREE.Vector4[];
+      // 同步涟漪到 3 个单独 vec4 uniform（避免数组 uniform 兼容问题）
+      const rippleUniforms = [uniforms.uRipple0, uniforms.uRipple1, uniforms.uRipple2];
       for (let i = 0; i < RIPPLE_MAX; i++) {
         if (i < ripples.length) {
           const r = ripples[i];
-          rippleArr[i].set(r.uv.x, r.uv.y, r.time / 1000, 0);
+          (rippleUniforms[i].value as THREE.Vector4).set(r.uv.x, r.uv.y, r.time / 1000, 1);
         } else {
-          rippleArr[i].set(0, 0, -10, 0);
+          (rippleUniforms[i].value as THREE.Vector4).set(0, 0, -10, 0);
         }
       }
-      uniforms.uRippleCount.value = ripples.length;
 
       // === 更新所有 uniforms（全部读 energy/env，无瞬时阶跃） ===
       uniforms.uBass.value = smoothBass;
