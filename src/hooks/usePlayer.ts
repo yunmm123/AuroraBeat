@@ -81,6 +81,10 @@ export function usePlayer() {
     return playerCore.getAnalyser();
   }, []);
 
+  const getBeatAnalyser = useCallback(() => {
+    return playerCore.getBeatAnalyser();
+  }, []);
+
   const setAnalyserReadyHandler = useCallback((fn: (analyser: AnalyserNode) => void) => {
     playerCore.setAnalyserReadyHandler(fn);
   }, []);
@@ -116,6 +120,7 @@ export function usePlayer() {
     removeFromQueue,
     clearQueue,
     getAnalyser,
+    getBeatAnalyser,
     setAnalyserReadyHandler,
     getCurrentAudioUrl,
     getCurrentTime,

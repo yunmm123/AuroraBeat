@@ -46,6 +46,7 @@ class PlayerCore {
   private audioContext: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private beatAnalyser: AnalyserNode | null = null;
+  private beatLowpass: BiquadFilterNode | null = null;
   private gainNode: GainNode | null = null;
   private source: MediaElementAudioSourceNode | null = null;
   private progressRaf: number | null = null;
@@ -125,20 +126,29 @@ class PlayerCore {
       const Ctx = window.AudioContext || (window as any).webkitAudioContext;
       this.audioContext = new Ctx();
       this.source = this.audioContext.createMediaElementSource(this.audio);
-      // 双 AnalyserNode — Mineradio同款架构
+      // 可视化频谱 analyser（保留平滑，画面流畅）
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = 2048;
       this.analyser.smoothingTimeConstant = 0.58;
+      // 节拍检测专用链路：source → lowpass(150Hz) → beatAnalyser(smoothing=0)
+      // 低通隔离底鼓/贝斯频段；smoothing=0 保留瞬态；用 getFloatTimeDomainData 算 RMS
+      // 修复根因：之前用高 smoothing(0.58) analyser 做节拍，瞬态被抹平导致上升沿失效
+      this.beatLowpass = this.audioContext.createBiquadFilter();
+      this.beatLowpass.type = 'lowpass';
+      this.beatLowpass.frequency.value = 150;
+      this.beatLowpass.Q.value = 1;
       this.beatAnalyser = this.audioContext.createAnalyser();
-      this.beatAnalyser.fftSize = 2048;
-      this.beatAnalyser.smoothingTimeConstant = 0.10;
+      this.beatAnalyser.fftSize = 1024;
+      this.beatAnalyser.smoothingTimeConstant = 0;
       this.gainNode = this.audioContext.createGain();
       this.gainNode.gain.value = this.state.volume;
-      // source → analyser + beatAnalyser → gainNode → destination
+      // 可视化支路（进 destination 出声）：source → analyser → gainNode → destination
       this.source.connect(this.analyser);
-      this.source.connect(this.beatAnalyser);
       this.analyser.connect(this.gainNode);
       this.gainNode.connect(this.audioContext.destination);
+      // 节拍分析支路（不进 destination，避免双重发声）：source → lowpass → beatAnalyser
+      this.source.connect(this.beatLowpass);
+      this.beatLowpass.connect(this.beatAnalyser);
       if (this.onAnalyserReady && this.analyser) {
         this.onAnalyserReady(this.analyser);
       }

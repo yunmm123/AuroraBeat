@@ -60,6 +60,23 @@ declare module 'three/examples/jsm/postprocessing/OutputPass' {
   }
 }
 
+declare module 'three/examples/jsm/postprocessing/AfterimagePass' {
+  export class AfterimagePass {
+    constructor(damp?: number)
+    uniforms: any
+    enabled: boolean
+  }
+}
+
+declare module 'three/examples/jsm/postprocessing/GlitchPass' {
+  export class GlitchPass {
+    constructor(dt_size?: number)
+    uniforms: any
+    enabled: boolean
+    goWild: boolean
+  }
+}
+
 declare module 'three/examples/jsm/shaders/RGBShiftShader' {
   export const RGBShiftShader: {
     uniforms: { tDiffuse: { value: any }; amount: { value: number }; angle: { value: number } }
