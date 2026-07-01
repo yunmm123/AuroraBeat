@@ -92,6 +92,10 @@ export function usePlayer() {
   const getCurrentAudioUrl = useCallback(() => playerCore.getCurrentAudioUrl(), []);
   const getCurrentTime = useCallback(() => playerCore.getCurrentTime(), []);
 
+  // v2.2: 订阅节拍事件（来源：离线预分析为主，realtime 为 fallback）。bpm 已通过 state 暴露。
+  const onBeat = useCallback((fn: (time: number) => void) => playerCore.onBeat(fn), []);
+  const getBpm = useCallback(() => playerCore.getBpm(), []);
+
   const setServerPort = useCallback((port: number) => {
     playerCore.setServerPort(port);
   }, []);
@@ -124,6 +128,8 @@ export function usePlayer() {
     setAnalyserReadyHandler,
     getCurrentAudioUrl,
     getCurrentTime,
+    onBeat,
+    getBpm,
     setServerPort,
     isLiked,
     toggleLike,

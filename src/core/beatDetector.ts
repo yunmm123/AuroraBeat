@@ -1,7 +1,11 @@
 // 实时底鼓节拍检测 —— 时域 RMS + 自适应阈值 + 去抖
 // 参考：realtime-bpm-analyzer（低通 150Hz + 峰值 + 去抖）、music-tempo OnsetDetection（自适应阈值）
-// 关键修复：之前用高 smoothing(0.58) 的频域 analyser 做节拍，dB 压缩 + 瞬态被抹平导致上升沿失效
-// 正确做法：专用 lowpass(150Hz) → analyser(smoothing=0) → getFloatTimeDomainData 算 RMS（真线性能量）
+//
+// v2.2 起本模块定位为【fallback】：playerCore 优先用 beatAnalyzer.ts 的离线预分析
+// （fetch→decodeAudioData→OfflineAudioContext lowpass→峰值检测→BPM+beats[]，查表跟随）。
+// 当离线分析失败（如 decodeAudioData 出错）或尚未完成时，playerCore.dispatchBeats 回退到本类，
+// 用 beatAnalyser(lowpass 150Hz + smoothing=0) 的 getFloatTimeDomainData 算 RMS 做实时检测。
+// v2.2 删除了 audio.crossOrigin='anonymous'，频谱不再被 CORS tainted 静默，故本 fallback 现在也能工作。
 //
 // 数据流：playerCore 的 beatAnalyser 已经过 lowpass(150Hz) + smoothing=0
 // 这里接收其时域样本，算 RMS，用滑动窗口 mean+k·std 自适应阈值 + 220ms 去抖

@@ -3,7 +3,7 @@ import { usePlayer } from './hooks/usePlayer';
 import type { Song, NeteaseUser } from './types';
 import * as THREE from 'three';
 import { gsap } from 'gsap';
-import { RealtimeKickDetector, sampleFrequencyBands, smoothLerp } from './core/beatDetector';
+import { sampleFrequencyBands, smoothLerp } from './core/beatDetector';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
@@ -34,14 +34,17 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v2.1 — 减法重做，克制美学
-// 核心一句话：少，但每一帧都呼吸。从"数量震撼"转向"质感说话"。
+// Three.js 视觉引擎 v2.2 — 质感说话 + 视觉层次增强
+// 核心一句话：少，但每一帧都呼吸。在 v2.1 克制美学上增加层次而非堆砌。
 //   1. 单一柔光核心体（IcosahedronGeometry + fbm 位移 + 菲涅尔辉光）—— 唯一焦点
+//   1b. 核心体外层光环 halo（backside fresnel 球壳，beat 脉冲）—— 新增层次
+//   1c. 频谱径向细线（64 条，长度随频谱拉伸，加性混合）—— 新增层次
 //   2. 背景慢速色域流动（全屏 quad 正交，fbm UV 偏移，替代 raymarch 体积云）
-//   3. 少量精致粒子（800 颗，非 26 万；curl noise 缓慢漂移 + beat 径向冲出）
-//   4. 克制后处理：UnrealBloom(threshold 0.85) + RGBShift + FilmGrain + Vignette + ACES
-// 节拍真正驱动视觉：beat 触发核心体蓄力收缩→弹开 + bloom spike + 色差脉冲
-// 节拍检测：RealtimeKickDetector（时域RMS + 自适应阈值）
+//   3. 分层粒子（2500 颗 = 近层尘埃 1500 + 远景星点 800 + 偶发光斑 200；curl noise 漂移 + beat 冲出）
+//   4. 克制后处理：UnrealBloom(strength 0.85, threshold 0.85) + RGBShift + FilmGrain + Vignette + ACES
+// 节拍真正驱动视觉：beat 触发核心体蓄力收缩→弹开 + halo 脉冲 + bloom spike 1.3 + 色差脉冲
+// 节拍检测：离线预分析（beatAnalyzer.ts，fetch→decodeAudioData→OfflineAudioContext lowpass→峰值检测→BPM+beats[]）
+//           播放时 player.onBeat 查表跟随；失败回退 RealtimeKickDetector
 // 封面取色：K-Means 主色 tint + 副色 accent，驱动 shader 色调
 // ====================================================================
 
@@ -246,27 +249,91 @@ function useVisualEngine(
     scene.add(coreMesh);
 
     // ==================================================================
-    // 元素3 — 少量精致粒子（800 颗，非 26 万）
-    // THREE.Points + ShaderMaterial，CPU 初始化球壳分布，shader curl noise 缓慢漂移
-    // 分层：核心体周围微光尘埃 500 + 远景星点 300；beat 沿径向冲出（0.6 上限）
+    // 元素1b — 核心体外层光环 halo（backside fresnel 球壳，beat 脉冲）
+    // 让核心体有"光晕"质感，v1.x 有过的层次，v2.1 砍掉，v2.2 加回（更克制）
     // ==================================================================
-    const PCOUNT = 800;
+    const haloUniforms = {
+      uTime: { value: 0 }, uBeat: { value: 0 }, uBass: { value: 0 },
+      uGlowColor: { value: glowColor }, uTintColor: { value: tintColor },
+    };
+    const haloFS = `
+      uniform vec3 uGlowColor, uTintColor; uniform float uBeat, uBass;
+      varying vec3 vNormal; varying vec3 vViewDir;
+      void main() {
+        float fres = pow(1.0 - max(dot(normalize(vNormal), normalize(vViewDir)), 0.0), 3.0);
+        vec3 col = mix(uGlowColor, uTintColor, 0.30) * fres * (1.15 + uBeat * 1.0 + uBass * 0.4);
+        float a = fres * (0.32 + uBeat * 0.32);
+        gl_FragColor = vec4(col, a);
+      }
+    `;
+    const haloMat = new THREE.ShaderMaterial({
+      uniforms: haloUniforms,
+      vertexShader: `varying vec3 vNormal; varying vec3 vViewDir;
+        void main(){ vNormal=normalize(normalMatrix*normal); vec4 mv=modelViewMatrix*vec4(position,1.0); vViewDir=normalize(-mv.xyz); gl_Position=projectionMatrix*mv; }`,
+      fragmentShader: haloFS,
+      transparent: true, depthWrite: false, side: THREE.BackSide, blending: THREE.AdditiveBlending,
+    });
+    const haloGeo = new THREE.SphereGeometry(2.0, 48, 48);
+    const haloMesh = new THREE.Mesh(haloGeo, haloMat);
+    scene.add(haloMesh);
+
+    // ==================================================================
+    // 元素1c — 频谱径向细线（64 条，从核心体向外辐射，长度随频谱拉伸，加性混合）
+    // 比 v2.0 频谱柱更精致克制，圆环面朝相机，极缓旋转
+    // ==================================================================
+    const LINE_COUNT = 64;
+    const lineGeo = new THREE.BufferGeometry();
+    const linePositions = new Float32Array(LINE_COUNT * 2 * 3);
+    lineGeo.setAttribute('position', new THREE.BufferAttribute(linePositions, 3));
+    const lineUniforms = { uColor: { value: glowColor }, uAlpha: { value: 0 }, uBeat: { value: 0 } };
+    const lineMat = new THREE.ShaderMaterial({
+      uniforms: lineUniforms,
+      vertexShader: `varying float vT; attribute float aT; void main(){ vT=aT; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+      fragmentShader: `uniform vec3 uColor; uniform float uAlpha, uBeat; varying float vT;
+        void main(){ float a = uAlpha * mix(0.35, 1.0, vT) * (1.0 + uBeat * 0.6); gl_FragColor = vec4(uColor, a); }`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    // aT: 0 = 内端（暗），1 = 外端（亮），用于沿线渐变
+    const lineT = new Float32Array(LINE_COUNT * 2);
+    for (let i = 0; i < LINE_COUNT; i++) { lineT[i * 2] = 0.0; lineT[i * 2 + 1] = 1.0; }
+    lineGeo.setAttribute('aT', new THREE.BufferAttribute(lineT, 1));
+    const lineSegs = new THREE.LineSegments(lineGeo, lineMat);
+    lineSegs.frustumCulled = false;
+    scene.add(lineSegs);
+
+    // ==================================================================
+    // 元素3 — 分层粒子（2500 颗，非 26 万也非 800）
+    // THREE.Points + ShaderMaterial，CPU 初始化球壳分布，shader curl noise 缓慢漂移
+    // 分层：核心体周围微光尘埃 1500 + 远景星点 800 + 偶发光斑 200；beat 沿径向冲出
+    // ==================================================================
+    const PCOUNT = 2500;
+    const NEAR_COUNT = 1500;
+    const FAR_COUNT = 800;
     const particleGeo = new THREE.BufferGeometry();
     const basePos = new Float32Array(PCOUNT * 3);
     const seeds = new Float32Array(PCOUNT);
     const sizes = new Float32Array(PCOUNT);
     for (let i = 0; i < PCOUNT; i++) {
       const r1 = hhash(i * 3 + 1), r2 = hhash(i * 3 + 2), r4 = hhash(i * 5 + 7);
-      // 前 500 颗核心体周围微光尘埃，后 300 颗远景星点
-      const isFar = i >= 500;
-      const R = isFar ? (5.0 + r1 * 2.5) : (2.2 + r1 * 1.3);
+      // 三层分布：近层尘埃(r=1.8-2.8) / 远景星点(r=4-6) / 偶发光斑(r=3-5,大尺寸)
+      let R: number, sz: number;
+      if (i < NEAR_COUNT) {
+        R = 1.8 + r1 * 1.0;
+        sz = 0.6 + hhash(i * 11 + 5) * 1.4;
+      } else if (i < NEAR_COUNT + FAR_COUNT) {
+        R = 4.0 + r1 * 2.0;
+        sz = 0.3 + hhash(i * 11 + 5) * 0.7;
+      } else {
+        R = 3.0 + r1 * 2.0;
+        sz = 2.0 + hhash(i * 11 + 5) * 2.0;
+      }
       const theta = r2 * Math.PI * 2;
       const phi = Math.acos(2 * r4 - 1);
       basePos[i * 3]     = R * Math.sin(phi) * Math.cos(theta);
       basePos[i * 3 + 1] = R * Math.sin(phi) * Math.sin(theta) * 0.85;
       basePos[i * 3 + 2] = R * Math.cos(phi) * 0.75;
       seeds[i] = hhash(i * 7 + 13);
-      sizes[i] = isFar ? (0.3 + hhash(i * 11 + 5) * 0.8) : (0.6 + hhash(i * 11 + 5) * 1.6);
+      sizes[i] = sz;
     }
     particleGeo.setAttribute('position', new THREE.BufferAttribute(basePos, 3));
     particleGeo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
@@ -358,10 +425,10 @@ function useVisualEngine(
     const mainRenderPass = new RenderPass(scene, camera);
     mainRenderPass.clear = false;
     composer.addPass(mainRenderPass);
-    // Bloom 高阈值 0.85 —— 只让核心体边缘/辉光发光，非满屏太阳
+    // Bloom 高阈值 0.85 —— 只让核心体边缘/辉光发光，非满屏太阳；v2.2 strength 0.7→0.85 略增亮
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.7, 0.5, 0.85, // strength 0.7, radius 0.5, threshold 0.85
+      0.85, 0.5, 0.85, // strength 0.85, radius 0.5, threshold 0.85
     );
     composer.addPass(bloomPass);
     // RGBShift 0.001 常驻，beat 脉冲 0.003
@@ -388,24 +455,26 @@ function useVisualEngine(
     let animId: number;
     let analyser: AnalyserNode | null = null;
     let freqData: Uint8Array | null = null;
-    let beatAnalyser: AnalyserNode | null = null;
-    let timeBuf: Float32Array | null = null;
     let smoothBass = 0, smoothMid = 0, smoothTreb = 0, smoothEnergy = 0;
     let beatPulse = 0, bloomKick = 0, shiftKick = 0;
     let beatTime = 1.0; // 距上次 beat 的时间（s），初始大值无影响
     let prevTime = performance.now();
-
-    // === 节拍检测：RealtimeKickDetector（时域RMS + 自适应阈值 mean+k·std + 去抖） ===
-    const beatDetector = new RealtimeKickDetector({
-      sensitivity: 1.5, historySize: 43, minBeatIntervalMs: 220,
-    });
     let beatCount = 0;
 
+    // === v2.2 节拍来源：player.onBeat（离线预分析为主，realtime 为 fallback） ===
+    //   不再在渲染线程跑 RealtimeKickDetector；节拍由 playerCore 统一派发。
+    const offBeat = player.onBeat((time: number) => {
+      beatPulse = 1;
+      bloomKick = Math.max(bloomKick, smoothBass * 0.5 + 0.4);
+      shiftKick = 1;
+      beatTime = 0; // 重置蓄力释放计时
+      beatCount++;
+    });
+
+    // 可视化频谱仍用 AnalyserNode（v2.2 删了 crossOrigin，频谱不再静默）
     const setupAnalysers = () => {
       const a = player.getAnalyser();
       if (a && !analyser) { analyser = a; freqData = new Uint8Array(a.frequencyBinCount); }
-      const ba = player.getBeatAnalyser();
-      if (ba && !beatAnalyser) { beatAnalyser = ba; timeBuf = new Float32Array(ba.fftSize); }
     };
     player.setAnalyserReadyHandler?.(setupAnalysers);
     setTimeout(setupAnalysers, 500);
@@ -417,28 +486,36 @@ function useVisualEngine(
       prevTime = now;
       bgUniforms.uTime.value += dt;
       coreUniforms.uTime.value += dt;
+      haloUniforms.uTime.value += dt;
       particleUniforms.uTime.value += dt;
       beatTime += dt;
 
       if (analyser && freqData && player.isPlaying) {
         analyser.getByteFrequencyData(freqData as any);
         const bands = sampleFrequencyBands(freqData, analyser.context.sampleRate, analyser.fftSize);
-        if (beatAnalyser && timeBuf) {
-          beatAnalyser.getFloatTimeDomainData(timeBuf as any);
-          const isBeat = beatDetector.update(timeBuf);
-          if (isBeat) {
-            beatPulse = 1;
-            bloomKick = Math.max(bloomKick, bands.bass * 0.5 + 0.3);
-            shiftKick = 1;
-            beatTime = 0; // 重置蓄力释放计时
-            beatCount++;
-          }
-        }
         // 音频平滑（mix 0.15 阻尼，避免闪烁）
         smoothBass = smoothLerp(smoothBass, bands.bass, 0.15);
         smoothMid = smoothLerp(smoothMid, bands.mid, 0.15);
         smoothTreb = smoothLerp(smoothTreb, bands.treble, 0.18);
         smoothEnergy = smoothLerp(smoothEnergy, bands.level, 0.15);
+
+        // === 频谱径向细线：64 条长度随频谱拉伸（对数采样低中频段） ===
+        const baseR = 1.65;
+        for (let i = 0; i < LINE_COUNT; i++) {
+          const frac = i / (LINE_COUNT - 1);
+          const binIdx = Math.min(freqData.length - 1, Math.floor(Math.pow(frac, 1.6) * (freqData.length * 0.25)));
+          const v = freqData[binIdx] / 255;
+          const angle = (i / LINE_COUNT) * Math.PI * 2;
+          const len = 0.15 + v * 1.4;
+          const ca = Math.cos(angle), sa = Math.sin(angle);
+          linePositions[i * 6]     = ca * baseR;
+          linePositions[i * 6 + 1] = sa * baseR;
+          linePositions[i * 6 + 2] = 0;
+          linePositions[i * 6 + 3] = ca * (baseR + len);
+          linePositions[i * 6 + 4] = sa * (baseR + len);
+          linePositions[i * 6 + 5] = 0;
+        }
+        lineGeo.attributes.position.needsUpdate = true;
       } else {
         smoothBass *= 0.94; smoothMid *= 0.94; smoothTreb *= 0.94; smoothEnergy *= 0.94;
       }
@@ -456,11 +533,22 @@ function useVisualEngine(
       const release = 0.06 * beatTime * Math.exp(-beatTime * 4.0);
       coreMesh.scale.setScalar(breath + anticip + release);
 
+      // === halo 光环：随 beat 脉冲缩放 + 辉光增强 ===
+      haloMesh.scale.setScalar(1.0 + beatPulse * 0.08);
+
+      // === 频谱细线：极缓旋转 + 透明度入场 ===
+      lineSegs.rotation.z = now * 0.00002;
+      lineUniforms.uAlpha.value = Math.min(1, (lineUniforms.uAlpha.value as number) + dt * 0.5);
+      lineUniforms.uBeat.value = beatPulse;
+
       // === 更新所有层 uniforms ===
       coreUniforms.uBass.value = smoothBass;
       coreUniforms.uMid.value = smoothMid;
       coreUniforms.uTreble.value = smoothTreb;
       coreUniforms.uBeat.value = beatPulse;
+
+      haloUniforms.uBass.value = smoothBass;
+      haloUniforms.uBeat.value = beatPulse;
 
       bgUniforms.uBass.value = smoothBass;
       bgUniforms.uBeat.value = beatPulse;
@@ -471,14 +559,14 @@ function useVisualEngine(
       particleUniforms.uBeat.value = beatPulse;
 
       // === 后处理动态：beat 冲击 ===
-      // bloom strength 0.7→1.1（~1.5x），drop 时弹开
-      bloomPass.strength = 0.7 + bloomKick * 0.4;
+      // v2.2: bloom strength 0.85 常驻，beat spike 0.85→1.3（+0.45）
+      bloomPass.strength = 0.85 + bloomKick * 0.45;
       // RGBShift 0.001 常驻，beat 脉冲 0.003
       rgbShiftPass.uniforms.amount.value = 0.001 + shiftKick * 0.002;
 
-      // === 相机极缓漂移（幅度 0.1，非 0.25，避免眩晕） ===
-      camera.position.x = Math.sin(now * 0.00006) * 0.10;
-      camera.position.y = Math.cos(now * 0.00005) * 0.07;
+      // === 相机极缓漂移（幅度 0.18，稍明显但仍克制） ===
+      camera.position.x = Math.sin(now * 0.00006) * 0.18;
+      camera.position.y = Math.cos(now * 0.00005) * 0.10;
       camera.position.z = 6.0;
       camera.lookAt(0, 0, 0);
 
@@ -486,7 +574,7 @@ function useVisualEngine(
       (window as any).__beatDebug = {
         count: beatCount, beat: beatPulse, bass: smoothBass,
         mid: smoothMid, treble: smoothTreb, bloom: bloomPass.strength,
-        particles: PCOUNT,
+        particles: PCOUNT, lines: LINE_COUNT,
       };
       // 同步 CSS 变量驱动沉浸式歌词（beat 脉冲 + 封面色辉光）
       const rootStyle = document.documentElement.style;
@@ -573,9 +661,12 @@ function useVisualEngine(
 
     return () => {
       cancelAnimationFrame(animId);
+      offBeat();
       window.removeEventListener('resize', onResize);
       particleGeo.dispose(); particleMat.dispose();
       coreGeo.dispose(); coreMat.dispose();
+      haloGeo.dispose(); haloMat.dispose();
+      lineGeo.dispose(); lineMat.dispose();
       bgGeo.dispose(); bgMat.dispose();
       dotTexture.dispose();
       composer.dispose();
@@ -622,9 +713,9 @@ function detectMood(song: Song | null): Mood {
 }
 
 // ====================================================================
-// 节拍调试显示（按需开关，不常驻）
+// 节拍调试显示（按需开关，不常驻）— v2.2 增加 BPM 与分析状态
 // ====================================================================
-const BeatDebugOverlay: React.FC<{ visible: boolean }> = ({ visible }) => {
+const BeatDebugOverlay: React.FC<{ visible: boolean; bpm: number; analyzing: boolean }> = ({ visible, bpm, analyzing }) => {
   const [info, setInfo] = React.useState<any>({ count: 0, beat: 0, bass: 0, mid: 0, treble: 0, bloom: 0 });
   React.useEffect(() => {
     if (!visible) return;
@@ -635,14 +726,19 @@ const BeatDebugOverlay: React.FC<{ visible: boolean }> = ({ visible }) => {
     return () => clearInterval(id);
   }, [visible]);
   if (!visible) return null;
+  const statusText = analyzing
+    ? '— 分析中...'
+    : (bpm > 0 ? '已分析' : '未分析');
+  const statusColor = analyzing ? '#ffd23f' : (bpm > 0 ? '#0f0' : '#888');
   return (
     <div className="absolute top-16 left-4 z-[55] bg-black/70 text-green-400 font-mono text-xs px-3 py-2 rounded pointer-events-none">
       <div>BEAT COUNT: {info.count}</div>
+      <div>BPM: {bpm > 0 ? bpm.toFixed(1) : '—'} <span style={{ color: statusColor }}>[{statusText}]</span></div>
       <div>BEAT PULSE: {(info.beat || 0).toFixed(3)}</div>
       <div>BASS: {(info.bass || 0).toFixed(3)} / MID: {(info.mid || 0).toFixed(3)} / TREBLE: {(info.treble || 0).toFixed(3)}</div>
       <div>BLOOM: {(info.bloom || 0).toFixed(2)}</div>
       <div style={{ color: info.count > 0 ? '#0f0' : '#888' }}>
-        {info.count > 0 ? '✓ 卡点触发中' : '— 等待节拍'}
+        {info.count > 0 ? '✓ 卡点触发中' : (analyzing ? '— 分析中' : '— 等待节拍')}
       </div>
     </div>
   );
@@ -925,7 +1021,7 @@ const App: React.FC = () => {
       {/* Three.js 粒子画布 */}
       <canvas ref={canvasRef} className="absolute inset-0 z-10 pointer-events-none" />
       {/* 节拍调试显示（按需，默认关闭） */}
-      <BeatDebugOverlay visible={showDebug} />
+      <BeatDebugOverlay visible={showDebug} bpm={player.bpm} analyzing={player.beatAnalyzing} />
       {/* 渐变遮罩 */}
       <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: `linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)` }} />
 
@@ -943,7 +1039,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full" style={{ background: `linear-gradient(135deg, ${moodColors.primary}, ${moodColors.secondary})` }} />
           <span className="text-[11px] font-semibold tracking-[0.2em] text-white/40 uppercase">AuroraBeat</span>
-          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v2.1.0</span>
+          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v2.2.0</span>
           <span className="text-[10px] text-white/20 ml-2">{mood}</span>
         </div>
         <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>

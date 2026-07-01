@@ -1,4 +1,6 @@
 import type { Song, LyricsLine, YrcWord } from '../types';
+import { analyzeTrackBeats } from './beatAnalyzer';
+import { RealtimeKickDetector } from './beatDetector';
 
 export type PlayMode = 'list' | 'single' | 'shuffle';
 export type AudioQuality = 'standard' | 'exhigh' | 'lossless' | 'hires';
@@ -18,6 +20,8 @@ export interface PlayerState {
   showLyrics: boolean;
   likedSongs: Set<string>;
   quality: AudioQuality;
+  bpm: number;            // 离线分析得出的 BPM（0 = 未分析）
+  beatAnalyzing: boolean; // 离线节拍分析进行中
 }
 
 type Listener = (state: PlayerState) => void;
@@ -41,6 +45,8 @@ class PlayerCore {
     showLyrics: true,
     likedSongs: new Set(),
     quality: 'exhigh' as AudioQuality,
+    bpm: 0,
+    beatAnalyzing: false,
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -54,6 +60,14 @@ class PlayerCore {
   private onAnalyserReady: ((analyser: AnalyserNode) => void) | null = null;
   // 当前音频 URL（用于离线节拍分析）
   private currentAudioUrl: string | null = null;
+  // === v2.2 节拍系统：离线预分析为主，realtime 为 fallback ===
+  private beats: number[] = [];                          // 离线分析得到的节拍时间戳数组
+  private nextBeatIdx = 0;                               // 下一个待触发的节拍索引
+  private beatListeners: Set<(time: number) => void> = new Set();
+  public bpm: number = 0;                                // 当前 BPM
+  // realtime fallback（离线分析失败时用）
+  private realtimeKick: RealtimeKickDetector | null = null;
+  private rtTimeBuf: Float32Array | null = null;
 
   constructor() {
     this.initAudio();
@@ -74,7 +88,8 @@ class PlayerCore {
   private initAudio() {
     if (this.audio) return;
     this.audio = new Audio();
-    this.audio.crossOrigin = 'anonymous';
+    // v2.2: 删除 crossOrigin='anonymous'。同源代理（/api/audio 已带 ACAO:*）不需要它，
+    // 设置反而会触发跨端口 CORS 校验导致 MediaElementAudioSourceNode 静默输出 0（频谱全 0）。
     this.audio.preload = 'auto';
 
     this.audio.addEventListener('play', () => {
@@ -140,6 +155,11 @@ class PlayerCore {
       this.beatAnalyser = this.audioContext.createAnalyser();
       this.beatAnalyser.fftSize = 1024;
       this.beatAnalyser.smoothingTimeConstant = 0;
+      // v2.2: realtime 节拍检测作为离线分析失败的 fallback（crossOrigin 已删，频谱不再静默）
+      this.realtimeKick = new RealtimeKickDetector({
+        sensitivity: 1.5, historySize: 43, minBeatIntervalMs: 220,
+      });
+      this.rtTimeBuf = new Float32Array(this.beatAnalyser.fftSize);
       this.gainNode = this.audioContext.createGain();
       this.gainNode.gain.value = this.state.volume;
       // 可视化支路（进 destination 出声）：source → analyser → gainNode → destination
@@ -177,6 +197,8 @@ class PlayerCore {
       if (!this.audio || this.audio.paused) return;
       this.state.currentTime = this.audio.currentTime;
       this.state.duration = this.audio.duration || this.state.duration;
+      // === v2.2 节拍派发 ===
+      this.dispatchBeats(this.state.currentTime);
       if (this.onTimeUpdate) {
         this.onTimeUpdate(this.state.currentTime);
       }
@@ -184,6 +206,58 @@ class PlayerCore {
       this.progressRaf = requestAnimationFrame(tick);
     };
     this.progressRaf = requestAnimationFrame(tick);
+  }
+
+  /**
+   * 节拍派发：离线分析有结果时查表跟随；否则用 realtime fallback。
+   * 只触发距 currentTime 150ms 内的节拍，避免快进时连发。
+   */
+  private dispatchBeats(t: number) {
+    if (this.beats.length > 0) {
+      // 离线预分析路径：查表
+      while (this.nextBeatIdx < this.beats.length && this.beats[this.nextBeatIdx] <= t) {
+        const beatTime = this.beats[this.nextBeatIdx];
+        if (t - beatTime < 0.15) {
+          this.beatListeners.forEach(fn => fn(beatTime));
+        }
+        this.nextBeatIdx++;
+      }
+    } else if (this.beatAnalyser && this.realtimeKick && this.rtTimeBuf) {
+      // realtime fallback：离线分析失败/未完成时用 lowpass 时域 RMS 检测
+      this.beatAnalyser.getFloatTimeDomainData(this.rtTimeBuf as any);
+      const isBeat = this.realtimeKick.update(this.rtTimeBuf);
+      if (isBeat) {
+        this.beatListeners.forEach(fn => fn(t));
+      }
+    }
+  }
+
+  /** 异步离线节拍分析：fetch+decodeAudioData+lowpass+峰值检测。失败则保持 realtime fallback。 */
+  private async startBeatAnalysis(url: string, token: number) {
+    this.state.beatAnalyzing = true;
+    this.notify();
+    try {
+      const result = await analyzeTrackBeats(url);
+      if (token !== this.trackSwitchToken) return; // 切歌了，丢弃结果
+      if (result.beats.length > 0 && result.bpm > 0) {
+        this.beats = result.beats;
+        this.bpm = result.bpm;
+        this.state.bpm = result.bpm;
+        // 同步 nextBeatIdx 到当前播放位置（分析可能比播放启动晚）
+        const t = this.audio?.currentTime || 0;
+        this.nextBeatIdx = 0;
+        while (this.nextBeatIdx < this.beats.length && this.beats[this.nextBeatIdx] <= t) {
+          this.nextBeatIdx++;
+        }
+      }
+    } catch (e) {
+      console.warn('[PlayerCore] 离线节拍分析失败，回退 realtime 检测:', e);
+    } finally {
+      if (token === this.trackSwitchToken) {
+        this.state.beatAnalyzing = false;
+        this.notify();
+      }
+    }
   }
 
   private stopProgressLoop() {
@@ -235,6 +309,17 @@ class PlayerCore {
 
   getAnalyser(): AnalyserNode | null {
     return this.analyser;
+  }
+
+  /** 订阅节拍事件，返回取消订阅函数。节拍来源：离线预分析为主，realtime 为 fallback */
+  onBeat(fn: (time: number) => void): () => void {
+    this.beatListeners.add(fn);
+    return () => this.beatListeners.delete(fn);
+  }
+
+  /** 当前 BPM（离线分析结果，0 = 未分析） */
+  getBpm(): number {
+    return this.bpm;
   }
 
   async resolveSongUrl(song: Song): Promise<string | null> {
@@ -323,6 +408,13 @@ class PlayerCore {
     this.state.currentTime = 0;
     this.state.lyrics = [];
     this.state.lyricsLoading = true;
+    // v2.2: 切歌时重置节拍系统
+    this.beats = [];
+    this.nextBeatIdx = 0;
+    this.bpm = 0;
+    this.state.bpm = 0;
+    this.state.beatAnalyzing = false;
+    this.realtimeKick?.reset();
     this.notify();
 
     try {
@@ -368,6 +460,9 @@ class PlayerCore {
       this.audio.src = url;
       this.audio.load();
       this.currentAudioUrl = url;
+
+      // v2.2: 异步离线节拍分析（不阻塞播放，分析期间 UI 显示"分析中"，realtime fallback 兜底）
+      this.startBeatAnalysis(url, token);
 
       this.audio.onended = () => {
         if (token !== this.trackSwitchToken) return;
@@ -473,6 +568,11 @@ class PlayerCore {
     if (this.audio) {
       this.audio.currentTime = Math.max(0, Math.min(time, this.audio.duration || time));
       this.state.currentTime = this.audio.currentTime;
+      // v2.2: seek 后重新对齐节拍索引，避免连发或漏拍
+      this.nextBeatIdx = 0;
+      while (this.nextBeatIdx < this.beats.length && this.beats[this.nextBeatIdx] <= this.audio.currentTime) {
+        this.nextBeatIdx++;
+      }
       this.notify();
     }
   }
