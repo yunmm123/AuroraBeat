@@ -3,9 +3,17 @@ import { usePlayer } from './hooks/usePlayer';
 import type { Song, NeteaseUser } from './types';
 import * as THREE from 'three';
 import { gsap } from 'gsap';
+import { RealtimeBeatDetector, sampleFrequencyBands, smoothLerp } from './core/beatDetector';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass';
+import { FilmPass } from 'three/examples/jsm/postprocessing/FilmPass';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass';
+import { RGBShiftShader } from 'three/examples/jsm/shaders/RGBShiftShader';
+import { VignetteShader } from 'three/examples/jsm/shaders/VignetteShader';
 
 type Panel = 'home' | 'search' | 'library' | 'playlist';
-type Preset = 'silk' | 'tunnel' | 'orbit' | 'void' | 'nebula' | 'wallpulse';
 type Mood = 'calm' | 'energetic' | 'melancholy' | 'romantic' | 'dark';
 
 // 音质选项
@@ -17,15 +25,6 @@ const QUALITY_OPTIONS = [
 ];
 const QUALITY_LABELS: Record<string, string> = { standard: '标准', exhigh: '极高', lossless: '无损', hires: 'Hi-Res' };
 
-const PRESETS: { id: Preset; name: string; icon: string }[] = [
-  { id: 'silk', name: '绽放', icon: '✺' },
-  { id: 'tunnel', name: '坍缩', icon: '◉' },
-  { id: 'orbit', name: '冲击波', icon: '◎' },
-  { id: 'void', name: '闪烁', icon: '✦' },
-  { id: 'nebula', name: '漩涡', icon: '◈' },
-  { id: 'wallpulse', name: '震颤', icon: '〰' },
-];
-
 const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string }> = {
   calm: { primary: '#00f5d4', secondary: '#2442ff', bg: '#0a1a1a' },
   energetic: { primary: '#ff6b35', secondary: '#ffd23f', bg: '#1a0a0a' },
@@ -35,13 +34,13 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 — 电影级粒子艺术（联觉配色 + ACES色调 + 6预设）
-// 设计原则：60-30-10色彩规则 / 重平滑防闪烁 / 联觉映射(bass=深海色,treble=暖金)
+// Three.js 视觉引擎 — 华丽音乐可视化
+// 参考学习：p5.PeakDetect 节拍检测 + UnrealBloom 动态泛光 + 流场粒子
+// 设计：bass径向膨胀 / mid流场漂移 / treble旋转 / beat爆裂闪白
 // ====================================================================
 function useVisualEngine(
   canvasRef: React.RefObject<HTMLCanvasElement>,
   player: any,
-  preset: Preset,
   intensity: number,
 ) {
   const engineRef = useRef<any>(null);
@@ -89,62 +88,70 @@ function useVisualEngine(
     const edgeTex = new THREE.DataTexture(edgeData, edgeTexSize, edgeTexSize, THREE.RGBAFormat);
     edgeTex.minFilter = THREE.LinearFilter; edgeTex.magFilter = THREE.LinearFilter;
     edgeTex.needsUpdate = true;
-    // 涟漪纹理（Mineradio同款 1×N RGBA FloatType）
-    const RIPPLE_MAX = 8;
-    const rippleData = new Float32Array(RIPPLE_MAX * 4);
-    const rippleTex = new THREE.DataTexture(rippleData, RIPPLE_MAX, 1, THREE.RGBAFormat, THREE.FloatType);
-    rippleTex.minFilter = THREE.LinearFilter; rippleTex.magFilter = THREE.LinearFilter;
-    rippleTex.needsUpdate = true;
-    const ripples: { x: number; y: number; age: number; str: number }[] = [];
-    for (let i = 0; i < RIPPLE_MAX; i++) ripples.push({ x: 0, y: 0, age: 999, str: 0 });
 
-    // 粒子几何 — 自由粒子，3D 体积内自由分布（不固定形状，中间也有粒子）
-    // 设计：粒子在圆盘体积内自由分布，覆盖整个画面包括中心
-    // 跟随节奏做爆发/聚拢/抖动等各种变化，非固定形状，穿插在背景图片/视频周围
-    const PCOUNT = 5000;
+    // 粒子几何 — 大量自由粒子，球面体积分布（华丽星空感）
+    // 参考 audioreactivevisuals.com：3D 球面分布 + aSeed/aSize/aColor 属性
+    // 数量 12000，5060 性能够用，足够华丽
+    const PCOUNT = 12000;
     const positions = new Float32Array(PCOUNT * 3);
-    const uvs = new Float32Array(PCOUNT * 2);
-    const rand = new Float32Array(PCOUNT);
-    // 稳定的哈希随机（基于索引），保证每帧基础位置一致
+    const seeds = new Float32Array(PCOUNT);
+    const sizes = new Float32Array(PCOUNT);
+    const colors = new Float32Array(PCOUNT * 3);
     const hhash = (n: number) => {
       let s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
       return s - Math.floor(s);
+    };
+    // HSV → RGB
+    const hsv2rgb = (h: number, s: number, v: number): [number, number, number] => {
+      const i = Math.floor(h * 6);
+      const f = h * 6 - i;
+      const p = v * (1 - s);
+      const q = v * (1 - f * s);
+      const t = v * (1 - (1 - f) * s);
+      switch (i % 6) {
+        case 0: return [v, t, p];
+        case 1: return [q, v, p];
+        case 2: return [p, v, t];
+        case 3: return [p, q, v];
+        case 4: return [t, p, v];
+        default: return [v, p, q];
+      }
     };
     for (let i = 0; i < PCOUNT; i++) {
       const r1 = hhash(i * 3 + 1);
       const r2 = hhash(i * 3 + 2);
       const r4 = hhash(i * 5 + 7);
-      // 圆盘内自由分布：半径用 pow 让中心略稀疏（不遮挡背景）但仍有粒子
-      // 覆盖 0~5.2，中间不空、不固定形状
-      const radius = Math.pow(r1, 0.6) * 5.2;
+      // 球面体积分布：r = R * cbrt(rand)，均匀填充体积
+      const R = 6.0;
+      const radius = R * Math.cbrt(r1);
       const theta = r2 * Math.PI * 2;
-      // 薄 z 厚度，增加纵深感
-      const zSpread = (r4 - 0.5) * 1.5;
-      positions[i * 3] = radius * Math.cos(theta);
-      positions[i * 3 + 1] = radius * Math.sin(theta);
-      positions[i * 3 + 2] = zSpread;
-      // aUv 基于位置归一化（用于封面采样映射）
-      uvs[i * 2] = (positions[i * 3] / 5.2) * 0.5 + 0.5;
-      uvs[i * 2 + 1] = (positions[i * 3 + 1] / 5.2) * 0.5 + 0.5;
-      rand[i] = r1;
+      const phi = Math.acos(2 * r4 - 1);
+      positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+      positions[i * 3 + 2] = radius * Math.cos(phi) * 0.55; // z 压扁，更贴合屏幕
+      seeds[i] = r1;
+      sizes[i] = 0.6 + r2 * 2.4;
+      // HSV 配色：青绿到品紫的渐变（华丽冷色调）
+      const hue = 0.45 + r4 * 0.35; // 0.45(青)~0.80(紫)
+      const [cr, cg, cb] = hsv2rgb(hue, 0.75, 1.0);
+      colors[i * 3] = cr; colors[i * 3 + 1] = cg; colors[i * 3 + 2] = cb;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.setAttribute('aUv', new THREE.BufferAttribute(uvs, 2));
-    geo.setAttribute('aRand', new THREE.BufferAttribute(rand, 1));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(colors, 3));
 
     const uniforms = {
       uTime: { value: 0 },
       uBass: { value: 0 },
       uMid: { value: 0 },
       uTreble: { value: 0 },
-      uBeat: { value: 0 },
+      uBeat: { value: 0 },         // 节拍脉冲 0~1，命中瞬间为1，指数衰减
       uEnergy: { value: 0 },
       uCoverTex: { value: coverTex },
       uPrevCoverTex: { value: prevCoverTex },
       uEdgeTex: { value: edgeTex },
-      uRippleTex: { value: rippleTex },
-      uRippleCount: { value: RIPPLE_MAX },
       uHasCover: { value: 0 },
       uHasEdge: { value: 0 },
       uColorMixT: { value: 1 },
@@ -152,351 +159,189 @@ function useVisualEngine(
       uAlpha: { value: 0 },
       uPixel: { value: renderer.getPixelRatio() },
       uIntensity: { value: intensity },
-      uPreset: { value: 0 },
       uTintColor: { value: new THREE.Color('#9db8cf') },
-      // 鼠标交互 uniform（世界坐标 + 速度 + 按下状态）
-      uMouse: { value: new THREE.Vector2(0, 0) },
-      uMouseVel: { value: new THREE.Vector2(0, 0) },
-      uMouseDown: { value: 0 },
-      // 节拍卡点 uniform：uBeat=脉冲值(0-1快衰减), uBeatAge=当前节拍后时长, uBeatCount=累计节拍数
-      uBeatAge: { value: 999 },
-      uBeatCount: { value: 0 },
-      uBeatStrength: { value: 0 },
     };
 
+    // 顶点着色器 — 流场粒子 + bass径向膨胀 + treble旋转 + beat爆裂
+    // 参考 audioreactivevisuals.com 粒子卡点 shader + simplex noise 流场
     const vertexShader = `
-      uniform float uTime, uBass, uMid, uTreble, uBeat, uEnergy, uPixel, uAlpha, uIntensity, uPreset;
-      uniform sampler2D uCoverTex, uPrevCoverTex, uEdgeTex, uRippleTex;
-      uniform float uHasCover, uHasEdge, uColorMixT, uRippleCount;
-      uniform vec2 uMouse, uMouseVel;
-      uniform float uMouseDown, uBeatAge, uBeatCount, uBeatStrength;
-      attribute vec2 aUv;
-      attribute float aRand;
-      varying float vBright;
-      varying float vEdgeBoost;
+      uniform float uTime, uBass, uMid, uTreble, uBeat, uEnergy, uPixel, uAlpha, uIntensity;
+      uniform sampler2D uCoverTex, uPrevCoverTex, uEdgeTex;
+      uniform float uHasCover, uHasEdge, uColorMixT;
+      attribute float aSeed;
+      attribute float aSize;
+      attribute vec3 aColor;
       varying vec3 vColor;
-      varying float vAlpha;
-      varying float vSourceLum;
+      varying float vBeat;
       varying float vDepth;
-      varying float vBeatGlow;
+      varying float vAlpha;
 
-      #define PI 3.14159265
-
-      vec2 safeCoverUv(vec2 uv) { return clamp(uv, vec2(0.001), vec2(0.999)); }
-
-      // 稳定哈希
-      float hash13(vec3 p) {
-        return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
-      }
-      // 3D 值噪声（用于环境漂移）
-      float vnoise3(vec3 p) {
-        vec3 i = floor(p), f = fract(p);
-        f = f * f * (3.0 - 2.0 * f);
-        float n000 = hash13(i + vec3(0,0,0));
-        float n100 = hash13(i + vec3(1,0,0));
-        float n010 = hash13(i + vec3(0,1,0));
-        float n110 = hash13(i + vec3(1,1,0));
-        float n001 = hash13(i + vec3(0,0,1));
-        float n101 = hash13(i + vec3(1,0,1));
-        float n011 = hash13(i + vec3(0,1,1));
-        float n111 = hash13(i + vec3(1,1,1));
-        return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
-                   mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
-      }
-
-      // 联觉配色：低频→深海蓝绿(冷)，高频→暖金粉(暖)，中频过渡
-      vec3 synestheticColor(float bass, float mid, float treble, vec3 coverCol, float hasCover) {
-        vec3 deepOcean = vec3(0.04, 0.18, 0.28);
-        vec3 midTone = vec3(0.10, 0.55, 0.72);
-        vec3 warmHigh = vec3(1.0, 0.62, 0.38);
-        vec3 audio = mix(deepOcean, midTone, smoothstep(0.0, 0.5, mid));
-        audio = mix(audio, warmHigh, smoothstep(0.3, 0.8, treble) * 0.55);
-        vec3 blended = mix(audio, coverCol, hasCover * 0.45);
-        // 节拍瞬间注入暖光，制造"心跳"感
-        blended += warmHigh * uBeat * 0.25;
-        return blended;
-      }
-
-      // 弱化鼠标排斥力（仅近距离小幅推开）
-      vec3 mouseForceWeak(vec3 mpos) {
-        vec3 toMouse = mpos - vec3(uMouse, 0.0);
-        float md = length(toMouse);
-        float radius = 1.2;
-        if (md > radius || md < 0.001) return vec3(0.0);
-        float falloff = (1.0 - md / radius) * 0.35; // 弱化
-        return normalize(toMouse) * falloff;
+      // 3D Simplex noise (ashima/webgl-noise) —— 用于流场漂移
+      vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
+      vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
+      vec4 permute(vec4 x){return mod289(((x*34.0)+1.0)*x);}
+      vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
+      float snoise(vec3 v){
+        const vec2 C=vec2(1.0/6.0,1.0/3.0); const vec4 D=vec4(0.0,0.5,1.0,2.0);
+        vec3 i=floor(v+dot(v,C.yyy)); vec3 x0=v-i+dot(i,C.xxx);
+        vec3 g=step(x0.yzx,x0.xyz); vec3 l=1.0-g; vec3 i1=min(g.xyz,l.zxy); vec3 i2=max(g.xyz,l.zxy);
+        vec3 x1=x0-i1+C.xxx; vec3 x2=x0-i2+C.yyy; vec3 x3=x0-D.yyy;
+        i=mod289(i);
+        vec4 p=permute(permute(permute(i.z+vec4(0.0,i1.z,i2.z,1.0))+i.y+vec4(0.0,i1.y,i2.y,1.0))+i.x+vec4(0.0,i1.x,i2.x,1.0));
+        float n_=0.142857142857; vec3 ns=n_*D.wyz-D.xzx;
+        vec4 j=p-49.0*floor(p*ns.z*ns.z);
+        vec4 x_=floor(j*ns.z); vec4 y_=floor(j-7.0*x_);
+        vec4 x=x_*ns.x+ns.yyyy; vec4 y=y_*ns.x+ns.yyyy; vec4 h=1.0-abs(x)-abs(y);
+        vec4 b0=vec4(x.xy,y.xy); vec4 b1=vec4(x.zw,y.zw);
+        vec4 s0=floor(b0)*2.0+1.0; vec4 s1=floor(b1)*2.0+1.0; vec4 sh=-step(h,vec4(0.0));
+        vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy; vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
+        vec3 p0=vec3(a0.xy,h.x); vec3 p1=vec3(a0.zw,h.y); vec3 p2=vec3(a1.xy,h.z); vec3 p3=vec3(a1.zw,h.w);
+        vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
+        p0*=norm.x; p1*=norm.y; p2*=norm.z; p3*=norm.w;
+        vec4 m=max(0.6-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0);
+        m=m*m;
+        return 42.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
       }
 
       void main() {
-        // basePos = 稳定基础位置（3D 体积自由分布，非固定形状）
-        vec3 basePos = position;
-        float t = uTime;
-        float r1 = aRand;
-        float r2 = fract(r1 * 7.13);
-        float r3 = fract(r2 * 11.91);
-        vAlpha = 1.0;
-        vEdgeBoost = 0.0;
-        vSourceLum = 0.5;
-        vDepth = 0.0;
-        // vBeatGlow 用 beatEnv（节拍包络）驱动发光，而非旧 uBeat，让卡点发光更准确
+        vColor = aColor;
+        vBeat = uBeat;
+        vAlpha = uAlpha;
 
-        // 封面颜色（新旧渐变）
-        vec2 cuv = safeCoverUv(aUv);
-        vec3 newCol = texture2D(uCoverTex, cuv).rgb;
-        vec3 prevCol = texture2D(uPrevCoverTex, cuv).rgb;
-        vec3 coverCol = mix(prevCol, newCol, clamp(uColorMixT, 0.0, 1.0));
-        vSourceLum = dot(coverCol, vec3(0.299, 0.587, 0.114));
+        vec3 pos = position;
 
-        // 环境漂移：缓慢噪声漂移（避免完全静止）
-        vec3 drift = vec3(
-          vnoise3(basePos * 0.4 + vec3(t * 0.08, 0.0, 0.0)),
-          vnoise3(basePos * 0.4 + vec3(0.0, t * 0.08, 0.0)),
-          vnoise3(basePos * 0.4 + vec3(0.0, 0.0, t * 0.08))
-        ) - 0.5;
-        drift *= 0.4 + uBass * 0.8 + uTreble * 0.3;
+        // 1. 流场漂移：3 通道 simplex noise，速度随 mid 放大（人声驱动流动）
+        vec3 flow = vec3(
+          snoise(pos * 0.3 + uTime * 0.1),
+          snoise(pos * 0.3 + uTime * 0.1 + 31.4),
+          snoise(pos * 0.3 + uTime * 0.1 + 73.2)
+        );
+        pos += flow * (0.4 + uMid * 2.8);
 
-        // 节拍包络：每个粒子有相位差，避免呆板同步
-        float beatPhase = r1 * 0.4;
-        float beatT = max(0.0, uBeatAge - beatPhase);
-        float beatEnv = exp(-beatT * 4.0) * uBeatStrength;
-        vBeatGlow = beatEnv;
-        vec3 beatDir = normalize(basePos + vec3(0.001));
+        // 2. bass 径向膨胀 —— 底鼓驱动粒子外扩
+        float dist = length(pos);
+        pos *= 1.0 + uBass * 0.32;
 
-        vec3 pos = basePos;
-        float pointScale = 1.0;
-        float brightBoost = 1.0;
-        vColor = synestheticColor(uBass, uMid, uTreble, coverCol, uHasCover);
+        // 3. beat 爆裂：沿径向瞬时冲出再衰减（uBeat 在 JS 端指数衰减）
+        vec3 dir = dist > 0.001 ? pos / dist : normalize(pos + vec3(0.001));
+        pos += dir * uBeat * (1.8 + aSeed * 3.2);
 
-        // === 自由粒子跟随节奏 ===
-        // 节拍时粒子做爆发/聚拢混合：一半向外爆发，一半向内聚拢（基于 aRand），制造层次而非整齐划一
-        float dist = length(basePos);
-        float burstSign = r2 > 0.5 ? 1.0 : -1.0;
-        float burstMag = beatEnv * (1.0 + dist * 0.25) * 2.2 * burstSign;
-        pos += beatDir * burstMag;
-        // 节拍时额外随机方向抖动（每个粒子方向不同）
-        vec3 jitterDir = normalize(vec3(
-          hash13(basePos + vec3(1.0, 0.0, 0.0)) - 0.5,
-          hash13(basePos + vec3(0.0, 1.0, 0.0)) - 0.5,
-          hash13(basePos + vec3(0.0, 0.0, 1.0)) - 0.5
-        ));
-        pos += jitterDir * beatEnv * 0.7;
-        // 高频持续驱动微抖（非节拍时也有活力）
-        pos += jitterDir * uTreble * 0.18;
-        // bass 驱动径向呼吸（持续，非节拍）
-        pos += beatDir * uBass * 0.25;
+        // 4. treble 旋转 —— 高频驱动整体旋转
+        float a = uTime * (0.15 + uTreble * 1.8);
+        float c = cos(a), s = sin(a);
+        pos.xz = mat2(c, -s, s, c) * pos.xz;
 
-        // 节拍时变亮变大
-        brightBoost = 1.0 + beatEnv * 2.5;
-        pointScale = 1.0 + beatEnv * 1.8;
-        // 节拍颜色：爆发粒子暖橙，聚拢粒子冷蓝
-        vec3 beatColor = burstSign > 0.5 ? vec3(1.0, 0.7, 0.4) : vec3(0.5, 0.8, 1.0);
-        vColor = mix(vColor, beatColor, beatEnv * 0.6);
+        // 5. 节拍时额外随机抖动（每粒子方向不同，基于 seed）
+        vec3 jitter = vec3(
+          snoise(pos + vec3(1.7, 0.0, 0.0)),
+          snoise(pos + vec3(0.0, 1.7, 0.0)),
+          snoise(pos + vec3(0.0, 0.0, 1.7))
+        );
+        pos += jitter * uBeat * 0.6;
 
-        // 叠加环境漂移（所有预设共享）
-        pos += drift;
-        // 弱化鼠标排斥力
-        pos += mouseForceWeak(pos);
+        vDepth = clamp(length(pos) / 6.0, 0.0, 1.0);
 
-        // 边缘能量增强（克制）
-        float edgeDist = length(aUv - 0.5);
-        vEdgeBoost = smoothstep(0.28, 0.5, edgeDist) * uEnergy * 0.5;
-        // 亮度：基础 + 低频 + 节拍行为增强，克制上限
-        vBright = (0.45 + uBass * 0.35 + uEnergy * 0.12 + r3 * 0.06) * uIntensity * brightBoost;
-        // 深度（用于雾化）：基于到中心距离
-        vDepth = clamp(length(pos) / 4.0, 0.0, 1.0);
+        vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+        gl_Position = projectionMatrix * mv;
 
-        vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
-        gl_Position = projectionMatrix * mvPos;
-        // 点大小：近大远小 + 节拍放大
-        gl_PointSize = (1.6 + uBass * 2.2 + uEnergy * 1.0) * pointScale * uPixel * (300.0 / max(-mvPos.z, 0.1));
+        // 点大小：距离衰减 + beat 放大（华丽冲击）
+        gl_PointSize = aSize * (1.0 + uBass * 0.8 + uBeat * 1.8) * uPixel * (300.0 / max(-mv.z, 0.1));
       }
     `;
 
+    // 片段着色器 — 软边圆点 + beat 闪白 + 频段调色 + bloom 友好
     const fragmentShader = `
       uniform sampler2D uDotTex;
-      uniform float uAlpha;
-      varying float vBright;
-      varying float vEdgeBoost;
+      uniform float uBass, uTreble, uBeat, uAlpha;
       varying vec3 vColor;
-      varying float vAlpha;
-      varying float vSourceLum;
+      varying float vBeat;
       varying float vDepth;
-      varying float vBeatGlow;
-      // ACES Filmic 近似曲线 — 电影级高光压缩，避免过曝发白
-      vec3 acesFilm(vec3 x) {
-        const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-        return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-      }
-      void main() {
-        vec4 tex = texture2D(uDotTex, gl_PointCoord);
-        if (tex.a < 0.02) discard;
-        vec3 col = vColor * vBright;
-        // 边缘能量微增亮（克制）
-        col = mix(col, col * 1.25 + vec3(0.04), vEdgeBoost * 0.3);
-        // 节拍卡点：节拍瞬间增强发光（暖白注入），让卡点视觉冲击明显
-        col += vec3(1.0, 0.9, 0.75) * vBeatGlow * 0.4;
-        // ACES 色调映射
-        col = acesFilm(col * 1.2);
-        // 深度雾化：远层粒子稍微淡入背景，增强纵深
-        float fogFade = mix(1.0, 0.6, vDepth * 0.6);
-        gl_FragColor = vec4(col, tex.a * uAlpha * vAlpha * fogFade);
-      }
-    `;
+      varying float vAlpha;
 
-    const bloomFragmentShader = `
-      uniform sampler2D uDotTex;
-      uniform float uAlpha;
-      varying float vBright;
-      varying float vEdgeBoost;
-      varying vec3 vColor;
-      varying float vAlpha;
-      varying float vSourceLum;
-      varying float vDepth;
-      varying float vBeatGlow;
-      vec3 acesFilm(vec3 x) {
-        const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-        return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-      }
       void main() {
         vec4 tex = texture2D(uDotTex, gl_PointCoord);
         if (tex.a < 0.02) discard;
-        vec3 col = vColor * vBright * 1.7;
-        // 节拍卡点 bloom 增强
-        col += vec3(1.0, 0.9, 0.75) * vBeatGlow * 0.6;
-        col = acesFilm(col * 1.3);
-        // Mineradio同款 keepBlack: 暗粒子不溢光，避免画面发灰
-        float keepBlack = 1.0 - smoothstep(0.025, 0.115, vSourceLum);
-        float bloomKeep = 1.0 - keepBlack * 0.92;
-        // 平方软化：bloom 层更柔和，避免硬光斑
-        float soft = tex.a * tex.a;
-        // 节拍时 bloom 更强（卡点光晕）
-        float beatBloom = 1.0 + vBeatGlow * 1.2;
-        // 深度衰减：远层 bloom 更弱
-        float depthFade = mix(1.0, 0.5, vDepth * 0.6);
-        gl_FragColor = vec4(col, soft * uAlpha * 0.5 * vAlpha * bloomKeep * depthFade * beatBloom);
+        // beat 命中：颜色冲向白色（华丽卡点高光，配合 bloom 爆光）
+        vec3 col = mix(vColor, vec3(1.0), vBeat * 0.7);
+        // bass 推向暖色（橙红），treble 推向冷色（青蓝）
+        col = mix(col, col * vec3(1.3, 0.7, 0.4), uBass * 0.5);
+        col = mix(col, col * vec3(0.4, 0.8, 1.3), uTreble * 0.5);
+        // 整体亮度随 beat 拉高，配合 UnrealBloom 产生爆光
+        col *= (1.0 + vBeat * 2.0);
+        // 深度雾化：远层粒子稍淡
+        float fogFade = mix(1.0, 0.65, vDepth * 0.6);
+        gl_FragColor = vec4(col, tex.a * uAlpha * fogFade);
       }
     `;
 
     const material = new THREE.ShaderMaterial({
       uniforms, vertexShader, fragmentShader,
-      transparent: true, depthWrite: false, blending: THREE.NormalBlending,
-    });
-    const bloomMaterial = new THREE.ShaderMaterial({
-      uniforms, vertexShader, fragmentShader: bloomFragmentShader,
-      transparent: true, depthWrite: false, depthTest: false, blending: THREE.AdditiveBlending,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     });
 
     const particles = new THREE.Points(geo, material);
-    particles.frustumCulled = false; particles.renderOrder = 1;
+    particles.frustumCulled = false;
     scene.add(particles);
-    const bloomParticles = new THREE.Points(geo, bloomMaterial);
-    bloomParticles.frustumCulled = false; bloomParticles.renderOrder = 0;
-    scene.add(bloomParticles);
 
     gsap.to(uniforms.uAlpha, { value: 1, duration: 1.2, ease: 'power2.out' });
 
     let animId: number;
     let analyser: AnalyserNode | null = null;
-    let beatAnalyser: AnalyserNode | null = null;
     let freqData: Uint8Array | null = null;
-    let beatData: Uint8Array | null = null;
     let smoothBass = 0, smoothMid = 0, smoothTreb = 0, smoothEnergy = 0;
-    let beatPulse = 0;
-    // Mineradio同款 peak tracking：低频慢衰减峰值，配合 gamma 归一化让画面在动态范围上更稳定
-    let bassPeak = 0.030;
+    let beatPulse = 0;        // 节拍脉冲，命中瞬间为1，指数衰减
+    let bloomKick = 0;        // bloom 动态强度 kick
+    let shiftKick = 0;        // RGBShift 动态偏移 kick
     let prevTime = performance.now();
-    let rippleWriteIdx = 0;
-    // === 离线节拍查表触发（参考 Mineradio tickBeatMap）===
-    // beatMap.beats[] 是预先分析好的节拍时间点数组，播放时按 currentTime 查表
-    let currentBeatMap: { beats: number[]; tempo: number } | null = null;
-    let beatMapNextIdx = 0;      // 下一个待触发的节拍索引
-    let beatMapSongId: string | null = null;  // 当前 beatMap 对应的歌曲 id
-    let beatAnalysisToken = 0;   // 取消旧分析
-    let beatAnalysisStarted = false;
-    // === 实时频谱 onset 节拍检测（主驱动，可靠即时无外部依赖）===
-    // 用 beatAnalyser(smoothing=0.1) 低频能量，滑动窗口自适应阈值 + 上升沿 + 不应期
-    // 保证一定有节拍信号，不依赖离线分析是否成功
-    const ONSET_WIN = 43; // 滑动窗口 ~0.7s @60fps
-    const onsetHistory = new Float32Array(ONSET_WIN);
-    let onsetHistIdx = 0;
-    let onsetHistFilled = 0;
-    let prevBeatEnergy = 0;
-    let beatRefractoryUntil = 0; // 不应期（统一控制离线+实时触发，避免过密）
-    let realtimeBeatCount = 0;  // 实时节拍计数（调试用）
-    // 电影级缓慢相机漂移（替代抖动），呼吸感而非晃动
+
+    // === 节拍检测：p5.PeakDetect 动态cutoff算法 ===
+    // 比统计法更可靠：cutoff 自动适应音量，安静段不误触发
+    const beatDetector = new RealtimeBeatDetector({
+      threshold: 0.32,     // 基础门限，对底鼓敏感
+      decayRate: 0.94,     // cutoff 衰减率
+      cutoffMult: 1.5,     // 命中后抬高倍数
+      framesPerPeak: 16,   // ~0.27s 冷却，避免过密
+    });
+    let beatCount = 0;
+
+    // 相机缓慢漂移
     let camDriftX = 0, camDriftY = 0;
-    // 鼠标追踪状态（屏幕像素坐标 + 平滑速度）
-    let mouseTargetX = window.innerWidth / 2;
-    let mouseTargetY = window.innerHeight / 2;
-    let smoothMouseVx = 0, smoothMouseVy = 0;
-
-    // 全局鼠标事件：更新目标位置 + 按下状态
-    const onMouseMove = (e: PointerEvent) => {
-      mouseTargetX = e.clientX;
-      mouseTargetY = e.clientY;
-    };
-    const onMouseDown = () => { uniforms.uMouseDown.value = 1; };
-    const onMouseUp = () => { uniforms.uMouseDown.value = 0; };
-    window.addEventListener('pointermove', onMouseMove);
-    window.addEventListener('pointerdown', onMouseDown);
-    window.addEventListener('pointerup', onMouseUp);
-
-    // 触发一次涟漪（点击或强节拍）。u=0.5,v=0.5 为画面中心
-    const triggerRipple = (u: number, v: number, str: number) => {
-      const r = ripples[rippleWriteIdx];
-      r.x = u; r.y = v; r.age = 0; r.str = str;
-      rippleWriteIdx = (rippleWriteIdx + 1) % RIPPLE_MAX;
-    };
-    // 暴露给点击事件
-    (window as any).__triggerRipple = triggerRipple;
 
     const setupAnalysers = () => {
       const a = player.getAnalyser();
-      const ba = player.getBeatAnalyser();
       if (a && !analyser) { analyser = a; freqData = new Uint8Array(a.frequencyBinCount); }
-      if (ba && !beatAnalyser) { beatData = new Uint8Array(ba.frequencyBinCount); beatAnalyser = ba; }
     };
     player.setAnalyserReadyHandler?.(setupAnalysers);
     setTimeout(setupAnalysers, 500);
 
-    // === 离线节拍分析触发（切歌时启动）===
-    // 当 currentSong 变化时，获取音频 URL 并启动 analyzeBeats
-    // 分析在 Web Worker 中进行，不阻塞主线程
-    const startBeatAnalysis = async (songId: string, audioUrl: string, duration: number) => {
-      const token = ++beatAnalysisToken;
-      try {
-        const { analyzeBeats } = await import('./core/beatAnalyzer');
-        const map = await analyzeBeats(audioUrl, songId, duration);
-        if (token !== beatAnalysisToken) return; // 已切歌，放弃
-        if (map && map.beats.length > 0) {
-          currentBeatMap = { beats: map.beats, tempo: map.tempo };
-          beatMapSongId = songId;
-          // 对齐游标到当前播放时间（处理分析期间已经播放的情况）
-          const ct = player.getCurrentTime();
-          beatMapNextIdx = 0;
-          while (beatMapNextIdx < currentBeatMap.beats.length && currentBeatMap.beats[beatMapNextIdx] < ct) {
-            beatMapNextIdx++;
-          }
-          console.log('[beatAnalysis] 节拍表就绪:', songId, '节拍数:', map.beats.length, 'BPM:', map.tempo.toFixed(1));
-        } else {
-          console.warn('[beatAnalysis] 未得到节拍表，将无卡点效果');
-        }
-      } catch (e) {
-        console.warn('[beatAnalysis] error:', e);
-      }
-    };
-
-    const presetIdx = { silk: 0, tunnel: 1, orbit: 2, void: 3, nebula: 4, wallpulse: 5 };
-    uniforms.uPreset.value = presetIdx[preset];
-
-    // 暴露节拍分析触发函数（供外部 useEffect 调用，必须在 startBeatAnalysis 定义之后）
-    (window as any).__startBeatAnalysis = startBeatAnalysis;
-    (window as any).__resetBeatMap = () => {
-      currentBeatMap = null;
-      beatMapSongId = null;
-      beatMapNextIdx = 0;
-      beatAnalysisToken++; // 取消正在进行的分析
-    };
+    // === 后处理链：UnrealBloom + RGBShift + Film + Vignette + Output ===
+    // 参考 three.js 官方 postprocessing 指南
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    // UnrealBloom —— 粒子卡点的灵魂：threshold=0 让所有粒子参与泛光
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      1.4,  // strength（beat 时动态拉到 ~3.0）
+      0.55, // radius：梦幻扩散
+      0.0,  // threshold：暗场景全粒子泛光
+    );
+    composer.addPass(bloomPass);
+    // RGBShift —— 节拍命中时色差炸开
+    const rgbShiftPass = new ShaderPass(RGBShiftShader);
+    rgbShiftPass.uniforms.amount.value = 0.0015;
+    composer.addPass(rgbShiftPass);
+    // FilmPass —— 胶片颗粒 + 扫描线，复古电影感
+    const filmPass = new FilmPass(0.35, 0.025, 648, false);
+    composer.addPass(filmPass);
+    // Vignette —— 暗角聚焦
+    const vignettePass = new ShaderPass(VignetteShader);
+    vignettePass.uniforms.offset.value = 1.0;
+    vignettePass.uniforms.darkness.value = 1.2;
+    composer.addPass(vignettePass);
+    // OutputPass —— sRGB 转换 + 色调映射（必须最后）
+    composer.addPass(new OutputPass());
+    composer.setPixelRatio(renderer.getPixelRatio());
+    composer.setSize(window.innerWidth, window.innerHeight);
 
     const animate = () => {
       animId = requestAnimationFrame(animate);
@@ -505,156 +350,69 @@ function useVisualEngine(
       prevTime = now;
       uniforms.uTime.value += dt;
 
-      // === 离线节拍查表触发（参考 Mineradio tickBeatMap）===
-      // currentBeatMap.beats[] 是预先分析好的节拍时间点数组
-      // 每帧检查 audio.currentTime 是否到达下一个节拍时间点，到达就触发卡点行为
-      const t = player.getCurrentTime();
-      if (currentBeatMap && currentBeatMap.beats.length > 0 && player.isPlaying) {
-        // 查表：处理所有 <= 当前时间的节拍（通常每帧最多 1 个，seek 时可能多个）
-        while (beatMapNextIdx < currentBeatMap.beats.length && currentBeatMap.beats[beatMapNextIdx] <= t) {
-          // 尊重不应期（与实时onset统一），避免离线+实时重叠过密
-          if (t >= beatRefractoryUntil) {
-            uniforms.uBeatAge.value = 0;
-            uniforms.uBeatCount.value += 1;
-            const strength = 0.6 + smoothBass * 0.3;
-            uniforms.uBeatStrength.value = Math.min(1, strength);
-            beatPulse = Math.max(beatPulse, 0.15);
-            triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, Math.min(1, strength));
-            beatRefractoryUntil = t + 0.20;
-          }
-          beatMapNextIdx++;
-        }
-      }
-      // 节拍龄每帧累加（shader 用它计算 exp(-beatT * 4) 包络衰减）
-      uniforms.uBeatAge.value += dt;
-      beatPulse *= Math.pow(0.36, dt);
-
-      if (analyser && freqData && beatAnalyser && beatData && player.isPlaying) {
+      if (analyser && freqData && player.isPlaying) {
         analyser.getByteFrequencyData(freqData as any);
-        beatAnalyser.getByteFrequencyData(beatData as any);
-        const len = freqData.length;
-        const kickEnd = 7;
-        const vocalEnd = Math.min(len, 140);
-        const midEnd = Math.min(len, 280);
-        let bKick = 0, mInst = 0, tHigh = 0;
-        for (let i = 0; i < kickEnd; i++) bKick += freqData[i] / 255;
-        for (let i = kickEnd; i < vocalEnd; i++) mInst += freqData[i] / 255;
-        for (let i = vocalEnd; i < midEnd; i++) mInst += freqData[i] / 255;
-        for (let i = midEnd; i < len; i++) tHigh += freqData[i] / 255;
-        bKick /= kickEnd;
-        mInst /= Math.max(1, midEnd - kickEnd);
-        tHigh /= Math.max(1, len - midEnd);
+        // 分频段采样（bass/mid/treble）
+        const bands = sampleFrequencyBands(freqData, analyser.context.sampleRate, analyser.fftSize);
 
-        // === 实时频谱 onset 节拍检测（主驱动）===
-        // 用 beatData（beatAnalyser, smoothing=0.1 响应快）低频能量 bin 1-8（~21-172Hz kick 区）
-        let beatLow = 0;
-        for (let i = 1; i < 9; i++) beatLow += beatData[i] / 255;
-        beatLow /= 8;
-        // 滑动窗口均值 + 标准差（自适应阈值）
-        onsetHistory[onsetHistIdx] = beatLow;
-        onsetHistIdx = (onsetHistIdx + 1) % ONSET_WIN;
-        if (onsetHistFilled < ONSET_WIN) onsetHistFilled++;
-        let oSum = 0;
-        for (let i = 0; i < onsetHistFilled; i++) oSum += onsetHistory[i];
-        const oMean = oSum / onsetHistFilled;
-        let oVar = 0;
-        for (let i = 0; i < onsetHistFilled; i++) { const d = onsetHistory[i] - oMean; oVar += d * d; }
-        const oStd = Math.sqrt(oVar / onsetHistFilled);
-        // onset 判定：超阈值 + 上升沿 + 不应期 + 最低能量门限
-        const onsetThreshold = oMean + oStd * 1.4;
-        if (beatLow > onsetThreshold && beatLow > prevBeatEnergy * 0.92 && t >= beatRefractoryUntil && beatLow > 0.08) {
-          const strength = Math.min(1, (beatLow - oMean) / Math.max(oStd, 0.01) * 0.35 + 0.5);
-          uniforms.uBeatAge.value = 0;
-          uniforms.uBeatCount.value += 1;
-          uniforms.uBeatStrength.value = strength;
-          beatPulse = Math.max(beatPulse, 0.18);
-          triggerRipple(0.35 + Math.random() * 0.3, 0.35 + Math.random() * 0.3, strength);
-          beatRefractoryUntil = t + 0.20;
-          realtimeBeatCount++;
+        // 节拍检测：用低频能量喂给 p5.PeakDetect 算法
+        const isBeat = beatDetector.update(bands.bass);
+        if (isBeat) {
+          beatPulse = 1;        // 命中瞬间为 1
+          bloomKick = Math.max(bloomKick, bands.bass);
+          shiftKick = 1;
+          beatCount++;
         }
-        prevBeatEnergy = beatLow;
 
-        // Mineradio同款 peak tracking：低频慢衰减 + 下限钳制，避免静音段把增益拉到 0
-        bassPeak = Math.max(bassPeak * 0.994, bKick, 0.030);
-        // gamma 归一化：把 bKick 相对 bassPeak 的比例映射到 0~1，使动态范围更稳定
-        const bassNorm = Math.pow(Math.min(1, bKick / Math.max(0.05, bassPeak)), 0.7);
-
-        const env = (cur: number, target: number, up: number, down: number) =>
-          cur + (target > cur ? up : down) * (target - cur);
-        smoothBass = env(smoothBass, Math.min(0.82, bassNorm * 0.85), 0.30, 0.075);
-        smoothMid = env(smoothMid, Math.min(0.68, mInst * 0.64), 0.18, 0.06);
-        smoothTreb = env(smoothTreb, Math.min(0.56, tHigh * 0.54), 0.18, 0.055);
-        smoothEnergy = env(smoothEnergy, Math.min(0.72, (bassNorm + mInst + tHigh) / 3), 0.16, 0.055);
+        // 一阶低通平滑（避免抖动，保留冲击感）
+        smoothBass = smoothLerp(smoothBass, bands.bass, 0.3);
+        smoothMid = smoothLerp(smoothMid, bands.mid, 0.3);
+        smoothTreb = smoothLerp(smoothTreb, bands.treble, 0.3);
+        smoothEnergy = smoothLerp(smoothEnergy, bands.level, 0.3);
 
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
         uniforms.uTreble.value = smoothTreb;
-        uniforms.uBeat.value = beatPulse;
         uniforms.uEnergy.value = smoothEnergy;
-
-        // 写入调试信息供 BeatDebugOverlay 显示
-        (window as any).__beatDebug = {
-          count: uniforms.uBeatCount.value,
-          realtime: realtimeBeatCount,
-          strength: uniforms.uBeatStrength.value,
-          age: uniforms.uBeatAge.value,
-          beat: beatPulse,
-          beatLow: prevBeatEnergy,
-          threshold: oMean + oStd * 1.4,
-          beatMapReady: currentBeatMap ? currentBeatMap.beats.length : 0,
-          tempo: currentBeatMap ? currentBeatMap.tempo : 0,
-        };
       } else {
-        smoothBass *= 0.91; smoothMid *= 0.91; smoothTreb *= 0.91; smoothEnergy *= 0.91; beatPulse *= 0.82;
-        bassPeak *= 0.99;
+        smoothBass *= 0.92; smoothMid *= 0.92; smoothTreb *= 0.92; smoothEnergy *= 0.92;
         uniforms.uBass.value = smoothBass;
         uniforms.uMid.value = smoothMid;
         uniforms.uTreble.value = smoothTreb;
-        uniforms.uBeat.value = beatPulse;
         uniforms.uEnergy.value = smoothEnergy;
       }
 
-      // 更新涟漪 age 并写入 rippleTex（Mineradio 同款 1×N RGBA FloatType）
-      for (let i = 0; i < RIPPLE_MAX; i++) {
-        const r = ripples[i];
-        r.age += dt;
-        rippleData[i * 4] = r.x;
-        rippleData[i * 4 + 1] = r.y;
-        rippleData[i * 4 + 2] = r.age;
-        rippleData[i * 4 + 3] = r.str;
-      }
-      rippleTex.needsUpdate = true;
+      // beat 脉冲指数衰减（保留冲击感，不插值）
+      beatPulse *= Math.pow(0.08, dt);   // 快速衰减
+      uniforms.uBeat.value = beatPulse;
 
-      // 鼠标平滑追踪 + 速度计算（用于 shader 中的鼠标交互力）
-      // 目标：鼠标在屏幕上的位置映射到世界坐标（z=0 平面，约 ±2.4 范围）
-      const targetMx = (mouseTargetX / window.innerWidth) * 2.0 - 1.0;
-      const targetMy = -((mouseTargetY / window.innerHeight) * 2.0 - 1.0);
-      const prevMx = uniforms.uMouse.value.x;
-      const prevMy = uniforms.uMouse.value.y;
-      // 平滑跟随，避免抖动
-      const mouseLerp = Math.min(1, dt * 8);
-      const newMx = prevMx + (targetMx * 2.4 - prevMx) * mouseLerp;
-      const newMy = prevMy + (targetMy * 2.4 - prevMy) * mouseLerp;
-      uniforms.uMouse.value.set(newMx, newMy);
-      // 速度 = 位置差 / dt（归一化），用于流场注入
-      const vx = (newMx - prevMx) / Math.max(dt, 0.001);
-      const vy = (newMy - prevMy) / Math.max(dt, 0.001);
-      // 限幅 + 平滑
-      smoothMouseVx = smoothMouseVx * 0.7 + Math.max(-3, Math.min(3, vx)) * 0.3;
-      smoothMouseVy = smoothMouseVy * 0.7 + Math.max(-3, Math.min(3, vy)) * 0.3;
-      uniforms.uMouseVel.value.set(smoothMouseVx, smoothMouseVy);
+      // 后处理动态：beat 时 bloom 强度冲高 + 色差炸开，再衰减回落
+      bloomKick *= Math.pow(0.10, dt);
+      shiftKick *= Math.pow(0.12, dt);
+      bloomPass.strength = 1.4 + bloomKick * 1.8;              // beat 时冲到 ~3.2
+      rgbShiftPass.uniforms.amount.value = 0.0015 + shiftKick * 0.004; // beat 时色差炸开
 
-      // 电影级相机漂移：缓慢跟随鼠标（视差感），+ 节拍微推
-      const driftTargetX = uniforms.uMouse.value.x * 0.25 + Math.sin(now * 0.0001) * 0.15 + beatPulse * 0.1;
-      const driftTargetY = uniforms.uMouse.value.y * 0.18 + Math.cos(now * 0.00008) * 0.1 + beatPulse * 0.06;
+      // 相机缓慢漂移 + 节拍微推（呼吸感而非晃动）
+      const driftTargetX = Math.sin(now * 0.0001) * 0.2 + beatPulse * 0.12;
+      const driftTargetY = Math.cos(now * 0.00008) * 0.15 + beatPulse * 0.08;
       camDriftX += (driftTargetX - camDriftX) * Math.min(1, dt * 1.5);
       camDriftY += (driftTargetY - camDriftY) * Math.min(1, dt * 1.5);
       camera.position.x = camDriftX;
       camera.position.y = camDriftY;
-      camera.position.z = 6.2 - beatPulse * 0.4;
-
+      camera.position.z = 7.0 - beatPulse * 0.5;
       camera.lookAt(0, 0, 0);
-      renderer.render(scene, camera);
+
+      // 调试信息（按需显示，不常驻）
+      (window as any).__beatDebug = {
+        count: beatCount,
+        beat: beatPulse,
+        bass: smoothBass,
+        mid: smoothMid,
+        treble: smoothTreb,
+        bloom: bloomPass.strength,
+      };
+
+      composer.render();
     };
     animate();
 
@@ -662,6 +420,8 @@ function useVisualEngine(
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
+      composer.setSize(window.innerWidth, window.innerHeight);
+      bloomPass.resolution.set(window.innerWidth, window.innerHeight);
     };
     window.addEventListener('resize', onResize);
 
@@ -766,27 +526,15 @@ function useVisualEngine(
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', onResize);
-      window.removeEventListener('pointermove', onMouseMove);
-      window.removeEventListener('pointerdown', onMouseDown);
-      window.removeEventListener('pointerup', onMouseUp);
-      geo.dispose(); material.dispose(); bloomMaterial.dispose();
+      geo.dispose(); material.dispose();
       coverTex.dispose(); dotTexture.dispose();
-      prevCoverTex.dispose(); edgeTex.dispose(); rippleTex.dispose();
+      prevCoverTex.dispose(); edgeTex.dispose();
+      composer.dispose();
       renderer.dispose();
       delete (window as any).__updateCover;
-      delete (window as any).__triggerRipple;
-      delete (window as any).__startBeatAnalysis;
-      delete (window as any).__resetBeatMap;
+      delete (window as any).__beatDebug;
     };
   }, []);
-
-  // 预设切换
-  useEffect(() => {
-    if (engineRef.current?.uniforms) {
-      const presetIdx = { silk: 0, tunnel: 1, orbit: 2, void: 3, nebula: 4, wallpulse: 5 };
-      engineRef.current.uniforms.uPreset.value = presetIdx[preset];
-    }
-  }, [preset]);
 
   // 强度切换
   useEffect(() => {
@@ -802,23 +550,6 @@ function useVisualEngine(
       (window as any).__updateCover(coverUrl);
     }
   }, [player.currentSong?.cover]);
-
-  // === 离线节拍分析触发（切歌时启动）===
-  // 当歌曲变化时，重置旧 beatMap 并启动新分析
-  useEffect(() => {
-    const song = player.currentSong;
-    if (!song || !player.isPlaying) return;
-    // 重置旧节拍表
-    (window as any).__resetBeatMap?.();
-    // 延迟一点获取音频 URL（playerCore 需要 time 设置 src）
-    const timer = setTimeout(async () => {
-      const audioUrl = player.getCurrentAudioUrl?.();
-      if (!audioUrl) return;
-      const duration = player.duration || 0;
-      (window as any).__startBeatAnalysis?.(song.id, audioUrl, duration);
-    }, 800); // 等音频加载 0.8s 后再启动分析
-    return () => clearTimeout(timer);
-  }, [player.currentSong?.id, player.isPlaying]);
 }
 
 // ====================================================================
@@ -835,25 +566,27 @@ function detectMood(song: Song | null): Mood {
 }
 
 // ====================================================================
-// 临时节拍调试显示（验证节拍检测是否工作）
+// 节拍调试显示（按需开关，不常驻）
 // ====================================================================
-const BeatDebugOverlay: React.FC = () => {
-  const [info, setInfo] = React.useState<any>({ count: 0, realtime: 0, strength: 0, age: 0, beat: 0, beatLow: 0, threshold: 0, beatMapReady: 0, tempo: 0 });
+const BeatDebugOverlay: React.FC<{ visible: boolean }> = ({ visible }) => {
+  const [info, setInfo] = React.useState<any>({ count: 0, beat: 0, bass: 0, mid: 0, treble: 0, bloom: 0 });
   React.useEffect(() => {
+    if (!visible) return;
     const id = setInterval(() => {
       const d = (window as any).__beatDebug;
       if (d) setInfo(d);
     }, 100);
     return () => clearInterval(id);
-  }, []);
+  }, [visible]);
+  if (!visible) return null;
   return (
-    <div className="absolute top-16 left-4 z-50 bg-black/70 text-green-400 font-mono text-xs px-3 py-2 rounded pointer-events-none">
-      <div>BEAT: 总{info.count} / 实时{info.realtime}</div>
-      <div>BPM: {(info.tempo || 0).toFixed(1)} / 节拍表: {info.beatMapReady || 0} 个</div>
-      <div>低频能量: {(info.beatLow || 0).toFixed(3)} / 阈值: {(info.threshold || 0).toFixed(3)}</div>
-      <div>STRENGTH: {(info.strength || 0).toFixed(2)} / AGE: {(info.age || 0).toFixed(3)}</div>
+    <div className="absolute top-16 left-4 z-[55] bg-black/70 text-green-400 font-mono text-xs px-3 py-2 rounded pointer-events-none">
+      <div>BEAT COUNT: {info.count}</div>
+      <div>BEAT PULSE: {(info.beat || 0).toFixed(3)}</div>
+      <div>BASS: {(info.bass || 0).toFixed(3)} / MID: {(info.mid || 0).toFixed(3)} / TREBLE: {(info.treble || 0).toFixed(3)}</div>
+      <div>BLOOM: {(info.bloom || 0).toFixed(2)}</div>
       <div style={{ color: info.count > 0 ? '#0f0' : '#888' }}>
-        {info.count > 0 ? '✓ 卡点触发中' : '— 等待卡点'}
+        {info.count > 0 ? '✓ 卡点触发中' : '— 等待节拍'}
       </div>
     </div>
   );
@@ -878,8 +611,8 @@ const App: React.FC = () => {
   const [viewingName, setViewingName] = useState('');
   const [neteaseUser, setNeteaseUser] = useState<NeteaseUser | null>(null);
   const [serverPort, setServerPort] = useState(0);
-  const [preset, setPreset] = useState<Preset>('silk');
   const [intensity, setIntensity] = useState(0.85);
+  const [showDebug, setShowDebug] = useState(false);
   const [customBg, setCustomBg] = useState<string | null>(null);
   const [customVideo, setCustomVideo] = useState<string | null>(null);
   const [gestureHint, setGestureHint] = useState<string | null>(null);
@@ -895,14 +628,12 @@ const App: React.FC = () => {
   const moodColors = MOOD_COLORS[mood];
   const bgColor = (customBg || customVideo) ? 'transparent' : moodColors.bg;
 
-  useVisualEngine(canvasRef, player, preset, intensity);
+  useVisualEngine(canvasRef, player, intensity);
 
   useEffect(() => {
     electron?.getServerPort?.().then((port: number) => {
       setServerPort(port);
       player.setServerPort?.(port);
-      // 暴露给 beatAnalyzer 用于加载 music-tempo 库
-      (window as any).__serverPort = port;
     });
   }, []);
 
@@ -1118,19 +849,8 @@ const App: React.FC = () => {
       )}
       {/* Three.js 粒子画布 */}
       <canvas ref={canvasRef} className="absolute inset-0 z-10 pointer-events-none" />
-      {/* 临时节拍调试显示 */}
-      <BeatDebugOverlay />
-      {/* 涟漪点击层：捕获空白区域点击触发涟漪（UI 控件位于更高 z-index，会优先消费自己的点击） */}
-      <div
-        className="absolute inset-0 z-[15] pointer-events-auto"
-        onPointerDown={(e) => {
-          const trigger = (window as any).__triggerRipple as ((u: number, v: number, str: number) => void) | undefined;
-          if (!trigger) return;
-          const u = e.clientX / window.innerWidth;
-          const v = 1 - e.clientY / window.innerHeight;
-          trigger(u, v, 0.8);
-        }}
-      />
+      {/* 节拍调试显示（按需，默认关闭） */}
+      <BeatDebugOverlay visible={showDebug} />
       {/* 渐变遮罩 */}
       <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: `linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)` }} />
 
@@ -1151,6 +871,9 @@ const App: React.FC = () => {
           <span className="text-[10px] text-white/20 ml-2">{mood}</span>
         </div>
         <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
+          <button onClick={() => setShowDebug(!showDebug)} className={`glass-btn w-[38px] h-[30px] flex items-center justify-center ${showDebug ? '!text-[#00f5d4]' : ''}`} title="节拍调试">
+            <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>
+          </button>
           <button onClick={() => setShowFx(!showFx)} className={`glass-btn w-[38px] h-[30px] flex items-center justify-center ${showFx ? '!text-[#00f5d4]' : ''}`} title="特效面板">
             <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
           </button>
