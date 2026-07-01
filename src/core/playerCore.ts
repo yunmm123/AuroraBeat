@@ -22,6 +22,7 @@ export interface PlayerState {
   quality: AudioQuality;
   bpm: number;            // 离线分析得出的 BPM（0 = 未分析）
   beatAnalyzing: boolean; // 离线节拍分析进行中
+  isSeeking: boolean;     // v3.1.5: seek 进行中（拖拽进度条时）
 }
 
 type Listener = (state: PlayerState) => void;
@@ -47,6 +48,7 @@ class PlayerCore {
     quality: 'exhigh' as AudioQuality,
     bpm: 0,
     beatAnalyzing: false,
+    isSeeking: false,
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -123,6 +125,23 @@ class PlayerCore {
 
     this.audio.addEventListener('ended', () => {
       this.handleEnded();
+    });
+
+    // v3.1.5: seek 完成后清除 seeking 状态，同步真实 currentTime
+    this.audio.addEventListener('seeked', () => {
+      if (this.audio) {
+        this.state.isSeeking = false;
+        this.state.currentTime = this.audio.currentTime;
+        this.notify();
+      }
+    });
+
+    // v3.1.5: duration 变化时（流式音频可能延迟解析）同步 state
+    this.audio.addEventListener('durationchange', () => {
+      if (this.audio && isFinite(this.audio.duration)) {
+        this.state.duration = this.audio.duration;
+        this.notify();
+      }
     });
 
     this.audio.addEventListener('error', (e) => {
@@ -566,11 +585,26 @@ class PlayerCore {
 
   seek(time: number) {
     if (this.audio) {
-      this.audio.currentTime = Math.max(0, Math.min(time, this.audio.duration || time));
-      this.state.currentTime = this.audio.currentTime;
+      // v3.1.5: 处理流式音频 duration=Infinity/NaN 的情况
+      // 浏览器会自动 clamp 到 seekable 范围，无需手动限制（手动 min 在 NaN 时会失败）
+      const dur = this.audio.duration;
+      let target = Math.max(0, time);
+      if (isFinite(dur) && dur > 0) {
+        target = Math.min(target, dur);
+      } else if (isFinite(this.state.duration) && this.state.duration > 0) {
+        // duration 未知时用 state.duration（来自 canplay/loadedmetadata）兜底
+        target = Math.min(target, this.state.duration);
+      }
+      try {
+        this.audio.currentTime = target;
+      } catch (e) {
+        console.warn('[PlayerCore] seek failed:', e);
+      }
+      this.state.currentTime = target;
+      this.state.isSeeking = true;
       // v2.2: seek 后重新对齐节拍索引，避免连发或漏拍
       this.nextBeatIdx = 0;
-      while (this.nextBeatIdx < this.beats.length && this.beats[this.nextBeatIdx] <= this.audio.currentTime) {
+      while (this.nextBeatIdx < this.beats.length && this.beats[this.nextBeatIdx] <= target) {
         this.nextBeatIdx++;
       }
       this.notify();
@@ -578,8 +612,13 @@ class PlayerCore {
   }
 
   seekRatio(ratio: number) {
-    if (this.audio && this.audio.duration) {
-      this.seek(ratio * this.audio.duration);
+    // v3.1.5: 优先用 audio.duration，Infinity/NaN 时 fallback 到 state.duration
+    if (!this.audio) return;
+    const dur = isFinite(this.audio.duration) && this.audio.duration > 0
+      ? this.audio.duration
+      : (isFinite(this.state.duration) ? this.state.duration : 0);
+    if (dur > 0) {
+      this.seek(Math.max(0, Math.min(1, ratio)) * dur);
     }
   }
 

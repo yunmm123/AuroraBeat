@@ -4,6 +4,7 @@ import type { Song, NeteaseUser } from './types';
 import * as THREE from 'three';
 import { gsap } from 'gsap';
 import { sampleFrequencyBands, smoothLerp } from './core/beatDetector';
+import { useSpectrum } from './hooks/useSpectrum';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
@@ -156,12 +157,12 @@ function useVisualEngine(
       }
 
       vec3 sampleField(vec2 uv) {
-        // 1. 鼠标 domain warping
+        // 1. 鼠标 domain warping（v3.1.5: 系数 0.12→0.38，移动时明显搅动云雾）
         float mDist = distance(uv, uMouseUV);
         vec2 mouseWarp = vec2(
           snoise(vec3(uv * 1.5, uTime * 0.08)),
           snoise(vec3(uv * 1.5 + 17.3, uTime * 0.08))
-        ) * uMouseStrength * 0.12 * smoothstep(0.6, 0.0, mDist);
+        ) * (uMouseStrength + 0.06) * 0.38 * smoothstep(0.7, 0.0, mDist);
         vec2 p = uv + mouseWarp - uCamPan;
 
         // 2. 点击涟漪
@@ -174,7 +175,7 @@ function useVisualEngine(
             float age = uTime - r.z;
             if (age >= 0.0 && age <= 2.5) {
               float d = distance(uv, r.xy);
-              ripple += sin(d * 30.0 - age * 8.0) * exp(-age * 1.5) * 0.15;
+              ripple += sin(d * 30.0 - age * 8.0) * exp(-age * 1.5) * 0.18;
             }
           }
         }
@@ -183,13 +184,28 @@ function useVisualEngine(
         float beatWave = 0.0;
         if (uEnv > 0.01) {
           float distFromCenter = distance(uv, vec2(0.5));
-          // 冲击波半径随 env 衰减扩散
           float wavePos = (1.0 - uEnv) * 0.8;
           float waveDist = abs(distFromCenter - wavePos);
           beatWave = exp(-waveDist * 12.0) * uEnv * 0.3;
         }
 
-        // 4. 多层 FBM 云雾——流动速度提高 3 倍，视觉上有明显流动感
+        // 4. 流动极光带（v3.1.5 新增）：2-3 条水平流动的光带，随节拍摆动
+        float aurora = 0.0;
+        for (int g = 0; g < 2; g++) {
+          float fi = float(g);
+          float bandY = 0.3 + fi * 0.4
+            + sin(uTime * 0.15 + fi * 2.1) * 0.12
+            + uBass * 0.08 * sin(uTime * 0.3 + fi);
+          float bandDist = abs(uv.y - bandY);
+          float bandWidth = 0.06 + uEnergy * 0.04;
+          float band = exp(-bandDist * bandDist / (bandWidth * bandWidth * 2.0));
+          // 光带沿 x 流动（noise 调制亮度）
+          float flow = snoise(vec3(uv.x * 3.0 + uTime * 0.4, fi * 5.0, uTime * 0.1)) * 0.5 + 0.5;
+          aurora += band * flow;
+        }
+        aurora *= (0.35 + uEnergy * 0.4);
+
+        // 5. 多层 FBM 云雾——流动速度提高 3 倍，视觉上有明显流动感
         float t = uTime * 0.18;
         // bass 驱动整体缩放（低频膨胀感）
         float bassZoom = 1.0 - uBass * 0.15;
@@ -200,10 +216,10 @@ function useVisualEngine(
         float density = cloud1 * 0.5 + cloud2 * 0.35 + cloud3 * 0.15 + 0.45;
         // energy 驱动密度大幅膨胀（原 0.5 太弱，提到 1.2）
         density *= (0.6 + uEnergy * 1.2);
-        density += uBass * 0.2 + ripple + beatWave;
+        density += uBass * 0.2 + ripple + beatWave + aurora * 0.5;
         density = clamp(density, 0.0, 1.5);
 
-        // 5. 色彩混合——节拍来临时明显提亮 + 色彩偏移
+        // 6. 色彩混合——节拍来临时明显提亮 + 色彩偏移
         vec3 col = mix(uTint * 0.55, uAccent * 0.85, density);
         col = mix(vec3(0.08, 0.10, 0.16), col, smoothstep(-0.1, 0.65, density));
         // 节拍能量爆发：高密度区在节拍时明显发光
@@ -212,6 +228,8 @@ function useVisualEngine(
         col += vec3(0.12, 0.08, 0.04) * uEnv;
         // 冲击波发光
         col += uAccent * beatWave * 0.5;
+        // 极光带发光（偏 tint 色，清亮）
+        col += uTint * aurora * 0.6;
         return col;
       }
 
@@ -249,6 +267,14 @@ function useVisualEngine(
         // Vignette
         float vignette = smoothstep(1.3, 0.35, length(uv - 0.5) * 1.4);
         col *= vignette;
+
+        // v3.1.5: 鼠标辉光光斑——始终可见的柔和光晕跟随鼠标，移动时增强（明确反馈鼠标互动）
+        float mDistMain = distance(uv, uMouseUV);
+        float mouseGlow = exp(-mDistMain * 5.0) * (0.18 + uMouseStrength * 0.5);
+        col += uAccent * mouseGlow * 0.7 + vec3(mouseGlow * 0.15);
+        // 鼠标内核小亮点
+        float mouseCore = exp(-mDistMain * 40.0) * (0.3 + uMouseStrength * 0.7);
+        col += vec3(mouseCore * 0.4);
 
         // 星点
         float stars = pow(max(0.0, snoise(uv * 150.0)), 18.0) * (0.3 + uTreble * 0.5);
@@ -695,6 +721,9 @@ const App: React.FC = () => {
   const [customBg, setCustomBg] = useState<string | null>(null);
   const [customVideo, setCustomVideo] = useState<string | null>(null);
   const [gestureHint, setGestureHint] = useState<string | null>(null);
+  const [isDraggingProgress, setDraggingProgress] = useState(false);   // v3.1.5: 进度条拖拽态
+  const [seekPreviewTime, setSeekPreviewTime] = useState<number | null>(null); // 拖拽预览时间
+  const spectrumCanvasRef = useRef<HTMLCanvasElement>(null);            // v3.1.5: 频谱画布
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lyricsRef = useRef<HTMLDivElement>(null);
   const activeLyricRef = useRef<HTMLDivElement>(null);
@@ -710,6 +739,7 @@ const App: React.FC = () => {
   // 媒体上传时关闭全部特效
   const visualEnabled = !customBg && !customVideo;
   useVisualEngine(canvasRef, player, intensity, visualEnabled);
+  useSpectrum(spectrumCanvasRef);   // v3.1.5: 底部播放栏上方频谱
 
   useEffect(() => {
     electron?.getServerPort?.().then((port: number) => {
@@ -1001,16 +1031,29 @@ const App: React.FC = () => {
               {player.lyrics.length === 0 && !player.lyricsLoading && (
                 <div className="text-center text-white/15 text-sm">暂无歌词</div>
               )}
-              {visibleLines.map((line) => (
-                <div
-                  key={line.idx}
-                  ref={line.offset === 0 ? activeLyricRef : null}
-                  className="lyric-line"
-                  data-offset={line.offset}
-                >
-                  {line.text || '♪'}
-                </div>
-              ))}
+              {visibleLines.map((line) => {
+                const isActive = line.offset === 0;
+                const text = line.text || '♪';
+                // v3.1.5: 当前行逐字浮现（切换时每个字符依次渐入，有趣且有节奏感）
+                return (
+                  <div
+                    key={line.idx}
+                    ref={isActive ? activeLyricRef : null}
+                    className="lyric-line"
+                    data-offset={line.offset}
+                  >
+                    {isActive
+                      ? text.split('').map((ch, i) => (
+                          <span
+                            key={i}
+                            className="lyric-char"
+                            style={{ animationDelay: `${Math.min(i * 0.035, 0.6)}s` }}
+                          >{ch === ' ' ? '\u00A0' : ch}</span>
+                        ))
+                      : text}
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div className="text-center">
@@ -1021,6 +1064,11 @@ const App: React.FC = () => {
               )}
             </div>
           )}
+        </div>
+
+        {/* v3.1.5: 底部播放栏上方频谱可视化（居中镜像，封面色渐变） */}
+        <div className="spectrum-wrap">
+          <canvas ref={spectrumCanvasRef} className="spectrum-canvas" />
         </div>
 
         {/* 底部控制条 */}
@@ -1068,12 +1116,33 @@ const App: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-3 w-full">
-              <span className="text-[10px] text-white/35 w-10 text-right font-mono">{formatTime(player.currentTime)}</span>
-              <div className="flex-1 progress-track" onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                player.seekRatio((e.clientX - rect.left) / rect.width);
-              }}>
-                <div className="progress-fill" style={{ width: `${player.duration > 0 ? (player.currentTime / player.duration) * 100 : 0}%` }} />
+              <span className="text-[10px] text-white/35 w-10 text-right font-mono">{formatTime(player.duration > 0 ? seekPreviewTime ?? player.currentTime : player.currentTime)}</span>
+              <div
+                className={`flex-1 progress-track ${isDraggingProgress ? 'is-dragging' : ''}`}
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const seekTo = (clientX: number) => {
+                    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+                    setSeekPreviewTime(ratio * (player.duration || 0));
+                    return ratio;
+                  };
+                  seekTo(e.clientX);
+                  setDraggingProgress(true);
+                  const onMove = (ev: PointerEvent) => { seekTo(ev.clientX); };
+                  const onUp = (ev: PointerEvent) => {
+                    const ratio = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+                    player.seekRatio(ratio);
+                    setDraggingProgress(false);
+                    setSeekPreviewTime(null);
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                  };
+                  window.addEventListener('pointermove', onMove);
+                  window.addEventListener('pointerup', onUp);
+                }}
+              >
+                <div className="progress-fill" style={{ width: `${(player.duration > 0 ? ((seekPreviewTime ?? player.currentTime) / player.duration) * 100 : 0)}%` }} />
               </div>
               <span className="text-[10px] text-white/35 w-10 font-mono">{formatTime(player.duration)}</span>
             </div>

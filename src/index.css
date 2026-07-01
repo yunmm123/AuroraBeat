@@ -177,6 +177,24 @@ html, body {
   box-shadow: 0 0 10px rgba(0,245,212,.5);
 }
 .progress-track:hover .progress-fill::after { opacity: 1; }
+.progress-track.is-dragging .progress-fill::after { opacity: 1; transform: translateY(-50%) scale(1.15); }
+
+/* === v3.1.5 频谱可视化（底部播放栏上方，居中镜像） === */
+.spectrum-wrap {
+  width: 100%;
+  height: 56px;
+  pointer-events: none;
+  position: relative;
+  /* 上下淡出，与背景融合 */
+  mask-image: linear-gradient(to right, transparent 0%, #000 8%, #000 92%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 8%, #000 92%, transparent 100%);
+  opacity: 0.85;
+}
+.spectrum-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
 
 /* === 沉浸式歌词 v3.1 — 色彩呼吸场域主角 === */
 /* 当前行超大发光随节拍呼吸；过去行被雾向上吞没（translateY 递增 + blur 递增 + opacity 衰减） */
@@ -306,6 +324,35 @@ html, body {
     letter-spacing: 0.035em;
   }
 }
+
+/* v3.1.5: 当前行逐字浮现 — 切换时每个字符依次从下方旋转渐入（有趣且有节奏感）
+   父级 background-clip:text + transparent fill 会让 span 文字继承渐变填充 */
+.lyric-char {
+  display: inline-block;
+  opacity: 0;
+  transform: translateY(0.35em) rotateX(-60deg);
+  transform-origin: 50% 100%;
+  animation: lyric-char-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  will-change: transform, opacity;
+}
+@keyframes lyric-char-in {
+  to {
+    opacity: 1;
+    transform: translateY(0) rotateX(0);
+  }
+}
+
+/* v3.1.5: 未来行轻微浮动 — 增加生命感，不抢戏 */
+.lyric-line[data-offset="1"],
+.lyric-line[data-offset="2"] {
+  animation: lyric-float 6s ease-in-out infinite;
+}
+@keyframes lyric-float {
+  0%, 100% { transform: scale(var(--float-scale, 0.82)) translateY(0) translateZ(0); }
+  50% { transform: scale(var(--float-scale, 0.82)) translateY(-4px) translateZ(0); }
+}
+.lyric-line[data-offset="1"] { --float-scale: 0.82; animation-delay: -1.5s; }
+.lyric-line[data-offset="2"] { --float-scale: 0.72; animation-delay: -3s; }
 
 /* 减少动效偏好：关闭呼吸动画，过渡收窄 */
 @media (prefers-reduced-motion: reduce) {
