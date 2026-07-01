@@ -82,6 +82,7 @@ function useVisualEngine(
   canvasRef: React.RefObject<HTMLCanvasElement>,
   player: any,
   intensity: number,
+  enabled: boolean,
 ) {
   const engineRef = useRef<any>(null);
 
@@ -260,8 +261,8 @@ function useVisualEngine(
         disp *= (0.4 + uBass * 0.5);
         // treble 高频细节抖动
         disp += snoise(p * 6.0 + t * 3.0) * uTreble * 0.08;
-        // beat 脉冲膨胀
-        float inflate = 1.0 + uBeat * 0.18;
+        // beat 脉冲膨胀（明显跟节拍，0.35 让膨胀可见）
+        float inflate = 1.0 + uBass * 0.15 + uBeat * 0.35;
         vDisp = disp;
         vec3 newPos = position * inflate + normal * disp;
         // 重新计算法线（近似：用位移梯度）
@@ -280,13 +281,13 @@ function useVisualEngine(
         vec3 viewDir = normalize(cameraPosition - vPos);
         float fres = pow(1.0 - max(dot(normalize(vNormal), viewDir), 0.0), 3.0);
         // 主体色：tint 冷色 + 位移大处偏 accent 暖色（情绪张力）
-        vec3 base = mix(uTintColor * 0.5, uAccentColor, clamp(vDisp * 1.5 + 0.3, 0.0, 1.0));
-        // 边缘 fresnel 高光（白偏暖）
-        vec3 rim = mix(vec3(0.9, 0.92, 1.0), uAccentColor, 0.3) * fres * (1.4 + uBass * 1.2);
-        vec3 col = base * (0.5 + uBass * 0.3) + rim;
-        // beat 闪白（克制，0.3 上限）
-        col = mix(col, vec3(1.0), vBeat * 0.3);
-        gl_FragColor = vec4(col, uAlpha * (0.9 + fres * 0.1));
+        vec3 base = mix(uTintColor * 0.35, uAccentColor * 0.6, clamp(vDisp * 1.5 + 0.3, 0.0, 1.0));
+        // 边缘 fresnel 高光（白偏暖），降亮度避免刺眼
+        vec3 rim = mix(vec3(0.7, 0.75, 0.85), uAccentColor, 0.3) * fres * (0.8 + uBass * 0.9);
+        vec3 col = base * (0.32 + uBass * 0.25) + rim * 0.7;
+        // beat 闪白（克制，0.2 上限，避免刺眼）
+        col = mix(col, vec3(0.85), vBeat * 0.2);
+        gl_FragColor = vec4(col, uAlpha * (0.82 + fres * 0.08));
       }
     `;
     const coreGeo = new THREE.IcosahedronGeometry(1.4, 7); // 高细分
@@ -334,30 +335,9 @@ function useVisualEngine(
 
     // ==================================================================
     // 层3 前景：景深尘埃粒子（加性混合 sprite，high 频段闪烁，bass 径向爆发）
-    // 球壳分布，稀疏（3000），不抢主体焦点
+    // 球壳分布，数量由 intensity 滑块控制（500~8000），不抢主体焦点
     // ==================================================================
-    const PCOUNT = 3000;
-    const positions = new Float32Array(PCOUNT * 3);
-    const seeds = new Float32Array(PCOUNT);
-    const sizes = new Float32Array(PCOUNT);
     const hhash = (n: number) => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
-    for (let i = 0; i < PCOUNT; i++) {
-      const r1 = hhash(i * 3 + 1), r2 = hhash(i * 3 + 2), r4 = hhash(i * 5 + 7);
-      // 球壳分布，靠外给中心让位
-      const R = 4.2;
-      const radius = R * (0.7 + 0.3 * Math.cbrt(r1));
-      const theta = r2 * Math.PI * 2;
-      const phi = Math.acos(2 * r4 - 1);
-      positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
-      positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta) * 0.7;
-      positions[i * 3 + 2] = radius * Math.cos(phi) * 0.6;
-      seeds[i] = r1;
-      sizes[i] = 0.4 + r2 * 1.6;
-    }
-    const pGeo = new THREE.BufferGeometry();
-    pGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    pGeo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
-    pGeo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
     const particleUniforms = {
       uTime: { value: 0 }, uBass: { value: 0 }, uMid: { value: 0 }, uTreble: { value: 0 },
       uBeat: { value: 0 }, uDotTex: { value: dotTexture }, uAlpha: { value: 0 },
@@ -409,13 +389,45 @@ function useVisualEngine(
         gl_FragColor = vec4(col, tex.a * uAlpha * fogFade * 0.7);
       }
     `;
-    const particleMat = new THREE.ShaderMaterial({
-      uniforms: particleUniforms, vertexShader: particleVS, fragmentShader: particleFS,
-      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-    });
-    const particles = new THREE.Points(pGeo, particleMat);
-    particles.frustumCulled = false;
-    scene.add(particles);
+    // 计算粒子数量：intensity 0.2→500, 1.5→8000
+    const calcPCount = (v: number) => Math.floor(500 + (v - 0.2) / 1.3 * 7500);
+    let particles: THREE.Points | null = null;
+    let pGeo: THREE.BufferGeometry | null = null;
+    let particleMat: THREE.ShaderMaterial | null = null;
+    const buildParticles = (count: number) => {
+      if (particles) { scene.remove(particles); pGeo?.dispose(); }
+      const positions = new Float32Array(count * 3);
+      const seeds = new Float32Array(count);
+      const sizes = new Float32Array(count);
+      for (let i = 0; i < count; i++) {
+        const r1 = hhash(i * 3 + 1), r2 = hhash(i * 3 + 2), r4 = hhash(i * 5 + 7);
+        const R = 4.2;
+        const radius = R * (0.7 + 0.3 * Math.cbrt(r1));
+        const theta = r2 * Math.PI * 2;
+        const phi = Math.acos(2 * r4 - 1);
+        positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+        positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta) * 0.7;
+        positions[i * 3 + 2] = radius * Math.cos(phi) * 0.6;
+        seeds[i] = r1;
+        sizes[i] = 0.4 + r2 * 1.6;
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1));
+      geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+      pGeo = geo;
+      if (!particleMat) {
+        particleMat = new THREE.ShaderMaterial({
+          uniforms: particleUniforms, vertexShader: particleVS, fragmentShader: particleFS,
+          transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+        });
+      }
+      const p = new THREE.Points(geo, particleMat);
+      p.frustumCulled = false;
+      scene.add(p);
+      particles = p;
+    };
+    buildParticles(calcPCount(intensity));
 
     // 入场渐显
     gsap.to(bgUniforms.uAlpha, { value: 1, duration: 1.5, ease: 'power2.out' });
@@ -625,12 +637,12 @@ function useVisualEngine(
     const coverUrl = player.currentSong?.cover;
     if (coverUrl) updateCover(coverUrl);
 
-    engineRef.current = { particleUniforms, coreUniforms, haloUniforms, bgUniforms, updateCover, renderer, scene };
+    engineRef.current = { particleUniforms, coreUniforms, haloUniforms, bgUniforms, updateCover, renderer, scene, buildParticles, calcPCount };
 
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener('resize', onResize);
-      pGeo.dispose(); particleMat.dispose();
+      pGeo?.dispose(); particleMat?.dispose();
       coreGeo.dispose(); coreMat.dispose();
       haloGeo.dispose(); haloMat.dispose();
       bgGeo.dispose(); bgMat.dispose();
@@ -643,12 +655,22 @@ function useVisualEngine(
     };
   }, []);
 
-  // 强度切换
+  // 强度切换：动态重建粒子数量
   useEffect(() => {
-    if (engineRef.current?.particleUniforms) {
-      engineRef.current.particleUniforms.uIntensity.value = intensity;
+    const eng = engineRef.current;
+    if (eng?.buildParticles && eng?.calcPCount) {
+      eng.buildParticles(eng.calcPCount(intensity));
     }
+    if (eng?.particleUniforms) eng.particleUniforms.uIntensity.value = intensity;
   }, [intensity]);
+
+  // 媒体上传时隐藏特效 canvas，清除后恢复
+  useEffect(() => {
+    if (canvasRef.current) {
+      canvasRef.current.style.opacity = enabled ? '1' : '0';
+      canvasRef.current.style.transition = 'opacity 0.6s ease';
+    }
+  }, [enabled]);
 
   // 封面更新
   useEffect(() => {
@@ -735,7 +757,9 @@ const App: React.FC = () => {
   const moodColors = MOOD_COLORS[mood];
   const bgColor = (customBg || customVideo) ? 'transparent' : moodColors.bg;
 
-  useVisualEngine(canvasRef, player, intensity);
+  // 媒体上传时关闭全部特效
+  const visualEnabled = !customBg && !customVideo;
+  useVisualEngine(canvasRef, player, intensity, visualEnabled);
 
   useEffect(() => {
     electron?.getServerPort?.().then((port: number) => {
@@ -935,6 +959,21 @@ const App: React.FC = () => {
 
   return (
     <div className="fixed inset-0 overflow-hidden text-white select-none font-sans" style={{ background: bgColor, transition: 'background 1.5s ease' }}>
+      {/* 多层光斑渐变背景（封面主色+副色径向光斑漂移，替代纯黑） */}
+      {!customBg && !customVideo && (
+        <div
+          className="absolute inset-0 z-0"
+          style={{
+            background: `
+              radial-gradient(ellipse 60% 50% at 22% 28%, ${moodColors.primary}22 0%, transparent 55%),
+              radial-gradient(ellipse 55% 45% at 78% 72%, ${moodColors.secondary}1f 0%, transparent 55%),
+              radial-gradient(ellipse 70% 60% at 50% 50%, ${moodColors.primary}10 0%, transparent 70%),
+              linear-gradient(135deg, ${moodColors.bg} 0%, #050507 100%)
+            `,
+            opacity: 0.9,
+          }}
+        />
+      )}
       {/* 自定义背景图片 */}
       {customBg && <div className="absolute inset-0 z-0 bg-cover bg-center" style={{ backgroundImage: `url(${customBg})`, opacity: 0.3 }} />}
       {/* 自定义背景视频（沉浸式循环静音播放） */}
@@ -975,7 +1014,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full" style={{ background: `linear-gradient(135deg, ${moodColors.primary}, ${moodColors.secondary})` }} />
           <span className="text-[11px] font-semibold tracking-[0.2em] text-white/40 uppercase">AuroraBeat</span>
-          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v1.2.0</span>
+          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v1.3.0</span>
           <span className="text-[10px] text-white/20 ml-2">{mood}</span>
         </div>
         <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
@@ -997,19 +1036,26 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* 主内容：沉浸式歌词舞台（始终显示在底层） */}
+      {/* 主内容：沉浸式歌词舞台（Spotify 全屏大字风格） */}
       <div className="absolute inset-0 z-30 flex flex-col pt-11 pointer-events-none">
         {/* 舞台歌词（沉浸式主界面） */}
         <div className="flex-1 flex items-center justify-center relative overflow-hidden">
           {player.currentSong && player.showLyrics ? (
-            <div className="w-full max-w-2xl h-[60vh] overflow-y-auto px-8 pointer-events-auto" ref={lyricsRef} style={{ scrollbarWidth: 'none' }}>
-              <div className="space-y-3 py-32">
+            <div className="w-full max-w-3xl h-[70vh] overflow-y-auto px-8 pointer-events-auto spotify-lyrics" ref={lyricsRef} style={{ scrollbarWidth: 'none' }}>
+              <div className="flex flex-col items-center justify-center py-[28vh]">
                 {player.lyricsLoading && player.lyrics.length === 0 && <div className="text-center text-white/25 text-sm py-8">加载歌词中...</div>}
                 {player.lyrics.length === 0 && !player.lyricsLoading && <div className="text-center text-white/15 text-sm py-8">暂无歌词</div>}
                 {player.lyrics.map((line, i) => {
                   const isActive = i === activeLyricIdx;
+                  const dist = Math.abs(i - activeLyricIdx);
+                  const state = isActive ? 'is-current' : i < activeLyricIdx ? 'is-past' : 'is-future';
                   return (
-                    <div key={i} ref={isActive ? activeLyricRef : null} className={`lyrics-line ${isActive ? 'active' : i < activeLyricIdx ? 'past' : 'future'}`}>
+                    <div
+                      key={i}
+                      ref={isActive ? activeLyricRef : null}
+                      className={`spline ${state}`}
+                      style={{ opacity: isActive ? 1 : Math.max(0.12, 0.5 - dist * 0.12) }}
+                    >
                       {line.text || '♪'}
                     </div>
                   );
