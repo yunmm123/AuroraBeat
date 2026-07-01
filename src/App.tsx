@@ -179,21 +179,39 @@ function useVisualEngine(
           }
         }
 
-        // 3. 多层 FBM 云雾
-        float t = uTime * 0.06;
-        float cloud1 = fbm(vec3(p * 0.8, t));
-        float cloud2 = fbm(vec3(p * 1.6 + cloud1 * 0.3, t * 1.3 + 31.4));
-        float cloud3 = fbm(vec3(p * 3.2 + cloud2 * 0.2, t * 2.0 + 73.2)) * 0.3;
-        float density = cloud1 * 0.5 + cloud2 * 0.35 + cloud3 * 0.15 + 0.45;
-        density *= (0.75 + uEnergy * 0.5);
-        density += uBass * 0.15 + ripple;
-        density = clamp(density, 0.0, 1.2);
+        // 3. 节拍冲击波：从画面中心向外扩散（每个节拍触发一次）
+        float beatWave = 0.0;
+        if (uEnv > 0.01) {
+          float distFromCenter = distance(uv, vec2(0.5));
+          // 冲击波半径随 env 衰减扩散
+          float wavePos = (1.0 - uEnv) * 0.8;
+          float waveDist = abs(distFromCenter - wavePos);
+          beatWave = exp(-waveDist * 12.0) * uEnv * 0.3;
+        }
 
-        // 4. 色彩混合
-        vec3 col = mix(uTint * 0.55, uAccent * 0.8, density);
-        col = mix(vec3(0.10, 0.12, 0.18), col, smoothstep(-0.1, 0.7, density));
-        col += uAccent * uEnergy * 0.2 * smoothstep(0.5, 1.0, density);
-        col = mix(col, col + vec3(0.08, 0.05, 0.02), uEnv * 0.3);
+        // 4. 多层 FBM 云雾——流动速度提高 3 倍，视觉上有明显流动感
+        float t = uTime * 0.18;
+        // bass 驱动整体缩放（低频膨胀感）
+        float bassZoom = 1.0 - uBass * 0.15;
+        vec2 bp = p * bassZoom;
+        float cloud1 = fbm(vec3(bp * 0.8, t));
+        float cloud2 = fbm(vec3(bp * 1.6 + cloud1 * 0.3, t * 1.4 + 31.4));
+        float cloud3 = fbm(vec3(bp * 3.2 + cloud2 * 0.2, t * 2.2 + 73.2)) * 0.3;
+        float density = cloud1 * 0.5 + cloud2 * 0.35 + cloud3 * 0.15 + 0.45;
+        // energy 驱动密度大幅膨胀（原 0.5 太弱，提到 1.2）
+        density *= (0.6 + uEnergy * 1.2);
+        density += uBass * 0.2 + ripple + beatWave;
+        density = clamp(density, 0.0, 1.5);
+
+        // 5. 色彩混合——节拍来临时明显提亮 + 色彩偏移
+        vec3 col = mix(uTint * 0.55, uAccent * 0.85, density);
+        col = mix(vec3(0.08, 0.10, 0.16), col, smoothstep(-0.1, 0.65, density));
+        // 节拍能量爆发：高密度区在节拍时明显发光
+        col += uAccent * uEnergy * 0.35 * smoothstep(0.4, 1.0, density);
+        // env 节拍脉冲：整个画面在节拍来临时变亮（明显感知）
+        col += vec3(0.12, 0.08, 0.04) * uEnv;
+        // 冲击波发光
+        col += uAccent * beatWave * 0.5;
         return col;
       }
 
@@ -206,12 +224,12 @@ function useVisualEngine(
         col.g = sampleField(uv).g;
         col.b = sampleField(uv - vec2(shiftAmt, 0.0)).b;
 
-        // 简化 bloom：对亮部做模糊采样叠加（9 次采样模拟高斯）
+        // 简化 bloom：对亮部做模糊采样叠加（5x5 高斯），阈值降低让更多区域发光
         float brightness = dot(col, vec3(0.299, 0.587, 0.114));
-        float bloomThresh = 0.5;
+        float bloomThresh = 0.35;
         if (brightness > bloomThresh) {
           vec3 bloom = vec3(0.0);
-          float blurR = 0.008 + uEnergy * 0.006;
+          float blurR = 0.01 + uEnergy * 0.008;
           float total = 0.0;
           for (int i = -2; i <= 2; i++) {
             for (int j = -2; j <= 2; j++) {
@@ -224,7 +242,7 @@ function useVisualEngine(
             }
           }
           if (total > 0.001) {
-            col += bloom / total * (0.5 + uEnergy * 0.3);
+            col += bloom / total * (0.7 + uEnergy * 0.5);
           }
         }
 
@@ -316,10 +334,10 @@ function useVisualEngine(
     const ripples: { uv: THREE.Vector2; time: number }[] = [];
 
     // === 节拍来源：player.onBeat（离线预分析为主，realtime 为 fallback） ===
-    //   保留 v2.3：onBeat "注入能量 + 触发包络"，不阶跃赋值。
+    //   v3.1.4: 强节拍响应——energy 注入 25% + 慢释放 0.80，让节拍冲击持续可见
     const offBeat = player.onBeat((time: number) => {
-      const impulse = 0.5 + smoothBass * 0.5;
-      energy = energy * 0.92 + impulse * 0.08;   // 注入非赋值（低通积累）
+      const impulse = 0.7 + smoothBass * 0.3;
+      energy = energy * 0.75 + impulse * 0.25;   // 注入 25%（强节拍响应）
       envPhase = 'att'; envT = 0;                 // 触发 ADSR
       beatCount++;
       const curBpm = player.getBpm();
@@ -394,7 +412,7 @@ function useVisualEngine(
       }
 
       // === v2.3 蓄能池慢释放 + ADSR 包络（保留，平滑趋近，无阶跃） ===
-      energy *= Math.pow(0.55, dt);   // 慢释放
+      energy *= Math.pow(0.80, dt);   // 慢释放（节拍间 energy 保持可见）
       envT += dt;
       let envTarget = 0;
       if (envPhase === 'att') { envTarget = 1.0; if (envT >= A) { envPhase = 'dec'; envT = 0; } }
