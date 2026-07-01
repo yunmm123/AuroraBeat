@@ -183,38 +183,138 @@ html, body {
   perspective: 800px;
   perspective-origin: 50% 40%;
 }
-/* === Spotify 全屏大字歌词 === */
-.spotify-lyrics { scroll-behavior: smooth; }
-.spline {
-  text-align: center;
-  transition: all 0.5s cubic-bezier(0.33, 1, 0.68, 1);
-  line-height: 1.25;
-  letter-spacing: -0.01em;
-  padding: 0.32em 0;
-  font-weight: 400;
-  color: rgba(255,255,255,0.5);
-  font-size: clamp(20px, 1.8vw, 26px);
-  transform: scale(0.94);
-  will-change: transform, opacity, font-size;
+/* === 沉浸式逐字高亮歌词 v2.0（Visual Lyrics 论文体系） === */
+/* --w 为单字填充分数 0..1，由 JS 每帧写入；用 @property 注册使其可被 GPU 平滑插值 */
+@property --w {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
 }
-.spline.is-current {
-  font-size: clamp(30px, 3.4vw, 46px);
+
+.lyric-stage { scroll-behavior: smooth; }
+
+/* 歌词行基础态 */
+.lyric-line {
+  text-align: center;
+  transition:
+    font-size 0.6s cubic-bezier(0.22, 1, 0.36, 1),
+    color 0.6s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.6s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.6s cubic-bezier(0.22, 1, 0.36, 1),
+    text-shadow 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+  line-height: 1.26;
+  letter-spacing: -0.01em;
+  padding: 0.26em 0;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.32);
+  font-size: clamp(18px, 1.6vw, 24px);
+  transform: scale(0.9);
+  will-change: transform, opacity, font-size, color;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+}
+
+/* 当前句：大字 + 重字重 + 全白 + 封面色辉光（随 beat 脉冲） */
+.lyric-line--current {
+  font-size: clamp(28px, 3vw, 44px);
   font-weight: 700;
   color: #ffffff;
-  line-height: 1.2;
+  line-height: 1.22;
   transform: scale(1);
   text-shadow:
-    0 0 18px rgba(255,255,255,0.35),
-    0 0 42px rgba(0,245,212,0.30);
+    0 0 calc(14px + var(--beat-pulse, 0) * 24px) rgba(255, 255, 255, 0.55),
+    0 0 calc(36px + var(--beat-pulse, 0) * 46px) var(--cover-tint, rgba(0, 245, 212, 0.50));
 }
-.spline.is-past {
-  color: rgba(255,255,255,0.22);
+
+.lyric-line--past {
+  color: rgba(255, 255, 255, 0.16);
+  font-weight: 400;
+  transform: scale(0.88);
+}
+
+.lyric-line--future {
+  color: rgba(255, 255, 255, 0.34);
   font-weight: 400;
   transform: scale(0.92);
 }
-.spline.is-future {
-  color: rgba(255,255,255,0.42);
-  font-weight: 400;
+
+/* 单字 span：karaoke 流光遮罩，按 --w 推进亮色 wipe */
+.lyric-word {
+  display: inline-block;
+  position: relative;
+  color: inherit;
+  white-space: pre;
+  transition:
+    --w 0.12s linear,
+    color 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    text-shadow 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    letter-spacing 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 当前句未唱字：暗灰，整字可见 */
+.lyric-line--current .lyric-word--unsung {
+  color: rgba(255, 255, 255, 0.30);
+}
+
+/* 已唱字：纯白 + 双层辉光（白核 + 封面色散） */
+.lyric-word--sung,
+.lyric-line--current .lyric-word--sung {
+  color: #ffffff;
+  text-shadow:
+    0 0 10px rgba(255, 255, 255, 0.65),
+    0 0 calc(24px + var(--beat-pulse, 0) * 28px) var(--cover-tint, rgba(0, 245, 212, 0.55));
+}
+
+/* 当前正唱的字（部分填充 0<--w<1）：流光 wipe + 高能 glow + scale 脉冲 */
+.lyric-word--active {
+  background: linear-gradient(
+    100deg,
+    #ffffff 0%,
+    var(--cover-accent, #ffd27a) calc(var(--w, 0) * 100%),
+    rgba(255, 255, 255, 0.30) calc(var(--w, 0) * 100%),
+    rgba(255, 255, 255, 0.30) 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  transform: scale(1.12);
+  text-shadow:
+    0 0 14px rgba(255, 255, 255, 0.85),
+    0 0 calc(28px + var(--beat-pulse, 0) * 40px) var(--cover-accent, #ffd27a),
+    0 0 calc(56px + var(--beat-pulse, 0) * 80px) var(--cover-tint, rgba(0, 245, 212, 0.55));
+}
+
+/* 高能量长词拉伸：字间距 + 横向缩放（叠加在 active 之上，源序在后生效） */
+.lyric-word--elongated {
+  letter-spacing: 0.04em;
+  transform: scaleX(1.06) scale(1.08);
+}
+
+/* 过去句：全部暗化，禁用辉光与脉冲 */
+.lyric-line--past .lyric-word,
+.lyric-line--past .lyric-word--active,
+.lyric-line--past .lyric-word--sung,
+.lyric-line--past .lyric-word--elongated {
+  color: rgba(255, 255, 255, 0.16);
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.16);
+  background: none;
+  text-shadow: none;
+  transform: none;
+  letter-spacing: -0.01em;
+}
+
+/* 未来句：保持暗灰，禁用辉光与脉冲 */
+.lyric-line--future .lyric-word,
+.lyric-line--future .lyric-word--active {
+  color: rgba(255, 255, 255, 0.34);
+  -webkit-text-fill-color: rgba(255, 255, 255, 0.34);
+  background: none;
+  text-shadow: none;
+  transform: none;
 }
 
 /* === 搜索框 === */

@@ -92,3 +92,41 @@ declare module 'three/examples/jsm/shaders/VignetteShader' {
     fragmentShader: string
   }
 }
+
+declare module 'three/examples/jsm/shaders/FXAAShader' {
+  export const FXAAShader: {
+    uniforms: { tDiffuse: { value: any }; resolution: { value: THREE.Vector2 } }
+    vertexShader: string
+    fragmentShader: string
+  }
+}
+
+declare module 'three/examples/jsm/misc/GPUComputationRenderer' {
+  import * as THREE from 'three'
+  export class GPUComputationRenderer {
+    constructor(WIDTH: number, HEIGHT: number, renderer: THREE.WebGLRenderer)
+    setDataType(type: any): void
+    createTexture(): THREE.DataTexture
+    addVariable(variableName: string, computeFragmentShader: string, initialValueTexture: THREE.DataTexture): any
+    setVariableDependencies(variable: any, dependencies: any[]): void
+    init(): any
+    compute(): void
+    getCurrentRenderTarget(variable: any): any
+    getAlternateRenderTarget(variable: any): any
+    renderTexture(input: any, output: any): void
+    dispose(): void
+    variables: any[]
+  }
+}
+
+declare module 'three/examples/jsm/postprocessing/BokehPass' {
+  import * as THREE from 'three'
+  export class BokehPass {
+    constructor(scene: THREE.Scene, camera: THREE.Camera, params?: any)
+    uniforms: any
+    enabled: boolean
+    renderTargetDepth: any
+    setSize(width: number, height: number): void
+    render(renderer: any, writeBuffer: any, readBuffer: any): void
+  }
+}
