@@ -178,143 +178,111 @@ html, body {
 }
 .progress-track:hover .progress-fill::after { opacity: 1; }
 
-/* === 舞台歌词 === */
-.stage-lyrics-container {
-  perspective: 800px;
-  perspective-origin: 50% 40%;
-}
-/* === 沉浸式逐字高亮歌词 v2.0（Visual Lyrics 论文体系） === */
-/* --w 为单字填充分数 0..1，由 JS 每帧写入；用 @property 注册使其可被 GPU 平滑插值 */
-@property --w {
-  syntax: '<number>';
-  inherits: false;
-  initial-value: 0;
+/* === 沉浸式歌词 v2.1 — 行级隧道式（tunnel），克制高级 === */
+/* 单一焦点在当前行；前后行 blur 衰减 + scale 缩小，自然景深虚化；不再逐字高亮 */
+.lyrics-tunnel {
+  perspective: 1200px;
+  perspective-origin: 50% 50%;
+  transform-style: preserve-3d;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.16em;
+  width: min(86vw, 1100px);
+  max-height: 70vh;
+  pointer-events: none;
+  /* 上下淡出 mask：隧道边缘自然消融，无硬切边 */
+  -webkit-mask-image: radial-gradient(ellipse 72% 62% at 50% 50%, #000 40%, rgba(0,0,0,0.55) 70%, transparent 97%);
+  mask-image: radial-gradient(ellipse 72% 62% at 50% 50%, #000 40%, rgba(0,0,0,0.55) 70%, transparent 97%);
 }
 
-.lyric-stage { scroll-behavior: smooth; }
-
-/* 歌词行基础态 */
+/* 歌词行基础态：慢速 cubic-bezier 缓动，几乎察觉不到的过渡（1100ms） */
 .lyric-line {
   text-align: center;
-  transition:
-    font-size 0.6s cubic-bezier(0.22, 1, 0.36, 1),
-    color 0.6s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.6s cubic-bezier(0.22, 1, 0.36, 1),
-    transform 0.6s cubic-bezier(0.22, 1, 0.36, 1),
-    text-shadow 0.4s cubic-bezier(0.22, 1, 0.36, 1);
-  line-height: 1.26;
-  letter-spacing: -0.01em;
-  padding: 0.26em 0;
+  font-size: clamp(20px, 1.9vw, 28px);
   font-weight: 400;
+  line-height: 1.32;
+  letter-spacing: 0.01em;
   color: rgba(255, 255, 255, 0.32);
-  font-size: clamp(18px, 1.6vw, 24px);
-  transform: scale(0.9);
-  will-change: transform, opacity, font-size, color;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  align-items: baseline;
+  padding: 0.22em 0;
+  white-space: nowrap;
+  transform-origin: center center;
+  transform: scale(0.82) translateZ(0);
+  opacity: 0;
+  filter: blur(8px);
+  transition:
+    transform 1100ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 1100ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 1100ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 1100ms cubic-bezier(0.16, 1, 0.3, 1),
+    text-shadow 1100ms cubic-bezier(0.16, 1, 0.3, 1),
+    letter-spacing 1100ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity, filter;
+  backface-visibility: hidden;
 }
 
-/* 当前句：大字 + 重字重 + 全白 + 封面色辉光（随 beat 脉冲） */
-.lyric-line--current {
-  font-size: clamp(28px, 3vw, 44px);
-  font-weight: 700;
+/* 相邻两行（前后各 2）：最小可见度，深度虚化 */
+.lyric-line[data-offset="-2"],
+.lyric-line[data-offset="2"] {
+  transform: scale(0.72) translateZ(0);
+  opacity: 0.18;
+  filter: blur(14px);
+}
+
+/* 相邻一行（前后各 1）：轻度缩小 + 轻模糊 + 半透明 */
+.lyric-line[data-offset="-1"],
+.lyric-line[data-offset="1"] {
+  transform: scale(0.82) translateZ(0);
+  opacity: 0.42;
+  filter: blur(6px);
+}
+
+/* 当前行：唯一焦点 — 全白 + scale 1 + 无模糊 + 微光晕（随 beat 脉冲，0.08 透明度极克制） */
+.lyric-line[data-offset="0"] {
+  font-size: clamp(30px, 3.2vw, 46px);
+  font-weight: 600;
   color: #ffffff;
   line-height: 1.22;
-  transform: scale(1);
+  letter-spacing: 0.015em;
+  transform: scale(1) translateZ(0);
+  opacity: 1;
+  filter: blur(0);
   text-shadow:
-    0 0 calc(14px + var(--beat-pulse, 0) * 24px) rgba(255, 255, 255, 0.55),
-    0 0 calc(36px + var(--beat-pulse, 0) * 46px) var(--cover-tint, rgba(0, 245, 212, 0.50));
+    0 0 calc(12px + var(--beat-pulse, 0) * 14px) rgba(255, 255, 255, 0.08),
+    0 0 calc(34px + var(--beat-pulse, 0) * 30px) var(--cover-tint, rgba(0, 245, 212, 0.08));
+  animation: line-breathe 4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
 }
 
-.lyric-line--past {
-  color: rgba(255, 255, 255, 0.16);
-  font-weight: 400;
-  transform: scale(0.88);
+/* 超出 ±2 的行（±3..±5）：完全消融，仅占位维持流式排版 */
+.lyric-line[data-offset="-5"],
+.lyric-line[data-offset="-4"],
+.lyric-line[data-offset="-3"],
+.lyric-line[data-offset="3"],
+.lyric-line[data-offset="4"],
+.lyric-line[data-offset="5"] {
+  opacity: 0;
+  filter: blur(24px);
+  transform: scale(0.62) translateZ(0);
+  pointer-events: none;
 }
 
-.lyric-line--future {
-  color: rgba(255, 255, 255, 0.34);
-  font-weight: 400;
-  transform: scale(0.92);
+/* 行级呼吸：scale 1→1.035→1（3.5%，几乎察觉不到）+ letter-spacing 微动，与节拍同频 */
+@keyframes line-breathe {
+  0%, 100% {
+    transform: scale(1) translateZ(0);
+    letter-spacing: 0.015em;
+  }
+  50% {
+    transform: scale(1.035) translateZ(0);
+    letter-spacing: 0.028em;
+  }
 }
 
-/* 单字 span：karaoke 流光遮罩，按 --w 推进亮色 wipe */
-.lyric-word {
-  display: inline-block;
-  position: relative;
-  color: inherit;
-  white-space: pre;
-  transition:
-    --w 0.12s linear,
-    color 0.18s cubic-bezier(0.22, 1, 0.36, 1),
-    text-shadow 0.18s cubic-bezier(0.22, 1, 0.36, 1),
-    transform 0.18s cubic-bezier(0.22, 1, 0.36, 1),
-    letter-spacing 0.18s cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-/* 当前句未唱字：暗灰，整字可见 */
-.lyric-line--current .lyric-word--unsung {
-  color: rgba(255, 255, 255, 0.30);
-}
-
-/* 已唱字：纯白 + 双层辉光（白核 + 封面色散） */
-.lyric-word--sung,
-.lyric-line--current .lyric-word--sung {
-  color: #ffffff;
-  text-shadow:
-    0 0 10px rgba(255, 255, 255, 0.65),
-    0 0 calc(24px + var(--beat-pulse, 0) * 28px) var(--cover-tint, rgba(0, 245, 212, 0.55));
-}
-
-/* 当前正唱的字（部分填充 0<--w<1）：流光 wipe + 高能 glow + scale 脉冲 */
-.lyric-word--active {
-  background: linear-gradient(
-    100deg,
-    #ffffff 0%,
-    var(--cover-accent, #ffd27a) calc(var(--w, 0) * 100%),
-    rgba(255, 255, 255, 0.30) calc(var(--w, 0) * 100%),
-    rgba(255, 255, 255, 0.30) 100%
-  );
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-  transform: scale(1.12);
-  text-shadow:
-    0 0 14px rgba(255, 255, 255, 0.85),
-    0 0 calc(28px + var(--beat-pulse, 0) * 40px) var(--cover-accent, #ffd27a),
-    0 0 calc(56px + var(--beat-pulse, 0) * 80px) var(--cover-tint, rgba(0, 245, 212, 0.55));
-}
-
-/* 高能量长词拉伸：字间距 + 横向缩放（叠加在 active 之上，源序在后生效） */
-.lyric-word--elongated {
-  letter-spacing: 0.04em;
-  transform: scaleX(1.06) scale(1.08);
-}
-
-/* 过去句：全部暗化，禁用辉光与脉冲 */
-.lyric-line--past .lyric-word,
-.lyric-line--past .lyric-word--active,
-.lyric-line--past .lyric-word--sung,
-.lyric-line--past .lyric-word--elongated {
-  color: rgba(255, 255, 255, 0.16);
-  -webkit-text-fill-color: rgba(255, 255, 255, 0.16);
-  background: none;
-  text-shadow: none;
-  transform: none;
-  letter-spacing: -0.01em;
-}
-
-/* 未来句：保持暗灰，禁用辉光与脉冲 */
-.lyric-line--future .lyric-word,
-.lyric-line--future .lyric-word--active {
-  color: rgba(255, 255, 255, 0.34);
-  -webkit-text-fill-color: rgba(255, 255, 255, 0.34);
-  background: none;
-  text-shadow: none;
-  transform: none;
+/* 减少动效偏好：关闭呼吸动画，过渡收窄 */
+@media (prefers-reduced-motion: reduce) {
+  .lyric-line[data-offset="0"] { animation: none; }
+  .lyric-line { transition-duration: 600ms; }
 }
 
 /* === 搜索框 === */
