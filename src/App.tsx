@@ -34,7 +34,7 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v2.2 — 质感说话 + 视觉层次增强
+// Three.js 视觉引擎 v2.3 — 质感说话 + 视觉层次增强 + 节拍流动响应
 // 核心一句话：少，但每一帧都呼吸。在 v2.1 克制美学上增加层次而非堆砌。
 //   1. 单一柔光核心体（IcosahedronGeometry + fbm 位移 + 菲涅尔辉光）—— 唯一焦点
 //   1b. 核心体外层光环 halo（backside fresnel 球壳，beat 脉冲）—— 新增层次
@@ -233,8 +233,8 @@ function useVisualEngine(
         // 菲涅尔边缘辉光
         vec3 rim = uGlowColor * fres * (1.0 + uBeat * 0.8);
         vec3 col = base * (0.5 + uBass * 0.3) + rim * (0.85 + uBeat * 0.6);
-        // beat 微闪白（克制 0.15）
-        col = mix(col, vec3(1.0), uBeat * 0.15);
+        // v2.3: 去瞬白，改为向辉光色缓变（幅度 0.06，由包络驱动而非脉冲）
+        col = mix(col, uGlowColor, uBeat * 0.06);
         // 整体压低避免过曝
         col *= 0.86;
         gl_FragColor = vec4(col, 1.0);
@@ -374,8 +374,8 @@ function useVisualEngine(
         float r = length(pos);
         vec3 dir = r > 0.001 ? pos / r : normalize(pos + vec3(0.001));
         pos += dir * uBass * 0.3;
-        // beat 沿径向冲出（克制，0.6 上限）
-        pos += dir * uBeat * 0.6;
+        // v2.3: beat 沿径向外推（幅度砍到 1/4，由包络驱动，不冲出）
+        pos += dir * uBeat * 0.15;
         vBeat = uBeat; vSeed = aSeed; vBass = uBass;
         vDepth = clamp(r / 7.0, 0.0, 1.0);
         vec4 mv = modelViewMatrix * vec4(pos, 1.0);
@@ -456,19 +456,28 @@ function useVisualEngine(
     let analyser: AnalyserNode | null = null;
     let freqData: Uint8Array | null = null;
     let smoothBass = 0, smoothMid = 0, smoothTreb = 0, smoothEnergy = 0;
-    let beatPulse = 0, bloomKick = 0, shiftKick = 0;
-    let beatTime = 1.0; // 距上次 beat 的时间（s），初始大值无影响
+    // === v2.3 视觉响应：蓄能池 energy + ADSR 包络 env（取代阶跃式 beatPulse/bloomKick/shiftKick） ===
+    //   energy：低通积累，驱动后处理(bloom/rgbShift) + 持续型 uniform(halo/bg/line)
+    //   env：ADSR 包络，驱动核心体/粒子等节拍型 uniform；平滑趋近，无任何瞬时阶跃
+    let energy = 0;
+    let env = 0;
+    let envPhase: 'idle' | 'att' | 'dec' | 'sus' | 'rel' = 'idle';
+    let envT = 0;
+    const bpmInit = player.getBpm() || 120;
+    let beatInterval = 60 / bpmInit;       // BPM 可能分析完成后才拿到，onBeat 内刷新
+    const A = 0.05, D = 0.15, S = 0.55;    // ADSR attack/decay(秒) 与 sustain 电平
     let prevTime = performance.now();
     let beatCount = 0;
 
-    // === v2.2 节拍来源：player.onBeat（离线预分析为主，realtime 为 fallback） ===
-    //   不再在渲染线程跑 RealtimeKickDetector；节拍由 playerCore 统一派发。
+    // === 节拍来源：player.onBeat（离线预分析为主，realtime 为 fallback） ===
+    //   v2.3：onBeat 改为"注入能量 + 触发包络"，不再阶跃赋值。
     const offBeat = player.onBeat((time: number) => {
-      beatPulse = 1;
-      bloomKick = Math.max(bloomKick, smoothBass * 0.5 + 0.4);
-      shiftKick = 1;
-      beatTime = 0; // 重置蓄力释放计时
+      const impulse = 0.5 + smoothBass * 0.5;
+      energy = energy * 0.92 + impulse * 0.08;   // 注入非赋值（低通积累）
+      envPhase = 'att'; envT = 0;                 // 触发 ADSR
       beatCount++;
+      const curBpm = player.getBpm();
+      if (curBpm > 0) beatInterval = 60 / curBpm;
     });
 
     // 可视化频谱仍用 AnalyserNode（v2.2 删了 crossOrigin，频谱不再静默）
@@ -488,7 +497,6 @@ function useVisualEngine(
       coreUniforms.uTime.value += dt;
       haloUniforms.uTime.value += dt;
       particleUniforms.uTime.value += dt;
-      beatTime += dt;
 
       if (analyser && freqData && player.isPlaying) {
         analyser.getByteFrequencyData(freqData as any);
@@ -520,65 +528,69 @@ function useVisualEngine(
         smoothBass *= 0.94; smoothMid *= 0.94; smoothTreb *= 0.94; smoothEnergy *= 0.94;
       }
 
-      // beat 脉冲指数衰减（蓄力-释放感）
-      beatPulse *= Math.pow(0.08, dt);
-      bloomKick *= Math.pow(0.12, dt);
-      shiftKick *= Math.pow(0.15, dt);
+      // === v2.3 蓄能池慢释放 + ADSR 包络（平滑趋近，无阶跃） ===
+      energy *= Math.pow(0.55, dt);   // 慢释放
+      envT += dt;
+      let envTarget = 0;
+      if (envPhase === 'att') { envTarget = 1.0; if (envT >= A) { envPhase = 'dec'; envT = 0; } }
+      else if (envPhase === 'dec') { envTarget = S; if (envT >= D) { envPhase = 'sus'; envT = 0; } }
+      else if (envPhase === 'sus') { envTarget = S; if (envT >= beatInterval * 0.55) { envPhase = 'rel'; envT = 0; } }
+      else if (envPhase === 'rel') { envTarget = 0.0; if (envT >= beatInterval * 0.45) { envPhase = 'idle'; } }
+      const envK = (envPhase === 'att') ? 1 - Math.exp(-dt / 0.012) : 1 - Math.exp(-dt / 0.08);
+      env += (envTarget - env) * envK;
 
-      // === 核心体呼吸 + 蓄力释放 ===
-      // 慢呼吸 ~4.5s 循环 scale 1.0→1.04→1.0
+      // === 核心体呼吸 + 包络驱动缩放（1.0→1.08 非对称，无瞬变） ===
       const breath = 1.0 + Math.sin(coreUniforms.uTime.value * 1.4) * 0.02;
-      // 蓄力释放：beat 瞬间收缩 -4%，随后弹开 +6%（指数衰减）
-      const anticip = -0.04 * Math.exp(-beatTime * 8.0);
-      const release = 0.06 * beatTime * Math.exp(-beatTime * 4.0);
-      coreMesh.scale.setScalar(breath + anticip + release);
+      coreMesh.scale.setScalar(breath + env * 0.08);
 
-      // === halo 光环：随 beat 脉冲缩放 + 辉光增强 ===
-      haloMesh.scale.setScalar(1.0 + beatPulse * 0.08);
+      // === halo 光环：随蓄能池平滑缩放（不再脉冲阶跃） ===
+      haloMesh.scale.setScalar(1.0 + energy * 0.05);
 
       // === 频谱细线：极缓旋转 + 透明度入场 ===
       lineSegs.rotation.z = now * 0.00002;
       lineUniforms.uAlpha.value = Math.min(1, (lineUniforms.uAlpha.value as number) + dt * 0.5);
-      lineUniforms.uBeat.value = beatPulse;
+      lineUniforms.uBeat.value = energy * 0.3;
 
-      // === 更新所有层 uniforms ===
+      // === 更新所有层 uniforms（全部读 energy/env，无瞬时阶跃） ===
       coreUniforms.uBass.value = smoothBass;
       coreUniforms.uMid.value = smoothMid;
       coreUniforms.uTreble.value = smoothTreb;
-      coreUniforms.uBeat.value = beatPulse;
+      coreUniforms.uBeat.value = env;
 
       haloUniforms.uBass.value = smoothBass;
-      haloUniforms.uBeat.value = beatPulse;
+      haloUniforms.uBeat.value = energy;
 
       bgUniforms.uBass.value = smoothBass;
-      bgUniforms.uBeat.value = beatPulse;
+      bgUniforms.uBeat.value = energy;
 
       particleUniforms.uBass.value = smoothBass;
       particleUniforms.uMid.value = smoothMid;
       particleUniforms.uTreble.value = smoothTreb;
-      particleUniforms.uBeat.value = beatPulse;
+      particleUniforms.uBeat.value = env;
 
-      // === 后处理动态：beat 冲击 ===
-      // v2.2: bloom strength 0.85 常驻，beat spike 0.85→1.3（+0.45）
-      bloomPass.strength = 0.85 + bloomKick * 0.45;
-      // RGBShift 0.001 常驻，beat 脉冲 0.003
-      rgbShiftPass.uniforms.amount.value = 0.001 + shiftKick * 0.002;
+      // === 后处理低通跟随（禁止瞬时赋值） ===
+      // v2.3: bloom 峰值 ~1.0（0.70 常驻 + energy*0.30），400ms 低通达峰
+      const bloomTarget = 0.70 + energy * 0.30;
+      bloomPass.strength += (bloomTarget - bloomPass.strength) * (1 - Math.exp(-dt / 0.4));
+      // RGBShift 峰值 ~0.0014（0.0008 常驻 + energy*0.0006），250ms 低通
+      const shiftTarget = 0.0008 + energy * 0.0006;
+      rgbShiftPass.uniforms.amount.value += (shiftTarget - rgbShiftPass.uniforms.amount.value) * (1 - Math.exp(-dt / 0.25));
 
-      // === 相机极缓漂移（幅度 0.18，稍明显但仍克制） ===
+      // === 相机极缓漂移 + 蓄能微推近 ===
       camera.position.x = Math.sin(now * 0.00006) * 0.18;
       camera.position.y = Math.cos(now * 0.00005) * 0.10;
-      camera.position.z = 6.0;
+      camera.position.z = 6.0 + energy * 0.015;
       camera.lookAt(0, 0, 0);
 
-      // 调试信息
+      // 调试信息（v2.3: 显示 env/energy，不再是 beatPulse）
       (window as any).__beatDebug = {
-        count: beatCount, beat: beatPulse, bass: smoothBass,
+        count: beatCount, beat: env, energy: energy, bass: smoothBass,
         mid: smoothMid, treble: smoothTreb, bloom: bloomPass.strength,
         particles: PCOUNT, lines: LINE_COUNT,
       };
-      // 同步 CSS 变量驱动沉浸式歌词（beat 脉冲 + 封面色辉光）
+      // 同步 CSS 变量驱动沉浸式歌词（beat 脉冲 + 封面色辉光）— 用平滑 energy
       const rootStyle = document.documentElement.style;
-      rootStyle.setProperty('--beat-pulse', String(beatPulse));
+      rootStyle.setProperty('--beat-pulse', String(energy));
       rootStyle.setProperty('--cover-tint',
         `rgb(${(tintColor.r * 255) | 0},${(tintColor.g * 255) | 0},${(tintColor.b * 255) | 0})`);
       rootStyle.setProperty('--cover-accent',
@@ -734,7 +746,7 @@ const BeatDebugOverlay: React.FC<{ visible: boolean; bpm: number; analyzing: boo
     <div className="absolute top-16 left-4 z-[55] bg-black/70 text-green-400 font-mono text-xs px-3 py-2 rounded pointer-events-none">
       <div>BEAT COUNT: {info.count}</div>
       <div>BPM: {bpm > 0 ? bpm.toFixed(1) : '—'} <span style={{ color: statusColor }}>[{statusText}]</span></div>
-      <div>BEAT PULSE: {(info.beat || 0).toFixed(3)}</div>
+      <div>ENV: {(info.beat || 0).toFixed(3)} / ENERGY: {(info.energy || 0).toFixed(3)}</div>
       <div>BASS: {(info.bass || 0).toFixed(3)} / MID: {(info.mid || 0).toFixed(3)} / TREBLE: {(info.treble || 0).toFixed(3)}</div>
       <div>BLOOM: {(info.bloom || 0).toFixed(2)}</div>
       <div style={{ color: info.count > 0 ? '#0f0' : '#888' }}>
@@ -1039,7 +1051,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full" style={{ background: `linear-gradient(135deg, ${moodColors.primary}, ${moodColors.secondary})` }} />
           <span className="text-[11px] font-semibold tracking-[0.2em] text-white/40 uppercase">AuroraBeat</span>
-          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v2.2.0</span>
+          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v2.3.0</span>
           <span className="text-[10px] text-white/20 ml-2">{mood}</span>
         </div>
         <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
