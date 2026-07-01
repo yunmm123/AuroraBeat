@@ -96,10 +96,21 @@ function useVisualEngine(
     const scene = new THREE.Scene();
     // near=-1 确保平面（z=0）在视锥内，避免近平面裁剪导致黑屏
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
-    const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, alpha: true, antialias: false, powerPreference: 'high-performance' });
+    // 错误兜底：WebGL 上下文创建失败时提示用户
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, alpha: true, antialias: false, powerPreference: 'high-performance' });
+    } catch (e) {
+      console.error('[Visual] WebGL context creation failed:', e);
+      return;
+    }
+    if (!renderer.getContext()) {
+      console.error('[Visual] WebGL context is null after creation');
+      return;
+    }
     renderer.setClearColor(0x000000, 0);
-    // ACES tone mapping（OutputPass 末段应用，避免过曝白斑）
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    // toneMapping 交给 OutputPass 做，避免双重 tonemapping 导致画面过暗
+    renderer.toneMapping = THREE.NoToneMapping;
     renderer.toneMappingExposure = 1.0;
     // 上限 2，省 FXAA
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -161,7 +172,8 @@ function useVisualEngine(
             }
           }
         }
-        // 3. 多层 FBM 流动渐变云雾
+        // 3. 多层 FBM 流动渐变云雾——density 偏移 +0.45 确保基础可见度
+        //   fbm 均值约 0，偏移后均值 0.45，大部分区域有可见云雾
         float t = uTime * 0.06;
         // 慢速大尺度云团（封面 tint 色）
         float cloud1 = fbm(vec3(uv * 0.8, t));
@@ -169,21 +181,24 @@ function useVisualEngine(
         float cloud2 = fbm(vec3(uv * 1.6 + cloud1 * 0.3, t * 1.3 + 31.4));
         // 高频细节雾
         float cloud3 = fbm(vec3(uv * 3.2 + cloud2 * 0.2, t * 2.0 + 73.2)) * 0.3;
-        float density = cloud1 * 0.5 + cloud2 * 0.35 + cloud3 * 0.15;
+        float density = cloud1 * 0.5 + cloud2 * 0.35 + cloud3 * 0.15 + 0.45;
         // 4. 音乐呼吸：energy 驱动整体膨胀，bass 驱动密度，涟漪叠加
-        density *= (0.7 + uEnergy * 0.6);
+        density *= (0.75 + uEnergy * 0.5);
         density += uBass * 0.15;
         density += ripple;
+        // clamp 到 [0, 1.2] 避免极端值
+        density = clamp(density, 0.0, 1.2);
         // 5. 色彩混合：tint + accent + env 驱动色相偏移
-        vec3 col = mix(uTint * 0.4, uAccent * 0.7, density);
-        // 深处压暗（背景感）
-        col = mix(vec3(0.02, 0.03, 0.05), col, smoothstep(0.0, 0.7, density));
+        //   基础色更亮，确保画面可见（不"黑屏"）
+        vec3 col = mix(uTint * 0.55, uAccent * 0.8, density);
+        // 深处压暗（背景感）——底色 0.12 确保最低可见度
+        col = mix(vec3(0.10, 0.12, 0.18), col, smoothstep(-0.1, 0.7, density));
         // 高密度处提亮（能量感）
-        col += uAccent * uEnergy * 0.15 * smoothstep(0.5, 1.0, density);
+        col += uAccent * uEnergy * 0.2 * smoothstep(0.5, 1.0, density);
         // env 时整体微暖（节拍呼吸，非闪烁）
         col = mix(col, col + vec3(0.08, 0.05, 0.02), uEnv * 0.3);
-        // 6. 暗角（聚焦中心）
-        float vignette = smoothstep(1.2, 0.4, length(vUv - 0.5) * 1.4);
+        // 6. 暗角（聚焦中心）——更柔和，边缘不完全死黑
+        float vignette = smoothstep(1.3, 0.35, length(vUv - 0.5) * 1.4);
         col *= vignette;
         // 7. 高频星点闪烁（极少，克制）
         // pow 用 max(0.0,...) 钳制负值——多数 GPU 驱动用 exp2(y*log2(x)) 实现 pow，
@@ -193,7 +208,7 @@ function useVisualEngine(
         // 8. intensity 控制（亮度系数）
         float a = mix(0.5, 1.0, clamp((uIntensity - 0.2) / 1.3, 0.0, 1.0));
         col *= a;
-        gl_FragColor = vec4(col * uAlpha, 1.0);
+        gl_FragColor = vec4(col, uAlpha);
       }
     `;
     const fieldMat = new THREE.ShaderMaterial({
@@ -206,16 +221,29 @@ function useVisualEngine(
     fieldMesh.frustumCulled = false;
     scene.add(fieldMesh);
 
+    // shader 编译错误检测（编译失败会静默黑屏，必须主动检测）
+    // 必须在 mesh 加入 scene 之后 compile
+    renderer.compile(scene, camera);
+    const gl = renderer.getContext() as WebGLRenderingContext | null;
+    if (gl) {
+      const err = gl.getError();
+      if (err !== gl.NO_ERROR) {
+        console.warn('[Visual] WebGL error after compile:', err);
+      }
+    }
+
     // ==================================================================
     // 后处理链：RenderPass + UnrealBloom + RGBShift + FilmPass + Vignette + ACES
     // 全部参数走 energy 低通，不走阶跃（克制高级）
+    // 默认 renderTarget 是 HalfFloatType HDR + RGBAFormat，支持 alpha
     // ==================================================================
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
-    // Bloom threshold 0.7 —— 只让高密度云区发光，strength 0.6 + energy*0.25 低通
+    // Bloom threshold 0.55 —— 让中密度云区也发光，提升整体可见度
+    // strength 0.65 + energy*0.25 低通，克制不刺眼
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.60, 0.70, 0.70, // strength 0.6, radius 0.7, threshold 0.7
+      0.65, 0.65, 0.55, // strength 0.65, radius 0.65, threshold 0.55
     );
     composer.addPass(bloomPass);
     // RGBShift 0.0006 常驻 + energy*0.0004 低通（极轻色差）
@@ -439,9 +467,9 @@ function useVisualEngine(
       uniforms.uEnv.value = env;
 
       // === 后处理低通跟随（禁止瞬时赋值，歌词协同调节 bloom 目标） ===
-      // bloom 峰值 ~0.95（0.60 常驻 + energy*0.25 + lyricPulse*0.10 + 间奏增益/密集收敛）
+      // bloom 峰值 ~1.0（0.65 常驻 + energy*0.25 + lyricPulse*0.10 + 间奏增益/密集收敛）
       const interludeBoost = (0.5 - lyricDensity) * 0.15;  // 间奏 +0.075, 密集 -0.075
-      const bloomTarget = 0.60 + energy * 0.25 + lyricPulse * 0.10 + interludeBoost;
+      const bloomTarget = 0.65 + energy * 0.25 + lyricPulse * 0.10 + interludeBoost;
       bloomPass.strength += (bloomTarget - bloomPass.strength) * (1 - Math.exp(-dt / 0.4));
       // RGBShift 峰值 ~0.0010（0.0006 常驻 + energy*0.0004），250ms 低通
       const shiftTarget = 0.0006 + energy * 0.0004;
