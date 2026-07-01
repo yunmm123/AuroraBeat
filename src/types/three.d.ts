@@ -1,3 +1,5 @@
+declare const __APP_VERSION__: string
+
 declare module 'three/examples/jsm/postprocessing/EffectComposer' {
   import * as THREE from 'three'
 

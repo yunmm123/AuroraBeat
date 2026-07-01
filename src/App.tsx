@@ -135,6 +135,7 @@ function useVisualEngine(
       uMouseUV: { value: new THREE.Vector2(0.5, 0.5) },
       uMouseStrength: { value: 0 },
       uCamPan: { value: new THREE.Vector2(0, 0) },
+      uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
       // 用 3 个单独 vec4 代替数组 uniform（避免 GLSL ES 1.00 数组 uniform 驱动兼容问题）
       uRipple0: { value: new THREE.Vector4(0, 0, -10, 0) },
       uRipple1: { value: new THREE.Vector4(0, 0, -10, 0) },
@@ -143,22 +144,27 @@ function useVisualEngine(
     const fieldFS = `
       uniform float uTime, uBass, uMid, uTreble, uEnergy, uEnv, uAlpha, uIntensity, uMouseStrength;
       uniform vec3 uTint, uAccent;
-      uniform vec2 uMouseUV, uCamPan;
+      uniform vec2 uMouseUV, uCamPan, uResolution;
       uniform vec4 uRipple0, uRipple1, uRipple2;
       varying vec2 vUv;
       ${NOISE_GLSL}
-      void main() {
-        vec2 uv = vUv;
-        // 0. 拖拽相机微移：采样坐标反向偏移（探头感）
-        uv -= uCamPan;
-        // 1. 鼠标 domain warping：鼠标位置附近云雾被搅动（手指划过烟雾）
+
+      // ACES Filmic tonemapping（单 pass 内完成，不用 OutputPass）
+      vec3 aces(vec3 x) {
+        const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
+        return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+      }
+
+      vec3 sampleField(vec2 uv) {
+        // 1. 鼠标 domain warping
         float mDist = distance(uv, uMouseUV);
         vec2 mouseWarp = vec2(
           snoise(vec3(uv * 1.5, uTime * 0.08)),
           snoise(vec3(uv * 1.5 + 17.3, uTime * 0.08))
         ) * uMouseStrength * 0.12 * smoothstep(0.6, 0.0, mDist);
-        uv += mouseWarp;
-        // 2. 点击涟漪：3 个单独 vec4（xy=点击uv, z=startTime秒, w=是否激活）
+        vec2 p = uv + mouseWarp - uCamPan;
+
+        // 2. 点击涟漪
         float ripple = 0.0;
         vec4 rps[3];
         rps[0] = uRipple0; rps[1] = uRipple1; rps[2] = uRipple2;
@@ -172,42 +178,77 @@ function useVisualEngine(
             }
           }
         }
-        // 3. 多层 FBM 流动渐变云雾——density 偏移 +0.45 确保基础可见度
-        //   fbm 均值约 0，偏移后均值 0.45，大部分区域有可见云雾
+
+        // 3. 多层 FBM 云雾
         float t = uTime * 0.06;
-        // 慢速大尺度云团（封面 tint 色）
-        float cloud1 = fbm(vec3(uv * 0.8, t));
-        // 中速中尺度（封面 accent 色）
-        float cloud2 = fbm(vec3(uv * 1.6 + cloud1 * 0.3, t * 1.3 + 31.4));
-        // 高频细节雾
-        float cloud3 = fbm(vec3(uv * 3.2 + cloud2 * 0.2, t * 2.0 + 73.2)) * 0.3;
+        float cloud1 = fbm(vec3(p * 0.8, t));
+        float cloud2 = fbm(vec3(p * 1.6 + cloud1 * 0.3, t * 1.3 + 31.4));
+        float cloud3 = fbm(vec3(p * 3.2 + cloud2 * 0.2, t * 2.0 + 73.2)) * 0.3;
         float density = cloud1 * 0.5 + cloud2 * 0.35 + cloud3 * 0.15 + 0.45;
-        // 4. 音乐呼吸：energy 驱动整体膨胀，bass 驱动密度，涟漪叠加
         density *= (0.75 + uEnergy * 0.5);
-        density += uBass * 0.15;
-        density += ripple;
-        // clamp 到 [0, 1.2] 避免极端值
+        density += uBass * 0.15 + ripple;
         density = clamp(density, 0.0, 1.2);
-        // 5. 色彩混合：tint + accent + env 驱动色相偏移
-        //   基础色更亮，确保画面可见（不"黑屏"）
+
+        // 4. 色彩混合
         vec3 col = mix(uTint * 0.55, uAccent * 0.8, density);
-        // 深处压暗（背景感）——底色 0.12 确保最低可见度
         col = mix(vec3(0.10, 0.12, 0.18), col, smoothstep(-0.1, 0.7, density));
-        // 高密度处提亮（能量感）
         col += uAccent * uEnergy * 0.2 * smoothstep(0.5, 1.0, density);
-        // env 时整体微暖（节拍呼吸，非闪烁）
         col = mix(col, col + vec3(0.08, 0.05, 0.02), uEnv * 0.3);
-        // 6. 暗角（聚焦中心）——更柔和，边缘不完全死黑
-        float vignette = smoothstep(1.3, 0.35, length(vUv - 0.5) * 1.4);
+        return col;
+      }
+
+      void main() {
+        vec2 uv = vUv;
+        // 轻微 RGB shift（模拟色差，不用后处理）
+        float shiftAmt = 0.001 + uEnergy * 0.0008;
+        vec3 col;
+        col.r = sampleField(uv + vec2(shiftAmt, 0.0)).r;
+        col.g = sampleField(uv).g;
+        col.b = sampleField(uv - vec2(shiftAmt, 0.0)).b;
+
+        // 简化 bloom：对亮部做模糊采样叠加（9 次采样模拟高斯）
+        float brightness = dot(col, vec3(0.299, 0.587, 0.114));
+        float bloomThresh = 0.5;
+        if (brightness > bloomThresh) {
+          vec3 bloom = vec3(0.0);
+          float blurR = 0.008 + uEnergy * 0.006;
+          float total = 0.0;
+          for (int i = -2; i <= 2; i++) {
+            for (int j = -2; j <= 2; j++) {
+              vec2 off = vec2(float(i), float(j)) * blurR;
+              float w = exp(-float(i*i+j*j) * 0.5);
+              vec3 s = sampleField(uv + off);
+              float b = max(0.0, dot(s, vec3(0.299, 0.587, 0.114)) - bloomThresh);
+              bloom += s * b * w;
+              total += b * w;
+            }
+          }
+          if (total > 0.001) {
+            col += bloom / total * (0.5 + uEnergy * 0.3);
+          }
+        }
+
+        // Vignette
+        float vignette = smoothstep(1.3, 0.35, length(uv - 0.5) * 1.4);
         col *= vignette;
-        // 7. 高频星点闪烁（极少，克制）
-        // pow 用 max(0.0,...) 钳制负值——多数 GPU 驱动用 exp2(y*log2(x)) 实现 pow，
-        //   log2(负数)=NaN 会传播到 col 导致整屏变黑
+
+        // 星点
         float stars = pow(max(0.0, snoise(uv * 150.0)), 18.0) * (0.3 + uTreble * 0.5);
         col += vec3(stars * 0.5);
-        // 8. intensity 控制（亮度系数）
-        float a = mix(0.5, 1.0, clamp((uIntensity - 0.2) / 1.3, 0.0, 1.0));
-        col *= a;
+
+        // Film grain（抗 banding + 电影感）
+        float grain = snoise(vec3(uv * uResolution.xy * 0.5, uTime * 2.0)) * 0.04;
+        col += grain;
+
+        // intensity
+        float inten = mix(0.5, 1.0, clamp((uIntensity - 0.2) / 1.3, 0.0, 1.0));
+        col *= inten;
+
+        // ACES tonemapping + sRGB（单 pass 完成，不用 OutputPass）
+        col = aces(col);
+        // sRGB 近似
+        col = pow(col, vec3(1.0 / 2.2));
+
         gl_FragColor = vec4(col, uAlpha);
       }
     `;
@@ -233,35 +274,9 @@ function useVisualEngine(
     }
 
     // ==================================================================
-    // 后处理链：RenderPass + UnrealBloom + RGBShift + FilmPass + Vignette + ACES
-    // 全部参数走 energy 低通，不走阶跃（克制高级）
-    // 默认 renderTarget 是 HalfFloatType HDR + RGBAFormat，支持 alpha
+    // 单 pass 直接渲染——所有效果（bloom/vignette/grain/RGBShift/ACES）都在 shader 内完成
+    // 彻底移除 EffectComposer，避免后处理链的 HDR renderTarget / OutputPass 兼容问题导致黑屏
     // ==================================================================
-    const composer = new EffectComposer(renderer);
-    composer.addPass(new RenderPass(scene, camera));
-    // Bloom threshold 0.55 —— 让中密度云区也发光，提升整体可见度
-    // strength 0.65 + energy*0.25 低通，克制不刺眼
-    const bloomPass = new UnrealBloomPass(
-      new THREE.Vector2(window.innerWidth, window.innerHeight),
-      0.65, 0.65, 0.55, // strength 0.65, radius 0.65, threshold 0.55
-    );
-    composer.addPass(bloomPass);
-    // RGBShift 0.0006 常驻 + energy*0.0004 低通（极轻色差）
-    const rgbShiftPass = new ShaderPass(RGBShiftShader);
-    rgbShiftPass.uniforms.amount.value = 0.0006;
-    composer.addPass(rgbShiftPass);
-    // FilmPass 0.08 颗粒（电影感 + 抗 banding）
-    const filmPass = new FilmPass(0.08, 0.012, 648, false);
-    composer.addPass(filmPass);
-    // Vignette
-    const vignettePass = new ShaderPass(VignetteShader);
-    vignettePass.uniforms.offset.value = 1.1;
-    vignettePass.uniforms.darkness.value = 1.05;
-    composer.addPass(vignettePass);
-    // ACES tone mapping + color space
-    composer.addPass(new OutputPass());
-    composer.setPixelRatio(renderer.getPixelRatio());
-    composer.setSize(window.innerWidth, window.innerHeight);
 
     // 入场渐显（场域渐显）+ fallback 确保 uAlpha 不卡在 0
     gsap.to(uniforms.uAlpha, { value: 1, duration: 1.8, ease: 'power2.out' });
@@ -466,20 +481,13 @@ function useVisualEngine(
       uniforms.uEnergy.value = energy;
       uniforms.uEnv.value = env;
 
-      // === 后处理低通跟随（禁止瞬时赋值，歌词协同调节 bloom 目标） ===
-      // bloom 峰值 ~1.0（0.65 常驻 + energy*0.25 + lyricPulse*0.10 + 间奏增益/密集收敛）
-      const interludeBoost = (0.5 - lyricDensity) * 0.15;  // 间奏 +0.075, 密集 -0.075
-      const bloomTarget = 0.65 + energy * 0.25 + lyricPulse * 0.10 + interludeBoost;
-      bloomPass.strength += (bloomTarget - bloomPass.strength) * (1 - Math.exp(-dt / 0.4));
-      // RGBShift 峰值 ~0.0010（0.0006 常驻 + energy*0.0004），250ms 低通
-      const shiftTarget = 0.0006 + energy * 0.0004;
-      rgbShiftPass.uniforms.amount.value += (shiftTarget - rgbShiftPass.uniforms.amount.value) * (1 - Math.exp(-dt / 0.25));
-
       // 调试信息
       (window as any).__beatDebug = {
         count: beatCount, beat: env, energy: energy, bass: smoothBass,
-        mid: smoothMid, treble: smoothTreb, bloom: bloomPass.strength,
+        mid: smoothMid, treble: smoothTreb,
         ripples: ripples.length, mouse: mouseStrength,
+        renderMode: 'direct-single-pass',
+        uAlpha: uniforms.uAlpha.value,
       };
       // 同步 CSS 变量驱动沉浸式歌词（beat 脉冲 + 封面色辉光）— 用平滑 env（节拍包络）
       const rootStyle = document.documentElement.style;
@@ -490,14 +498,13 @@ function useVisualEngine(
         `rgb(${(accentColor.r * 255) | 0},${(accentColor.g * 255) | 0},${(accentColor.b * 255) | 0})`);
       rootStyle.setProperty('--lyric-active', curActiveIdx >= 0 ? '1' : '0');
 
-      composer.render();
+      renderer.render(scene, camera);
     };
     animate();
 
     const onResize = () => {
       renderer.setSize(window.innerWidth, window.innerHeight);
-      composer.setSize(window.innerWidth, window.innerHeight);
-      bloomPass.resolution.set(window.innerWidth, window.innerHeight);
+      (uniforms.uResolution.value as THREE.Vector2).set(window.innerWidth, window.innerHeight);
     };
     window.addEventListener('resize', onResize);
 
@@ -559,7 +566,7 @@ function useVisualEngine(
     const coverUrl = player.currentSong?.cover;
     if (coverUrl) updateCover(coverUrl);
 
-    engineRef.current = { uniforms, bloomPass, updateCover, renderer, scene };
+    engineRef.current = { uniforms, updateCover, renderer, scene };
 
     return () => {
       cancelAnimationFrame(animId);
@@ -572,7 +579,6 @@ function useVisualEngine(
       window.removeEventListener('blur', onPointerLeaveWin);
       // 几何/材质清理（无核心体/星云/光束，单一 quad）
       fieldGeo.dispose(); fieldMat.dispose();
-      composer.dispose();
       renderer.dispose();
       delete (window as any).__updateCover;
       delete (window as any).__beatDebug;
@@ -943,7 +949,7 @@ const App: React.FC = () => {
         <div className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full" style={{ background: `linear-gradient(135deg, ${moodColors.primary}, ${moodColors.secondary})` }} />
           <span className="text-[11px] font-semibold tracking-[0.2em] text-white/40 uppercase">AuroraBeat</span>
-          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v3.1.0</span>
+          <span className="text-[9px] text-[#00f5d4]/70 ml-1.5 font-mono">v{__APP_VERSION__}</span>
           <span className="text-[10px] text-white/20 ml-2">{mood}</span>
         </div>
         <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
