@@ -428,7 +428,10 @@ const server = http.createServer(async (req, res) => {
     if (pn === '/api/song/like') {
       const body = await readRequestBody(req);
       const id = body.id;
-      const like = body.like !== false;
+      // v3.2.9: 健壮解析 like —— 处理布尔/字符串/数字各种类型
+      // body.like 可能是: true/false(布尔), "true"/"false"(字符串), 1/0(数字), "1"/"0"
+      const rawLike = body.like;
+      const like = !(rawLike === false || rawLike === 'false' || rawLike === 0 || rawLike === '0' || rawLike === undefined);
       if (!id) { sendJSON(res, { error: 'Missing id' }, 400); return; }
       const info = await getLoginInfo();
       if (!info.loggedIn) { sendJSON(res, { error: 'LOGIN_REQUIRED' }, 401); return; }
@@ -439,6 +442,7 @@ const server = http.createServer(async (req, res) => {
         sendJSON(res, { ok: false, error: `Invalid id (not numeric): ${id}` });
         return;
       }
+      console.log('[Like] request params:', { id: songId, like, rawLike, cookieLen: userCookie.length });
       try {
         const r = await like_song({ id: songId, like, cookie: userCookie, timestamp: Date.now() });
         console.log('[Like] netease response:', JSON.stringify(r?.body || r));
