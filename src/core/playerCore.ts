@@ -739,6 +739,7 @@ class PlayerCore {
           body: JSON.stringify({ id: song.id, like: !liked }),
         });
         const data = await res.json();
+        console.log('[PlayerCore] toggleLike response: HTTP', res.status, 'body:', JSON.stringify(data));
         if (!data.ok) {
           console.warn('[PlayerCore] toggleLike sync failed (kept local):', data.error, data.raw || '');
         } else {
