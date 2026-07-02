@@ -740,7 +740,9 @@ class PlayerCore {
         });
         const data = await res.json();
         if (!data.ok) {
-          console.warn('[PlayerCore] toggleLike sync failed (kept local):', data.error);
+          console.warn('[PlayerCore] toggleLike sync failed (kept local):', data.error, data.raw || '');
+        } else {
+          console.log('[PlayerCore] toggleLike sync ok:', data.raw || '');
         }
       } catch (e) {
         console.warn('[PlayerCore] toggleLike network error (kept local):', e);
