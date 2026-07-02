@@ -310,12 +310,13 @@ html, body {
   transform: scale(1) translateY(0) translateZ(0);
   opacity: 1;
   filter: blur(0);
-  /* v3.3.3: 渐变柔和过渡——tint 与 white 之间用中段混合色，避免首行深末行浅的悬殊对比
-     顶部 tint（封面色呼应）→ 中段混合色（tint+white 自然过渡）→ 末段接近白（保证可读） */
+  /* v3.3.4: 渐变明度差缩小——tint 与 white 之间用高白占比混合色，
+     避免两行歌词时首行取 tint 末行取 white 色差集中显得突兀。
+     顶部 tint 混 70% 白（明亮、保留色相）→ 末段 tint 混 90% 白（接近白），
+     明度差控制在 20% 以内，相邻行色差柔和不可察 */
   background: linear-gradient(180deg,
-    var(--cover-tint, #00f5d4) 0%,
-    color-mix(in srgb, var(--cover-tint, #00f5d4) 35%, #ffffff 65%) 50%,
-    #ffffff 100%);
+    color-mix(in srgb, var(--cover-tint, #00f5d4) 30%, #ffffff 70%) 0%,
+    color-mix(in srgb, var(--cover-tint, #00f5d4) 10%, #ffffff 90%) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
