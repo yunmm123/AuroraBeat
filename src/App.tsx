@@ -35,8 +35,10 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v3.1.16 — 节拍绽放光晕 + 频谱环 + 自然粒子点缀
+// Three.js 视觉引擎 v3.1.17 — 节拍绽放光晕 + 频谱环 + 远景星尘 + 自然粒子点缀
 // 单层架构（正交相机，单 PlaneGeometry(2,2) + ShaderMaterial）+ 35 颗粒子点缀：
+//   远景星尘（~144 颗）：网格 hash 生成位置/亮度/闪烁相位，静态不互动不节拍
+//     极小极暗铺满背景增加纵深，偏白偏冷融入夜空；区别于前景 35 颗粒子（大/互动/节拍亮）
 //   节拍绽放光晕（圆环外围花瓣）：6 瓣角度调制 + 节拍膨胀消散 + 静止低亮可见
 //     与频谱环同心，比冲击波更柔和弥散，花瓣形区别于均匀环；自然不生硬，不抢戏
 //   节拍冲击波（4 层回响，弱化辅助）：onBeat 时 FIFO 替换最旧，从中心扩散
@@ -199,7 +201,19 @@ function useVisualEngine(
         // 深色底（带之间透出，不铺满）
         vec3 col = vec3(0.03, 0.04, 0.07);
 
-        // 丝绸薄纱已移除（v3.1.16），由节拍绽放光晕替代与频谱环互补
+        // === 远景星尘（网格 hash 生成，~144 颗静态闪烁，纵深背景不抢戏）===
+        // 每格一颗星，hash 决定位置/亮度/闪烁相位；极小极暗铺满背景增加纵深
+        // 不互动不节拍，区别于前景 35 颗粒子（大/互动/节拍亮）；偏白偏冷融入夜空
+        vec2 sGrid = uv * 12.0;
+        vec2 sGid = floor(sGrid);
+        vec2 sGf = fract(sGrid);
+        vec2 sOff = vec2(hash(sGid), hash(sGid + 17.3));
+        float sD = distance(sGf, sOff);
+        float sTw = hash(sGid + 5.7);
+        float sTwinkle = 0.6 + 0.4 * sin(uTime * (0.4 + sTw * 1.2) + sTw * 6.28);
+        float sBright = hash(sGid + 9.1);
+        float sStar = exp(-sD * 90.0) * sTwinkle * (0.3 + sBright * 0.7);
+        col += vec3(0.70, 0.75, 0.85) * sStar * 0.18;
 
         // === 节拍冲击波（4 层回响，从中心扩散，柔和 exp 衰减环）===
         // uShock0~3: vec4(x, y, startTime, intensity)；速度 0.15 + index*0.05 形成回响层次
@@ -268,13 +282,14 @@ function useVisualEngine(
         if (uRipple2.w > 0.5 && age2 >= 0.0 && age2 <= 2.5)
           col += uAccent * sin(distance(uv, uRipple2.xy) * 30.0 - age2 * 8.0) * exp(-age2 * 1.5) * 0.10;
 
-        // === 鼠标光斑（三层：大范围柔光 + 中范围 + 内核）===
-        float mouseGlow = exp(-mDist * 3.5) * (0.40 + uMouseStrength * 0.6);
-        col += uAccent * mouseGlow * 0.70 + vec3(mouseGlow * 0.18);
-        float mouseMid = exp(-mDist * 12.0) * (0.50 + uMouseStrength * 0.8);
-        col += mix(uTint, uAccent, 0.4) * mouseMid * 0.50;
-        float mouseCore = exp(-mDist * 50.0) * (0.80 + uMouseStrength * 0.5);
-        col += vec3(mouseCore * 0.55);
+        // === 鼠标光斑（弱化柔化，融入背景不抢戏）===
+        // v3.1.17: 降低亮度系数 + 大范围混白降饱和 + 内核缩小，避免 accent 色大面积铺开突兀
+        float mouseGlow = exp(-mDist * 3.5) * (0.20 + uMouseStrength * 0.3);
+        col += mix(uTint, vec3(0.6, 0.62, 0.68), 0.5) * mouseGlow * 0.30;
+        float mouseMid = exp(-mDist * 12.0) * (0.25 + uMouseStrength * 0.4);
+        col += mix(uTint, uAccent, 0.3) * mouseMid * 0.20;
+        float mouseCore = exp(-mDist * 60.0) * (0.40 + uMouseStrength * 0.3);
+        col += vec3(mouseCore * 0.25);
 
         // === 彗星椭圆拖尾（20 个，展开）===
         // 椭圆长轴沿鼠标移动方向，短轴垂直；速度越快越长轴
