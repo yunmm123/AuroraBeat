@@ -745,6 +745,31 @@ class PlayerCore {
           console.warn('[PlayerCore] toggleLike sync failed (kept local):', { error: data.error, raw: data.raw, full: data });
         } else {
           console.log('[PlayerCore] toggleLike sync ok:', data.raw || '');
+          // v3.3.0: 取消红心后延迟验证——3秒后查 likelist 确认网易是否真取消
+          if (liked) {
+            setTimeout(async () => {
+              try {
+                const vRes = await fetch(`${this.apiBase}/api/song/like/check`);
+                const vData = await vRes.json();
+                const stillLiked = vData.liked && vData.liked[String(song.id)];
+                console.log('[PlayerCore] toggleLike verify after 3s:', {
+                  songId: song.id,
+                  expected: false,           // 期望: 已取消(不在列表)
+                  actualStillLiked: stillLiked,
+                  match: stillLiked === false,
+                });
+                // 如果网易实际没取消，强制同步真实状态
+                if (stillLiked) {
+                  console.warn('[PlayerCore] toggleLike: netease did NOT unlike, syncing real state');
+                  const realSet = new Set(Object.keys(vData.liked));
+                  this.state.likedSongs = realSet;
+                  this.notify();
+                }
+              } catch (e) {
+                console.warn('[PlayerCore] toggleLike verify error:', e);
+              }
+            }, 3000);
+          }
         }
       } catch (e) {
         console.warn('[PlayerCore] toggleLike network error (kept local):', e);
