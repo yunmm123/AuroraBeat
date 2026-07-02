@@ -720,8 +720,16 @@ class PlayerCore {
   }
 
   async toggleLike(song: Song): Promise<boolean> {
-    if (!this.serverPort) return false;
     const liked = this.state.likedSongs.has(song.id);
+    // 未登录/无服务器：仅本地收藏（不阻塞点击响应）
+    if (!this.serverPort) {
+      const newSet = new Set(this.state.likedSongs);
+      if (liked) newSet.delete(song.id);
+      else newSet.add(song.id);
+      this.state.likedSongs = newSet;
+      this.notify();
+      return !liked;
+    }
     try {
       const res = await fetch(`${this.apiBase}/api/song/like`, {
         method: 'POST',
