@@ -142,9 +142,19 @@ function useVisualEngine(
       uTint: { value: tintColor }, uAccent: { value: accentColor },
       uMouseUV: { value: new THREE.Vector2(0.5, 0.5) },
       uMouseStrength: { value: 0 },
+      uMouseVel: { value: new THREE.Vector2(0, 0) },        // v3.1.8: 鼠标速度向量（流体推动方向）
       uCamPan: { value: new THREE.Vector2(0, 0) },
       uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
       uFreqTex: { value: freqTex },
+      // v3.1.8: 鼠标拖尾轨迹（8 个历史位置 uv.xy + time.z + active.w）
+      uTrail0: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail1: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail2: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail3: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail4: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail5: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail6: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail7: { value: new THREE.Vector4(0, 0, -10, 0) },
       // 用 3 个单独 vec4 代替数组 uniform（避免 GLSL ES 1.00 数组 uniform 驱动兼容问题）
       uRipple0: { value: new THREE.Vector4(0, 0, -10, 0) },
       uRipple1: { value: new THREE.Vector4(0, 0, -10, 0) },
@@ -153,8 +163,9 @@ function useVisualEngine(
     const fieldFS = `
       uniform float uTime, uBass, uMid, uTreble, uEnergy, uEnv, uAlpha, uIntensity, uMouseStrength;
       uniform vec3 uTint, uAccent;
-      uniform vec2 uMouseUV, uCamPan, uResolution;
+      uniform vec2 uMouseUV, uMouseVel, uCamPan, uResolution;
       uniform vec4 uRipple0, uRipple1, uRipple2;
+      uniform vec4 uTrail0, uTrail1, uTrail2, uTrail3, uTrail4, uTrail5, uTrail6, uTrail7;
       uniform sampler2D uFreqTex;
       varying vec2 vUv;
       ${NOISE_GLSL}
@@ -170,14 +181,21 @@ function useVisualEngine(
         vec2 centered = uv - 0.5;
         float r = length(centered) * 2.0;          // 0(中心) ~ 1.4(角落)
         float a = atan(centered.y, centered.x);     // -π ~ π
-        float normA = (a + 3.14159) / 6.28318;      // 0 ~ 1，用于采样频谱纹理
+        // v3.1.8: 频谱环慢速旋转——整体形态有运动感（不再静态）
+        float aRot = a + uTime * 0.12;
+        float normA = (aRot + 3.14159) / 6.28318;   // 0 ~ 1，旋转后采样频谱纹理
+        normA = fract(normA);                        // 包裹到 0~1
 
-        // === 1. 鼠标 domain warping ===
+        // === 1. 鼠标流体推动（v3.1.8 核心：鼠标移动产生明显的方向性偏移） ===
         float mDist = distance(uv, uMouseUV);
+        float mInfluence = smoothstep(0.5, 0.0, mDist);  // 鼠标附近影响强
+        // 速度向量推动采样位置——鼠标向右移，云雾被推向右（明显流体感）
+        vec2 fluidPush = uMouseVel * mInfluence * 0.8;
         vec2 mouseWarp = vec2(
-          snoise(vec3(uv * 1.5, uTime * 0.08)),
-          snoise(vec3(uv * 1.5 + 17.3, uTime * 0.08))
-        ) * (uMouseStrength + 0.04) * 0.30 * smoothstep(0.7, 0.0, mDist);
+          snoise(vec3(uv * 1.5, uTime * 0.10)),
+          snoise(vec3(uv * 1.5 + 17.3, uTime * 0.10))
+        ) * (uMouseStrength + 0.04) * 0.25 * mInfluence;
+        vec2 p = uv + mouseWarp + fluidPush - uCamPan;
 
         // === 2. 点击涟漪 ===
         float ripple = 0.0;
@@ -194,26 +212,24 @@ function useVisualEngine(
           }
         }
 
-        // === 3. 真实 FFT 频谱环（v3.1.7 核心新功能）===
-        // 每个角度对应一个频率 bin，振幅决定该方向环的延伸——花瓣状频谱可视化
+        // === 3. 真实 FFT 频谱环（v3.1.8: 旋转 + 节拍呼吸缩放）===
         float freq = texture2D(uFreqTex, vec2(normA, 0.5)).r;
         float freqMirror = texture2D(uFreqTex, vec2(1.0 - normA, 0.5)).r;
         float freqAvg = (freq + freqMirror) * 0.5;
-        // 频谱环基础半径 + 振幅延伸
-        float ringBase = 0.42;
-        float ringR = ringBase + freqAvg * 0.42;     // 0.42 ~ 0.84
+        // 节拍呼吸：整个环在节拍来临时膨胀（明显缩放运动）
+        float breath = 1.0 + uEnv * 0.18 + uBass * 0.10;
+        float ringBase = 0.42 * breath;
+        float ringR = ringBase + freqAvg * 0.42;
         float ringW = 0.014 + uEnergy * 0.012;
-        // 环形亮度：当前半径接近 ringR 时亮
         float specRing = exp(-pow((r - ringR) / ringW, 2.0)) * (0.5 + freqAvg * 0.8);
-        // 环内填充（轻微），让花瓣有体积感
         float specFill = smoothstep(ringR, ringR - 0.12, r) * smoothstep(ringBase - 0.05, ringBase, r) * freqAvg * 0.25;
 
-        // === 4. 径向光线（从中心向外，treble 驱动闪烁）===
-        float rayNoise = snoise(vec3(normA * 16.0, uTime * 0.15, 0.0));
+        // === 4. 径向光线（v3.1.8: 也跟随旋转）===
+        float rayNoise = snoise(vec3(normA * 16.0, uTime * 0.20, 0.0));
         float rays = pow(max(0.0, rayNoise), 4.0) * (0.25 + uTreble * 0.85);
-        rays *= smoothstep(1.3, 0.15, r) * smoothstep(0.15, 0.35, r);  // 中心留空给能量核，边缘淡出
+        rays *= smoothstep(1.3, 0.15, r) * smoothstep(0.15, 0.35, r);
 
-        // === 5. 节拍冲击波（从中心扩散的圆环）===
+        // === 5. 节拍冲击波 ===
         float beatWave = 0.0;
         if (uEnv > 0.01) {
           float wavePos = 0.3 + (1.0 - uEnv) * 0.7;
@@ -221,9 +237,8 @@ function useVisualEngine(
           beatWave = exp(-waveDist * 14.0) * uEnv * 0.35;
         }
 
-        // === 6. FBM 云雾基底（封面色氛围，作为背景而非主体）===
-        vec2 p = uv + mouseWarp - uCamPan;
-        float t = uTime * 0.10;
+        // === 6. FBM 云雾基底（v3.1.8: 流动加速，明显流动感）===
+        float t = uTime * 0.16;   // 加速流动
         float bassZoom = 1.0 - uBass * 0.12;
         vec2 bp = p * bassZoom;
         float cloud1 = fbm(vec3(bp * 0.7, t));
@@ -231,23 +246,16 @@ function useVisualEngine(
         float density = cloud1 * 0.5 + cloud2 * 0.3 + 0.30;
         density *= (0.65 + uEnergy * 0.5);
 
-        // === 7. 合成：结构层（频谱环+光线+冲击波）+ 氛围层（云雾）===
+        // === 7. 合成 ===
         float struct = specRing + specFill + rays * 0.7 + beatWave + ripple;
         float total = density * 0.55 + struct;
-
-        // 色彩：氛围用封面色，结构层偏亮（accent + 白）让形态清晰
         vec3 col = mix(uTint * 0.4, uAccent * 0.7, density);
         col = mix(vec3(0.05, 0.07, 0.12), col, smoothstep(-0.1, 0.55, density));
-        // 频谱环：accent 色高亮 + 白色强化
         col += uAccent * specRing * 0.9;
         col += vec3(specRing * 0.3);
-        // 径向光线：tint 色清亮
         col += uTint * rays * 0.6;
-        // 冲击波发光
         col += uAccent * beatWave * 0.6;
-        // 节拍整体脉冲
         col += vec3(0.10, 0.07, 0.04) * uEnv;
-        // bass 膨胀感
         col += uAccent * uBass * 0.12 * smoothstep(0.6, 0.0, r);
         return col;
       }
@@ -261,7 +269,7 @@ function useVisualEngine(
         col.g = sampleField(uv).g;
         col.b = sampleField(uv - vec2(shiftAmt, 0.0)).b;
 
-        // 简化 bloom：对亮部做模糊采样叠加（5x5 高斯），阈值降低让更多区域发光
+        // 简化 bloom：对亮部做模糊采样叠加（5x5 高斯）
         float brightness = dot(col, vec3(0.299, 0.587, 0.114));
         float bloomThresh = 0.35;
         if (brightness > bloomThresh) {
@@ -283,16 +291,16 @@ function useVisualEngine(
           }
         }
 
-        // Vignette（v3.1.6: 减弱，让四周也可见特效）
+        // Vignette（减弱，让四周也可见特效）
         float vignette = smoothstep(1.5, 0.25, length(uv - 0.5) * 1.3);
         col *= vignette;
 
-        // v3.1.6: 中心径向光晕——始终可见的视觉焦点，节拍来临时膨胀（明确的主界面特效）
+        // 中心径向光晕——始终可见的视觉焦点，节拍来临时膨胀
         float centerDist = distance(uv, vec2(0.5));
         float centerGlow = exp(-centerDist * 2.8) * (0.22 + uEnv * 0.6 + uBass * 0.35);
         col += mix(uTint, uAccent, 0.5) * centerGlow * 0.7;
 
-        // v3.1.6: 鼠标光斑——三层（大范围柔光 + 中范围亮带 + 内核亮点），静止时也明显可见
+        // v3.1.8: 鼠标光斑——三层（大范围柔光 + 中范围亮带 + 内核亮点），静止时也明显可见
         float mDistMain = distance(uv, uMouseUV);
         float mouseGlow = exp(-mDistMain * 3.5) * (0.45 + uMouseStrength * 0.6);
         col += uAccent * mouseGlow * 0.85 + vec3(mouseGlow * 0.22);
@@ -300,6 +308,29 @@ function useVisualEngine(
         col += mix(uTint, uAccent, 0.4) * mouseMid * 0.55;
         float mouseCore = exp(-mDistMain * 50.0) * (0.85 + uMouseStrength * 0.5);
         col += vec3(mouseCore * 0.65);
+
+        // v3.1.8: 鼠标拖尾光迹——8 个历史位置，越新越亮，形成彩色光带
+        vec4 trails[8];
+        trails[0]=uTrail0; trails[1]=uTrail1; trails[2]=uTrail2; trails[3]=uTrail3;
+        trails[4]=uTrail4; trails[5]=uTrail5; trails[6]=uTrail6; trails[7]=uTrail7;
+        for (int i = 0; i < 8; i++) {
+          vec4 tr = trails[i];
+          if (tr.w > 0.5) {
+            float age = uTime - tr.z;
+            if (age >= 0.0 && age <= 0.8) {
+              float td = distance(uv, tr.xy);
+              // 拖尾点：随年龄衰减的发光球
+              float trailGlow = exp(-td * 30.0) * exp(-age * 3.0);
+              // 颜色随索引变化（彩虹拖尾）
+              float hue = float(i) / 8.0;
+              vec3 trailCol = mix(uTint, uAccent, hue);
+              col += trailCol * trailGlow * 0.6;
+              // 拖尾连线光晕（更大的柔光）
+              float trailSoft = exp(-td * 8.0) * exp(-age * 2.5);
+              col += trailCol * trailSoft * 0.15;
+            }
+          }
+        }
 
         // 星点
         float stars = pow(max(0.0, snoise(uv * 150.0)), 18.0) * (0.3 + uTreble * 0.5);
@@ -374,15 +405,22 @@ function useVisualEngine(
     let lyricPulse = 0;
     let lyricDensity = 0.5;
 
-    // === 鼠标交互状态（精美：移动搅动 + 点击波纹 + 拖拽探头） ===
+    // === 鼠标交互状态（精美：移动搅动 + 点击波纹 + 拖拽探头 + 流体推动 + 拖尾光迹） ===
     const mouseUV = new THREE.Vector2(0.5, 0.5);
     const mouseUVTarget = new THREE.Vector2(0.5, 0.5);
     let mouseVelocity = 0;
     let mouseStrength = 0;
+    // v3.1.8: 鼠标速度向量（方向 + 幅度），用于 shader 里的流体推动
+    const mouseVelVec = new THREE.Vector2(0, 0);
+    const mouseVelVecTarget = new THREE.Vector2(0, 0);
     let lastPointerX = 0, lastPointerY = 0, lastPointerT = 0;
     let isDragging = false;
     let dragDeltaX = 0, dragDeltaY = 0;
     const ripples: { uv: THREE.Vector2; time: number }[] = [];
+    // v3.1.8: 鼠标拖尾轨迹（FIFO，8 个历史位置）
+    const TRAIL_MAX = 8;
+    const trail: { uv: THREE.Vector2; time: number }[] = [];
+    let lastTrailTime = 0;
 
     // === 节拍来源：player.onBeat（离线预分析为主，realtime 为 fallback） ===
     //   v3.1.4: 强节拍响应——energy 注入 25% + 慢释放 0.80，让节拍冲击持续可见
@@ -403,7 +441,7 @@ function useVisualEngine(
     player.setAnalyserReadyHandler?.(setupAnalysers);
     setTimeout(setupAnalysers, 500);
 
-    // === 鼠标事件（移动 domain warping + 点击波纹 + 拖拽相机微移） ===
+    // === 鼠标事件（移动流体推动 + 点击波纹 + 拖拽探头 + 拖尾光迹） ===
     const onPointerMove = (e: PointerEvent) => {
       const nowMs = performance.now();
       const dx = e.clientX - lastPointerX;
@@ -412,9 +450,22 @@ function useVisualEngine(
       // 鼠标速度（像素/ms），低通跟随
       const speed = Math.sqrt(dx * dx + dy * dy) / dtMs;
       mouseVelocity = mouseVelocity * 0.7 + speed * 0.3;
+      // v3.1.8: 鼠标速度向量（归一化方向 * 幅度），用于 shader 流体推动
+      // y 翻转（WebGL UV 原点在左下）
+      const newUvx = e.clientX / window.innerWidth;
+      const newUvy = 1.0 - e.clientY / window.innerHeight;
+      // 速度向量：方向 * 速度幅度，clamp 到合理范围
+      const velScale = Math.min(speed * 0.15, 0.5);
+      const dirLen = Math.sqrt(dx * dx + dy * dy) || 1;
+      mouseVelVecTarget.set((dx / dirLen) * velScale, -(dy / dirLen) * velScale);
       lastPointerX = e.clientX; lastPointerY = e.clientY; lastPointerT = nowMs;
-      // 更新 mouseUV 目标（0~1，y 翻转），animate 里 lerp 平滑跟随
-      mouseUVTarget.set(e.clientX / window.innerWidth, 1.0 - e.clientY / window.innerHeight);
+      mouseUVTarget.set(newUvx, newUvy);
+      // v3.1.8: 拖尾轨迹——移动时每 40ms 记录一个位置（避免过密）
+      if (nowMs - lastTrailTime > 40 && speed > 0.05) {
+        trail.push({ uv: new THREE.Vector2(newUvx, newUvy), time: nowMs });
+        if (trail.length > TRAIL_MAX) trail.shift();
+        lastTrailTime = nowMs;
+      }
       // 拖拽：累积相机微移偏移（探头感，非轨道）
       if (isDragging) {
         dragDeltaX += dx * 0.0003;
@@ -540,6 +591,11 @@ function useVisualEngine(
       const mouseTarget = Math.min(mouseVelocity * 0.08, 0.8);
       mouseStrength += (mouseTarget - mouseStrength) * (1 - Math.exp(-dt / 0.15));
       uniforms.uMouseStrength.value = mouseStrength;
+      // v3.1.8: 鼠标速度向量 lerp 平滑，静止时衰减归零（流体推动方向）
+      mouseVelVec.x += (mouseVelVecTarget.x - mouseVelVec.x) * (1 - Math.exp(-dt / 0.2));
+      mouseVelVec.y += (mouseVelVecTarget.y - mouseVelVec.y) * (1 - Math.exp(-dt / 0.2));
+      uniforms.uMouseVel.value.copy(mouseVelVec);
+      mouseVelVecTarget.multiplyScalar(Math.pow(0.05, dt));  // 静止时目标归零
       // 静止时 mouseVelocity 衰减 → uMouseStrength 归零，云雾回归自然
       mouseVelocity *= Math.pow(0.1, dt);
       // 拖拽相机微移：lerp 平滑跟随累积偏移，松手后缓慢回中（探头感）
@@ -560,6 +616,20 @@ function useVisualEngine(
           (rippleUniforms[i].value as THREE.Vector4).set(r.uv.x, r.uv.y, r.time / 1000, 1);
         } else {
           (rippleUniforms[i].value as THREE.Vector4).set(0, 0, -10, 0);
+        }
+      }
+      // v3.1.8: 拖尾轨迹 age 更新，超过 0.8s 移除，同步到 8 个 vec4 uniform
+      for (let i = trail.length - 1; i >= 0; i--) {
+        if ((now - trail[i].time) / 1000 > 0.8) trail.splice(i, 1);
+      }
+      const trailUniforms = [uniforms.uTrail0, uniforms.uTrail1, uniforms.uTrail2, uniforms.uTrail3,
+        uniforms.uTrail4, uniforms.uTrail5, uniforms.uTrail6, uniforms.uTrail7];
+      for (let i = 0; i < TRAIL_MAX; i++) {
+        if (i < trail.length) {
+          const tr = trail[i];
+          (trailUniforms[i].value as THREE.Vector4).set(tr.uv.x, tr.uv.y, tr.time / 1000, 1);
+        } else {
+          (trailUniforms[i].value as THREE.Vector4).set(0, 0, -10, 0);
         }
       }
 
