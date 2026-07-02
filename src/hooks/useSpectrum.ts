@@ -37,12 +37,29 @@ export function useSpectrum(canvasRef: React.RefObject<HTMLCanvasElement>) {
     // 从 CSS 变量读取封面色（visual engine 每帧写入 --cover-tint / --cover-accent）
     const readCssColor = (varName: string, fallback: [number, number, number]): [number, number, number] => {
       const v = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
-      // 格式 "rgb(r, g, b)" 或 "#rrggbb"
       const m = v.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
       if (m) return [+m[1], +m[2], +m[3]];
       const hex = v.match(/^#([0-9a-f]{6})$/i);
       if (hex) return [parseInt(hex[1].slice(0, 2), 16), parseInt(hex[1].slice(2, 4), 16), parseInt(hex[1].slice(4, 6), 16)];
       return fallback;
+    };
+
+    // RGB → HSL（用于基于封面色相做彩虹渐变）
+    const rgbToHsl = (r: number, g: number, b: number): [number, number, number] => {
+      r /= 255; g /= 255; b /= 255;
+      const max = Math.max(r, g, b), min = Math.min(r, g, b);
+      let h = 0, s = 0; const l = (max + min) / 2;
+      if (max !== min) {
+        const d = max - min;
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        switch (max) {
+          case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+          case g: h = (b - r) / d + 2; break;
+          case b: h = (r - g) / d + 4; break;
+        }
+        h *= 60;
+      }
+      return [h, s, l];
     };
 
     const draw = () => {
@@ -52,7 +69,8 @@ export function useSpectrum(canvasRef: React.RefObject<HTMLCanvasElement>) {
       ctx.clearRect(0, 0, w, h);
 
       const [tr, tg, tb] = readCssColor('--cover-tint', [0, 245, 212]);
-      const [ar, ag, ab] = readCssColor('--cover-accent', [244, 210, 138]);
+      // v3.1.6: 彩色渐变——以封面 tint 色相为中心，±45° 色相旋转，形成围绕封面色的彩虹
+      const [baseHue] = rgbToHsl(tr, tg, tb);
 
       const analyser = player.getAnalyser();
       if (!analyser) return;
@@ -90,11 +108,16 @@ export function useSpectrum(canvasRef: React.RefObject<HTMLCanvasElement>) {
         const xLeft = midX - (j + 1) * (barW + gap) + gap;
         const xRight = midX + j * (barW + gap);
 
+        // 每个 bar 的色相：以 baseHue 为中心，按位置 ±45° 旋转
+        const hueOffset = (j / (BAR_COUNT - 1)) * 90 - 45;
+        const hue = (baseHue + hueOffset + 360) % 360;
+
         for (const x of [xLeft, xRight]) {
+          // 彩色渐变：底部深色（同色相低明度）→ 顶部亮色（同色相高明度）
           const grad = ctx.createLinearGradient(0, baseY, 0, baseY - barH);
-          grad.addColorStop(0, `rgba(${tr},${tg},${tb},0.55)`);
-          grad.addColorStop(0.6, `rgba(${Math.round((tr + ar) / 2)},${Math.round((tg + ag) / 2)},${Math.round((tb + ab) / 2)},0.85)`);
-          grad.addColorStop(1, `rgba(${ar},${ag},${ab},0.98)`);
+          grad.addColorStop(0, `hsla(${hue}, 75%, 40%, 0.6)`);
+          grad.addColorStop(0.5, `hsla(${hue}, 80%, 55%, 0.88)`);
+          grad.addColorStop(1, `hsla(${hue}, 85%, 68%, 0.98)`);
           ctx.fillStyle = grad;
           const r = Math.min(barW / 2, 2);
           ctx.beginPath();
@@ -107,6 +130,7 @@ export function useSpectrum(canvasRef: React.RefObject<HTMLCanvasElement>) {
           ctx.closePath();
           ctx.fill();
 
+          // 顶部白色高光
           if (v > 0.15) {
             ctx.fillStyle = `rgba(255,255,255,${Math.min(0.9, v * 0.7)})`;
             ctx.fillRect(x, baseY - barH, barW, 1.2);

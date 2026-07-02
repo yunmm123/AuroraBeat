@@ -189,21 +189,20 @@ function useVisualEngine(
           beatWave = exp(-waveDist * 12.0) * uEnv * 0.3;
         }
 
-        // 4. 流动极光带（v3.1.5 新增）：2-3 条水平流动的光带，随节拍摆动
+        // 4. 流动极光带（v3.1.6: 2条水平流动光带，更宽更亮，随节拍摆动，bass 驱动）
         float aurora = 0.0;
         for (int g = 0; g < 2; g++) {
           float fi = float(g);
           float bandY = 0.3 + fi * 0.4
-            + sin(uTime * 0.15 + fi * 2.1) * 0.12
-            + uBass * 0.08 * sin(uTime * 0.3 + fi);
+            + sin(uTime * 0.15 + fi * 2.1) * 0.14
+            + uBass * 0.10 * sin(uTime * 0.3 + fi);
           float bandDist = abs(uv.y - bandY);
-          float bandWidth = 0.06 + uEnergy * 0.04;
+          float bandWidth = 0.09 + uEnergy * 0.05;
           float band = exp(-bandDist * bandDist / (bandWidth * bandWidth * 2.0));
-          // 光带沿 x 流动（noise 调制亮度）
           float flow = snoise(vec3(uv.x * 3.0 + uTime * 0.4, fi * 5.0, uTime * 0.1)) * 0.5 + 0.5;
           aurora += band * flow;
         }
-        aurora *= (0.35 + uEnergy * 0.4);
+        aurora *= (0.5 + uEnergy * 0.5);
 
         // 5. 多层 FBM 云雾——流动速度提高 3 倍，视觉上有明显流动感
         float t = uTime * 0.18;
@@ -228,8 +227,8 @@ function useVisualEngine(
         col += vec3(0.12, 0.08, 0.04) * uEnv;
         // 冲击波发光
         col += uAccent * beatWave * 0.5;
-        // 极光带发光（偏 tint 色，清亮）
-        col += uTint * aurora * 0.6;
+        // 极光带发光（偏 tint 色，清亮，v3.1.6 增强亮度）
+        col += mix(uTint, uAccent, 0.3) * aurora * 0.9;
         return col;
       }
 
@@ -264,17 +263,23 @@ function useVisualEngine(
           }
         }
 
-        // Vignette
-        float vignette = smoothstep(1.3, 0.35, length(uv - 0.5) * 1.4);
+        // Vignette（v3.1.6: 减弱，让四周也可见特效）
+        float vignette = smoothstep(1.5, 0.25, length(uv - 0.5) * 1.3);
         col *= vignette;
 
-        // v3.1.5: 鼠标辉光光斑——始终可见的柔和光晕跟随鼠标，移动时增强（明确反馈鼠标互动）
+        // v3.1.6: 中心径向光晕——始终可见的视觉焦点，节拍来临时膨胀（明确的主界面特效）
+        float centerDist = distance(uv, vec2(0.5));
+        float centerGlow = exp(-centerDist * 2.8) * (0.22 + uEnv * 0.6 + uBass * 0.35);
+        col += mix(uTint, uAccent, 0.5) * centerGlow * 0.7;
+
+        // v3.1.6: 鼠标光斑——三层（大范围柔光 + 中范围亮带 + 内核亮点），静止时也明显可见
         float mDistMain = distance(uv, uMouseUV);
-        float mouseGlow = exp(-mDistMain * 5.0) * (0.18 + uMouseStrength * 0.5);
-        col += uAccent * mouseGlow * 0.7 + vec3(mouseGlow * 0.15);
-        // 鼠标内核小亮点
-        float mouseCore = exp(-mDistMain * 40.0) * (0.3 + uMouseStrength * 0.7);
-        col += vec3(mouseCore * 0.4);
+        float mouseGlow = exp(-mDistMain * 3.5) * (0.45 + uMouseStrength * 0.6);
+        col += uAccent * mouseGlow * 0.85 + vec3(mouseGlow * 0.22);
+        float mouseMid = exp(-mDistMain * 12.0) * (0.55 + uMouseStrength * 0.8);
+        col += mix(uTint, uAccent, 0.4) * mouseMid * 0.55;
+        float mouseCore = exp(-mDistMain * 50.0) * (0.85 + uMouseStrength * 0.5);
+        col += vec3(mouseCore * 0.65);
 
         // 星点
         float stars = pow(max(0.0, snoise(uv * 150.0)), 18.0) * (0.3 + uTreble * 0.5);
@@ -1031,29 +1036,16 @@ const App: React.FC = () => {
               {player.lyrics.length === 0 && !player.lyricsLoading && (
                 <div className="text-center text-white/15 text-sm">暂无歌词</div>
               )}
-              {visibleLines.map((line) => {
-                const isActive = line.offset === 0;
-                const text = line.text || '♪';
-                // v3.1.5: 当前行逐字浮现（切换时每个字符依次渐入，有趣且有节奏感）
-                return (
-                  <div
-                    key={line.idx}
-                    ref={isActive ? activeLyricRef : null}
-                    className="lyric-line"
-                    data-offset={line.offset}
-                  >
-                    {isActive
-                      ? text.split('').map((ch, i) => (
-                          <span
-                            key={i}
-                            className="lyric-char"
-                            style={{ animationDelay: `${Math.min(i * 0.035, 0.6)}s` }}
-                          >{ch === ' ' ? '\u00A0' : ch}</span>
-                        ))
-                      : text}
-                  </div>
-                );
-              })}
+              {visibleLines.map((line) => (
+                <div
+                  key={line.idx}
+                  ref={line.offset === 0 ? activeLyricRef : null}
+                  className="lyric-line"
+                  data-offset={line.offset}
+                >
+                  {line.text || '♪'}
+                </div>
+              ))}
             </div>
           ) : (
             <div className="text-center">
