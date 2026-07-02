@@ -433,11 +433,18 @@ const server = http.createServer(async (req, res) => {
       const info = await getLoginInfo();
       if (!info.loggedIn) { sendJSON(res, { error: 'LOGIN_REQUIRED' }, 401); return; }
       try {
-        await like_song({ trackId: id, like, cookie: userCookie, timestamp: Date.now() });
+        const r = await like_song({ trackId: id, like, cookie: userCookie, timestamp: Date.now() });
+        // 网易 API 即使 HTTP 200 也可能在 body 里返回 code != 200
+        const code = r?.body?.code;
+        if (code !== undefined && code !== 200) {
+          console.error('[Like] netease rejected:', JSON.stringify(r.body));
+          sendJSON(res, { ok: false, error: `netease code ${code}: ${r.body?.msg || r.body?.message || ''}` });
+          return;
+        }
         sendJSON(res, { ok: true, liked: like });
       } catch (e) {
-        console.error('[Like] error:', e.message);
-        sendJSON(res, { ok: false, error: e.message }, 500);
+        console.error('[Like] error:', e.message, e.stack);
+        sendJSON(res, { ok: false, error: e.message });
       }
       return;
     }

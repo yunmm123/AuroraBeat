@@ -729,35 +729,24 @@ class PlayerCore {
     this.notify();
     // 无服务器：仅本地收藏
     if (!this.serverPort) return !liked;
-    // 有服务器：尝试同步到网易云，失败时回退本地状态
-    try {
-      const res = await fetch(`${this.apiBase}/api/song/like`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: song.id, like: !liked }),
-      });
-      const data = await res.json();
-      if (!data.ok) {
-        // API 失败（登录过期/网易限制等）：回退本地状态
-        console.warn('[PlayerCore] toggleLike API failed:', data.error);
-        const rollback = new Set(this.state.likedSongs);
-        if (liked) rollback.add(song.id);
-        else rollback.delete(song.id);
-        this.state.likedSongs = rollback;
-        this.notify();
-        return liked;
+    // 有服务器：异步同步到网易云，失败时仅警告不回退（保持本地操作结果）
+    // 这样网络波动/网易限制不会让用户操作白费，下次启动会从 likelist 重新同步真实状态
+    (async () => {
+      try {
+        const res = await fetch(`${this.apiBase}/api/song/like`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: song.id, like: !liked }),
+        });
+        const data = await res.json();
+        if (!data.ok) {
+          console.warn('[PlayerCore] toggleLike sync failed (kept local):', data.error);
+        }
+      } catch (e) {
+        console.warn('[PlayerCore] toggleLike network error (kept local):', e);
       }
-      return !liked;
-    } catch (e) {
-      // 网络错误：回退本地状态
-      console.error('[PlayerCore] toggleLike error:', e);
-      const rollback = new Set(this.state.likedSongs);
-      if (liked) rollback.add(song.id);
-      else rollback.delete(song.id);
-      this.state.likedSongs = rollback;
-      this.notify();
-      return liked;
-    }
+    })();
+    return !liked;
   }
 
   async fetchLikedList(): Promise<string[]> {
