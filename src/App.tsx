@@ -262,34 +262,18 @@ function useVisualEngine(
 
       void main() {
         vec2 uv = vUv;
-        // 轻微 RGB shift（模拟色差，不用后处理）
-        float shiftAmt = 0.001 + uEnergy * 0.0008;
-        vec3 col;
-        col.r = sampleField(uv + vec2(shiftAmt, 0.0)).r;
-        col.g = sampleField(uv).g;
-        col.b = sampleField(uv - vec2(shiftAmt, 0.0)).b;
+        // v3.1.9: sampleField 只调用一次（原 RGB shift+bloom 调用 28 次，超出 GPU 指令限制致编译失败）
+        vec3 col = sampleField(uv);
 
-        // 简化 bloom：对亮部做模糊采样叠加（5x5 高斯）
+        // 轻微色差（用偏移 uv 重新计算一次色彩偏移，只算亮度差，开销小）
+        float shiftAmt = 0.0015 + uEnergy * 0.001;
+        float rShift = sampleField(uv + vec2(shiftAmt, 0.0)).r;
+        col.r = mix(col.r, rShift, 0.5);
+
+        // 简化 bloom：仅对高亮区做一次亮增强（不用 25 次采样）
         float brightness = dot(col, vec3(0.299, 0.587, 0.114));
-        float bloomThresh = 0.35;
-        if (brightness > bloomThresh) {
-          vec3 bloom = vec3(0.0);
-          float blurR = 0.01 + uEnergy * 0.008;
-          float total = 0.0;
-          for (int i = -2; i <= 2; i++) {
-            for (int j = -2; j <= 2; j++) {
-              vec2 off = vec2(float(i), float(j)) * blurR;
-              float w = exp(-float(i*i+j*j) * 0.5);
-              vec3 s = sampleField(uv + off);
-              float b = max(0.0, dot(s, vec3(0.299, 0.587, 0.114)) - bloomThresh);
-              bloom += s * b * w;
-              total += b * w;
-            }
-          }
-          if (total > 0.001) {
-            col += bloom / total * (0.7 + uEnergy * 0.5);
-          }
-        }
+        float bloomBoost = smoothstep(0.5, 0.9, brightness) * (0.4 + uEnergy * 0.5);
+        col += col * bloomBoost;
 
         // Vignette（减弱，让四周也可见特效）
         float vignette = smoothstep(1.5, 0.25, length(uv - 0.5) * 1.3);
@@ -319,13 +303,10 @@ function useVisualEngine(
             float age = uTime - tr.z;
             if (age >= 0.0 && age <= 0.8) {
               float td = distance(uv, tr.xy);
-              // 拖尾点：随年龄衰减的发光球
               float trailGlow = exp(-td * 30.0) * exp(-age * 3.0);
-              // 颜色随索引变化（彩虹拖尾）
               float hue = float(i) / 8.0;
               vec3 trailCol = mix(uTint, uAccent, hue);
               col += trailCol * trailGlow * 0.6;
-              // 拖尾连线光晕（更大的柔光）
               float trailSoft = exp(-td * 8.0) * exp(-age * 2.5);
               col += trailCol * trailSoft * 0.15;
             }
@@ -346,7 +327,6 @@ function useVisualEngine(
 
         // ACES tonemapping + sRGB（单 pass 完成，不用 OutputPass）
         col = aces(col);
-        // sRGB 近似
         col = pow(col, vec3(1.0 / 2.2));
 
         gl_FragColor = vec4(col, uAlpha);
@@ -370,6 +350,27 @@ function useVisualEngine(
       const err = gl.getError();
       if (err !== gl.NO_ERROR) {
         console.warn('[Visual] WebGL error after compile:', err);
+      }
+      // v3.1.9: 主动检测 shader/program 编译链接错误（getError 不能可靠捕获）
+      const program = (fieldMat as any).program;
+      const glProgram = program?.program || program;
+      if (glProgram && gl.isProgram(glProgram)) {
+        const linkStatus = gl.getProgramParameter(glProgram, gl.LINK_STATUS);
+        if (!linkStatus) {
+          console.error('[Visual] Shader program LINK FAILED:', gl.getProgramInfoLog(glProgram));
+        } else {
+          console.log('[Visual] Shader program linked OK');
+        }
+        const shaders = gl.getAttachedShaders(glProgram);
+        if (shaders) {
+          for (const sh of shaders) {
+            const compiled = gl.getShaderParameter(sh, gl.COMPILE_STATUS);
+            if (!compiled) {
+              const isFrag = gl.getShaderParameter(sh, gl.SHADER_TYPE) === gl.FRAGMENT_SHADER;
+              console.error(`[Visual] ${isFrag ? 'Fragment' : 'Vertex'} shader COMPILE FAILED:`, gl.getShaderInfoLog(sh));
+            }
+          }
+        }
       }
     }
 

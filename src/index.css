@@ -207,8 +207,10 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 0.20em;
-  width: min(86vw, 1100px);
+  width: 92vw;
+  max-width: 1400px;
   max-height: 72vh;
+  padding: 0 3vw;
   pointer-events: none;
   /* 歌词浮在场域之上但融合：轻微半透明背景 + 模糊 */
   backdrop-filter: blur(3px) saturate(1.1);
@@ -217,6 +219,7 @@ html, body {
   /* 上下淡出 mask：场域边缘自然消融，无硬切边 */
   -webkit-mask-image: radial-gradient(ellipse 75% 70% at 50% 50%, #000 45%, rgba(0,0,0,0.5) 75%, transparent 98%);
   mask-image: radial-gradient(ellipse 75% 70% at 50% 50%, #000 45%, rgba(0,0,0,0.5) 75%, transparent 98%);
+  box-sizing: border-box;
 }
 
 /* 歌词行基础态：整列垂直缓动 cubic-bezier(0.16,1,0.3,1) 1200ms（v3.1 由 800ms 放宽，更沉浸） */
@@ -227,8 +230,10 @@ html, body {
   line-height: 1.32;
   letter-spacing: 0.01em;
   color: rgba(255, 255, 255, 0.32);
-  padding: 0.22em 0;
-  white-space: nowrap;
+  padding: 0.22em 2vw;
+  white-space: pre-wrap;
+  word-break: break-word;
+  width: 100%;
   transform-origin: center center;
   transform: scale(0.82) translateY(0) translateZ(0);
   opacity: 0;
