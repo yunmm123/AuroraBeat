@@ -35,9 +35,9 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v3.1.13 — 丝绸薄纱 + 节拍冲击波 + 自然粒子点缀
+// Three.js 视觉引擎 v3.1.14 — Aurora 渐变色块 + 节拍冲击波 + 自然粒子点缀
 // 单层架构（正交相机，单 PlaneGeometry(2,2) + ShaderMaterial）+ 35 颗粒子点缀：
-//   丝绸薄纱（6 条）：极低亮度流动带（系数 0.12）+ 饱和度降低（掺白）+ 速度放慢
+//   Aurora 渐变色块（4 块）：缓慢漂移融合（似 macOS Monterey 壁纸）+ 高斯模糊 + bass 膨胀 + 不抢戏（0.16）
 //     似有似无的氛围底色，给频谱环一个呼吸底，绝对不抢戏
 //   节拍冲击波（4 层回响）：onBeat 时 FIFO 替换最旧，从中心扩散
 //     速度 0.15/0.20/0.25/0.30 形成回响层次，exp 衰减柔和环，亮度系数 0.30
@@ -199,32 +199,35 @@ function useVisualEngine(
         // 深色底（带之间透出，不铺满）
         vec3 col = vec3(0.03, 0.04, 0.07);
 
-        // === 丝绸薄纱（6 条流动带，极低亮度氛围底色，似有似无）===
-        // 保留流动逻辑但大幅降亮度：系数 0.12 + 饱和度降低（掺白）+ 速度放慢
-        // uBass 驱动摆动幅度（减半），uEnv 微调带宽膨胀 + 微小亮度脉冲
+        // === Aurora 渐变网格色块（氛围底色，替代丝绸薄纱）===
+        // 4 个柔和色块缓慢漂移融合（似 macOS Monterey 壁纸/Stripe 官网）
+        // 大幅模糊（高斯衰减）+ 封面色同色系 + bass 脉动膨胀 + 不抢戏（系数 0.16）
         float t = uTime;
-        float wobbleAmp = 0.030 + uBass * 0.06;
-        float bandWidth = 0.025 + uEnv * 0.008;
-        for (int i = 0; i < 6; i++) {
-          float fi = float(i);
-          float phase = fi * 0.83;
-          // 流速减半（更优雅）
-          float flowY = uv.y + t * (0.025 + fi * 0.006) + phase;
-          float xCenter = 0.5 + sin(fi * 1.7 + t * 0.12) * 0.28;
-          float xWobble = sin(uv.y * (2.5 + fi * 0.6) + t * (0.20 + fi * 0.04) + phase) * wobbleAmp
-                        + (vnoise(vec2(uv.y * (2.0 + fi * 0.3), t * 0.10 + phase)) - 0.5) * wobbleAmp * 2.0;
-          float xc = uv.x - xCenter - xWobble;
-          float band = exp(-pow(xc / bandWidth, 2.0));
-          float vis = fbm(vec2(uv.y * 1.5 + t * 0.15 + phase, fi * 0.7));
-          vis = smoothstep(0.25, 0.85, vis);
-          float sheen = pow(band, 5.0);
-          // 颜色饱和度降低：mix 一点白色让更柔和
-          vec3 bcol = mix(uTint, uAccent, fract(flowY * 1.2 + fi * 0.15));
-          bcol = mix(bcol, vec3(0.60, 0.62, 0.70), 0.35);
-          // 亮度系数 ~0.12（薄纱）+ 节拍微微变亮（uEnv 系数 0.06，幅度小）
-          col += bcol * band * vis * (0.12 + uEnv * 0.06);
-          col += bcol * sheen * vis * 0.18;
-        }
+        float bassPulse = 1.0 + uBass * 0.25;   // bass 来临时色块微微膨胀
+        // 4 个色块：中心位置缓慢漂移（不同速度不同方向），半径较大，高斯衰减形成柔和边缘
+        // 每个色块用一个偏移的 exp 衰减场，叠加形成 mesh gradient 融合效果
+        vec2 c0 = vec2(0.30 + sin(t * 0.05) * 0.10, 0.40 + cos(t * 0.04) * 0.08);
+        vec2 c1 = vec2(0.70 + sin(t * 0.06 + 1.5) * 0.10, 0.60 + cos(t * 0.05 + 1.5) * 0.08);
+        vec2 c2 = vec2(0.50 + sin(t * 0.045 + 3.0) * 0.12, 0.25 + cos(t * 0.055 + 3.0) * 0.10);
+        vec2 c3 = vec2(0.55 + sin(t * 0.055 + 4.5) * 0.10, 0.80 + cos(t * 0.04 + 4.5) * 0.08);
+        float r0 = 0.35 * bassPulse;
+        float r1 = 0.38 * bassPulse;
+        float r2 = 0.32 * bassPulse;
+        float r3 = 0.36 * bassPulse;
+        // 高斯衰减场（柔和模糊边缘）
+        float b0 = exp(-pow(distance(uv, c0) / r0, 2.0));
+        float b1 = exp(-pow(distance(uv, c1) / r1, 2.0));
+        float b2 = exp(-pow(distance(uv, c2) / r2, 2.0));
+        float b3 = exp(-pow(distance(uv, c3) / r3, 2.0));
+        // 颜色：封面色 tint/accent + 混合色，低饱和柔和（掺一点白）
+        vec3 auroraCol = vec3(0.0);
+        auroraCol += mix(uTint, uAccent, 0.2) * b0;          // 偏 tint
+        auroraCol += mix(uTint, uAccent, 0.5) * b1;          // 中间
+        auroraCol += mix(uTint, uAccent, 0.8) * b2;          // 偏 accent
+        auroraCol += mix(uTint, uAccent, 0.35) * b3;         // 偏 tint
+        auroraCol = mix(auroraCol, vec3(0.55, 0.57, 0.65), 0.30);  // 掺白降饱和
+        // 亮度系数 0.16（克制）+ uEnv 微微脉动（0.04 幅度小）
+        col += auroraCol * (0.16 + uEnv * 0.04);
 
         // === 节拍冲击波（4 层回响，从中心扩散，柔和 exp 衰减环）===
         // uShock0~3: vec4(x, y, startTime, intensity)；速度 0.15 + index*0.05 形成回响层次
