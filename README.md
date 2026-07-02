@@ -1,112 +1,132 @@
 # AuroraBeat - 沉浸式高端音乐播放器
 
-一款面向 PC 端的高端音乐播放软件，基于实时音频分析的智能视觉引擎，将音乐转化为令人惊叹的视觉盛宴。
+一款面向 PC 端的沉浸式音乐播放软件，基于实时音频分析的智能视觉引擎，将音乐转化为令人惊叹的视觉盛宴。基于本地 HTTP 服务器架构对接网易云音乐，支持登录同步喜欢列表、每日推荐、歌单管理。
+
+当前版本：**v3.3.4**
 
 ## 技术栈
 
-- **前端框架**: Electron + React 18 + TypeScript
+- **前端框架**: Electron 29 + React 18 + TypeScript
 - **渲染引擎**: Three.js + WebGL 2.0 + GLSL Shaders
 - **音频处理**: Web Audio API + 2048 点 FFT 频谱分析
-- **UI 框架**: Tailwind CSS + Framer Motion
+- **节拍系统**: 双 AnalyserNode 架构（离线预分析 + 实时 fallback）
+- **动画引擎**: GSAP + Framer Motion
+- **UI 框架**: Tailwind CSS
 - **状态管理**: Zustand
-- **图标**: Lucide React
+- **音乐数据源**: NeteaseCloudMusicApi（本地服务器代理）
 
 ## 核心功能
 
-### 🎵 音乐节奏自适应视觉系统
+### 🎨 封面驱动的 6 色调色板视觉系统
 
-**音频特征提取（每帧实时分析）**:
-- BPM 检测与节拍点追踪
-- 低频能量（鼓点、贝斯）驱动粒子爆发
-- 中频能量（人声、旋律）驱动形态变化
-- 高频能量（镲片、高音）驱动光晕闪烁
-- 音乐情绪识别（激昂/舒缓/电子/古典等）
+对封面图像做 K-Means 聚类，按亮度分 6 层提取主色，分配给不同视觉元素，主界面能大致通过颜色看清封面：
 
-**高端视觉效果库**:
-- ✨ **星河粒子** - 数万个粒子在 3D 空间中随音乐流动
-- 🌊 **流体光影** - 基于 Shader 的流体动力学模拟
-- 💎 **几何律动** - 3D 几何结构随音乐变形
-- 📊 **波形可视化** - 3D 空间中的波形曲面
-- 🌌 **频谱星云** - 频谱数据映射为星云密度
+| 层级 | 亮度范围 | 用途 |
+|------|----------|------|
+| shadow | [0, 0.16) | 背景底色 |
+| midDark | [0.16, 0.34) | 拖尾尾部 |
+| tint | [0.34, 0.52) | 节拍冲击波 |
+| accent | [0.52, 0.70) | 频谱环 / 拖尾头部 |
+| midLight | [0.70, 0.85) | 节拍绽放光晕 / 粒子 |
+| highlight | [0.85, 1.0] | 远景星尘 / 粒子高光 |
 
-**后处理效果**:
-- Bloom 泛光效果
-- 色差（Chromatic Aberration）
-- 可调节渲染质量
+### 🌊 沉浸式视觉特效（Three.js Shader）
 
-### 🎨 UI/UX 设计
+- **频谱环** - 中心圆环随频谱实时跳动，封面 accent 色驱动
+- **节拍冲击波** - 4 层从中心扩散的环形波纹，tint 色，节拍触发
+- **节拍绽放光晕** - 频谱环外层 6 瓣花瓣光晕，midLight 色，随节奏呼吸
+- **封面粒子拖尾** - 20 条围绕中心旋转的粒子拖尾，accent 色头部 + midDark 色尾部
+- **远景星尘** - 网格分布的闪烁星点，midLight → highlight 渐变
+- **鼠标光斑** - 跟随鼠标的三层柔光（静止时隐藏，移动时显现）
+- **背景底色** - 封面 shadow 色作为全屏底色
 
-- 暗黑模式为主，毛玻璃 + 半透明面板设计
-- 全屏视觉效果作为背景，UI 悬浮其上
-- 支持 6 套高端配色主题（暗夜紫、深海蓝、熔岩橙、极光绿、赛博朋克、极简白）
-- 流畅的动画过渡（Framer Motion）
-- 自定义滚动条、进度条、滑块
+### 🎵 节拍系统
+
+- **离线预分析**：fetch + decodeAudioData + lowpass(150Hz) + 峰值检测，得出 BPM 和节拍时间戳数组
+- **实时 fallback**：离线分析失败时用 lowpass 时域 RMS 检测底鼓
+- **双 AnalyserNode 架构**：可视化频谱（smoothing 0.58）+ 节拍检测（smoothing 0）分离，避免瞬态被抹平
+- 节拍触发：粒子亮度脉冲、冲击波生成、场域能量释放、歌词切换微脉冲
 
 ### 🎧 播放功能
 
-- 多种播放模式（顺序、随机、单曲循环、列表循环）
-- 10 段专业均衡器，预设多种风格
-- 低音增强、3D 环绕音效
-- 音量控制、播放速度调节
+- 网易云音乐登录（独立登录窗口，Cookie 持久化）
+- 多种播放模式（顺序、随机、单曲循环）
+- 4 档音质（standard / exhigh / lossless / hires），自动降级
 - 播放队列管理
+- 本地音乐文件支持（mp3 / flac / wav / ogg / m4a / aac）
+- 红心收藏同步网易云（点红心/取消红心实时同步，乐观更新 + 延迟验证）
 
 ### 📝 歌词系统
 
-- 悬浮歌词面板
-- 全屏歌词模式（带渐变和发光效果）
-- 逐行动画过渡
+- 始终居中显示当前行（以圆环中心为基准）
+- 宽度以视口短边为基准，长歌词换行也被圆环包围
+- 封面色到白色的柔和渐变填充（tint 30% → tint 10% 明度差 20% 以内）
+- 节拍辉光随 BPM 呼吸
+- 网易云歌词自动获取（含翻译、逐字 yrc）
 
-### 🔗 酷狗音乐集成
+### 🖥️ 沉浸式界面
 
-- OAuth 2.0 登录（扫码/账号密码）
-- 同步用户歌单、收藏、播放历史
-- 在线搜索酷狗音乐库
-- Token 安全存储与自动刷新
-- 错误处理与重试机制
+- 无边框全屏（最大化时覆盖任务栏）
+- 毛玻璃 + 半透明面板设计
+- 鼠标手势控制（音量、进度）
+- 沉浸式控制提示
 
 ## 项目结构
 
 ```
 /workspace
 ├── electron/              # Electron 主进程
-│   ├── main.ts           # 主进程入口
-│   └── preload.ts        # 预加载脚本
+│   ├── main.ts           # 主进程入口（窗口管理、IPC、网易云登录窗口、server.js 启动）
+│   └── preload.ts        # 预加载脚本（IPC 桥接）
 ├── src/
-│   ├── components/       # React 组件
-│   │   ├── TitleBar.tsx
-│   │   ├── PlaylistSidebar.tsx
-│   │   ├── PlayControlBar.tsx
-│   │   ├── LyricsPanel.tsx
-│   │   ├── QueuePanel.tsx
-│   │   ├── SettingsPanel.tsx
-│   │   └── VisualEffectSelector.tsx
-│   ├── visuals/          # 视觉引擎
-│   │   └── VisualEngine.ts
-│   ├── shaders/          # GLSL Shaders
-│   │   ├── particleShaders.ts
-│   │   ├── fluidShaders.ts
-│   │   ├── geometryShaders.ts
-│   │   ├── nebulaShaders.ts
-│   │   └── waveformShaders.ts
-│   ├── audio/            # 音频处理
-│   │   └── AudioAnalyzer.ts
-│   ├── store/            # 状态管理
-│   │   └── playerStore.ts
-│   ├── services/         # 服务层
-│   │   └── kugouService.ts
-│   ├── utils/            # 工具函数
-│   │   └── themes.ts
+│   ├── core/             # 核心逻辑
+│   │   ├── playerCore.ts # 播放器核心（播放、节拍派发、红心同步）
+│   │   ├── beatAnalyzer.ts # 离线节拍分析
+│   │   └── beatDetector.ts # 实时节拍检测 fallback
+│   ├── hooks/            # React Hooks
+│   │   ├── usePlayer.ts  # 播放器状态 hook
+│   │   └── useSpectrum.ts # 频谱可视化（6 色渐变）
+│   ├── shaders/          # GLSL Shaders（参考用，主 shader 在 App.tsx 内）
 │   ├── types/            # TypeScript 类型
-│   ├── App.tsx
-│   ├── main.tsx
-│   └── index.css
-├── index.html
+│   ├── utils/
+│   │   └── audioDB.ts    # 音频缓存
+│   ├── App.tsx           # 主界面 + 视觉引擎（6 色 uniforms + 全部 shader）
+│   ├── index.css         # 全局样式（歌词、频谱、玻璃面板）
+│   └── main.tsx          # React 入口
+├── server.js             # 本地 HTTP 服务器（网易云 API 代理）
 ├── package.json
 ├── vite.config.ts
 ├── tailwind.config.js
-├── tsconfig.json
-└── README.md
+└── tsconfig.json
 ```
+
+## 架构说明
+
+### 本地 HTTP 服务器架构
+
+对标 Mineradio 架构，所有网易云 API 调用通过本地 HTTP 服务器中转：
+
+```
+渲染进程 (React)
+    ↓ fetch http://127.0.0.1:{port}/api/...
+Electron 主进程
+    ↓ spawn
+server.js (独立 Node 进程)
+    ↓ 调用
+NeteaseCloudMusicApi
+    ↓ HTTPS
+网易云音乐服务器
+```
+
+- **开发模式**：用系统 `node` 运行源码 server.js（重启 electron 即更新）
+- **打包模式**：用 Electron 自身以纯 Node 模式运行（`ELECTRON_RUN_AS_NODE=1`），无需用户安装 Node
+
+### 红心同步流程
+
+1. 用户点击红心 → 乐观更新本地 Set + notify（UI 立即响应）
+2. 异步 fire-and-forget 调用 `/api/song/like`（不阻塞 UI，失败不回退）
+3. server.js 调用 NeteaseCloudMusicApi 的 `like` 函数（注意：`like` 参数需传字符串 `"true"/"false"`，库内部用 `== 'false'` 字符串比较）
+4. 取消红心后 3 秒延迟验证：查 likelist 确认网易是否真取消，不一致则强制同步真实状态
 
 ## 快速开始
 
@@ -117,7 +137,7 @@
 npm install --registry=https://registry.npmmirror.com
 ```
 
-> 注意：如果 Electron 下载失败，可以设置国内镜像：
+> 如果 Electron 下载失败，设置国内镜像：
 > ```bash
 > # Windows
 > set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
@@ -130,38 +150,31 @@ npm install --registry=https://registry.npmmirror.com
 ### 开发模式
 
 ```bash
-# Web 版本（推荐用于开发和调试视觉效果）
-npm run dev
-
-# Electron 桌面版本
-npm run dev:electron
+# Electron 桌面版（开发）
+npm run electron:dev
 ```
 
 ### 打包成桌面软件
 
-详细的打包说明请查看 [打包说明.md](./打包说明.md)
-
-**快速打包命令：**
-
 ```bash
-# 打包 Windows 版本
+# 打包 Windows 版本（生成 nsis 安装包 + portable 便携版）
 npm run build:win
 
 # 打包 macOS 版本
 npm run build:mac
 
-# 打包当前系统版本
-npm run build
+# 仅打包当前系统解压版（最快，不生成安装程序）
+npm run build:dir
 ```
 
-打包完成后，安装包会生成在 `release/` 文件夹中。
-
-**Windows 打包脚本：** 双击 `build-windows.bat` 即可
-**macOS 打包脚本：** 运行 `./build-mac.sh`
+打包完成后，安装包会生成在 `release/` 文件夹中：
+- `AuroraBeat Setup {version}.exe` - NSIS 安装包
+- `Aurorabeat {version}.exe` - 便携版（免安装）
+- `win-unpacked/AuroraBeat.exe` - 解压版（`build:dir` 产物）
 
 ## 系统要求
 
-- **GPU**: NVIDIA RTX 5060 或更高（推荐）
+- **GPU**: 支持 WebGL 2.0 的显卡（集成显卡即可，推荐独显获得更流畅的粒子效果）
 - **内存**: 4GB 以上
 - **操作系统**: Windows 10+ / macOS 11+
 - **存储空间**: 500MB 以上
@@ -170,12 +183,22 @@ npm run build
 
 | 快捷键 | 功能 |
 |--------|------|
-| Space | 播放/暂停 |
-| ← / → | 上一首/下一首 |
+| Space | 播放 / 暂停 |
+| ← / → | 快退 / 快进 5 秒 |
+| Shift + ← / → | 上一首 / 下一首 |
 | ↑ / ↓ | 音量增减 |
-| M | 静音 |
-| L | 歌词 |
-| Esc | 关闭面板 |
+| M | 静音切换 |
+| L | 红心收藏 / 取消 |
+| F | FX 面板切换 |
+| MediaPlayPause / MediaNextTrack / MediaPreviousTrack | 媒体键控制 |
+
+## 版本号规则
+
+采用语义化版本，patch 仅 1-9，每 10 个小版本进位到 minor：
+
+```
+3.1.1 → 3.1.2 → ... → 3.1.9 → 3.2.0 → 3.2.1 → ... → 3.2.9 → 3.3.0
+```
 
 ## 许可证
 
