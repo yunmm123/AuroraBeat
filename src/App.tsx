@@ -274,11 +274,11 @@ function useVisualEngine(
         // === 节拍绽放光晕（圆环外围花瓣，节拍绽放膨胀消散，自然不抢戏）===
         // 与频谱环同心，6 瓣角度调制（区别于冲击波均匀环）；比冲击波更柔和弥散
         // 节拍时半径随 energy 缓慢膨胀 + 亮度随 env 冲击消散；静止时低亮基础可见（不看不见）
-        float bloomR = ringR + 0.07 + uEnergy * 0.05;     // 节拍外膨胀（energy 慢释放，自然消散）
-        float bloomW = 0.05 + uEnv * 0.03;                // 节拍时变宽
+        float bloomR = ringR + 0.06 + uEnergy * 0.05;     // 节拍外膨胀（energy 慢释放，自然消散）
+        float bloomW = 0.09 + uEnv * 0.04;                // 节拍时变宽（v3.2.3: 0.05→0.09 增宽可见）
         float petal = 0.65 + 0.35 * sin(ang * 6.0 + uTime * 0.25);  // 6 瓣花瓣缓慢旋转
         float bloom = exp(-pow((r - bloomR) / bloomW, 2.0)) * petal;
-        bloom *= (0.15 + uEnv * 0.25);                    // 静止 0.15 可见 + 节拍增亮
+        bloom *= (0.35 + uEnv * 0.30);                    // v3.2.3: 静止 0.15→0.35 可见 + 节拍增亮
         col += uMidLight * bloom * 0.25;   // 绽放光晕用中亮色（区别于频谱环 accent/冲击波 tint）
 
         // === 点击涟漪（3 个，展开）===
@@ -292,15 +292,15 @@ function useVisualEngine(
         if (uRipple2.w > 0.5 && age2 >= 0.0 && age2 <= 2.5)
           col += uAccent * sin(distance(uv, uRipple2.xy) * 30.0 - age2 * 8.0) * exp(-age2 * 1.5) * 0.10;
 
-        // === 鼠标光斑（静止时完全隐藏，移动时才显现，融入背景不抢戏）===
-        // v3.2.0: 去掉基础值，纯 uMouseStrength 驱动；静止时归零，移动时渐显（0.15s 平滑）
+        // === 鼠标光斑（静止隐藏，移动时显现；v3.2.3 收紧贴鼠标，间隔约半个鼠标）===
         float ms = uMouseStrength;   // 静止=0（无光斑），移动时增大，松手后 0.15s 渐隐
-        float mouseGlow = exp(-mDist * 3.5) * ms;
-        col += mix(uTint, vec3(0.6, 0.62, 0.68), 0.5) * mouseGlow * 0.30;
-        float mouseMid = exp(-mDist * 12.0) * ms;
-        col += mix(uTint, uAccent, 0.3) * mouseMid * 0.20;
-        float mouseCore = exp(-mDist * 60.0) * ms;
-        col += vec3(mouseCore * 0.25);
+        // 衰减系数增大：光斑收紧贴鼠标，不再大面积铺开与鼠标间隔远
+        float mouseGlow = exp(-mDist * 18.0) * ms;   // 外层柔光（半径约半个鼠标）
+        col += mix(uTint, vec3(0.6, 0.62, 0.68), 0.5) * mouseGlow * 0.35;
+        float mouseMid = exp(-mDist * 45.0) * ms;    // 中层（紧贴鼠标）
+        col += mix(uTint, uAccent, 0.3) * mouseMid * 0.25;
+        float mouseCore = exp(-mDist * 120.0) * ms;  // 内核（鼠标位置）
+        col += vec3(mouseCore * 0.30);
 
         // === 彗星椭圆拖尾（20 个，展开）===
         // 椭圆长轴沿鼠标移动方向，短轴垂直；速度越快越长轴
@@ -1677,35 +1677,7 @@ const App: React.FC = () => {
               {/* 我的音乐 */}
               {panel === 'library' && (
                 <div className="flex-1 overflow-y-auto p-6">
-                  <div className="text-[13px] font-bold text-white/80 mb-4">我喜欢</div>
-                  {(() => {
-                    const likedInQueue = player.queue.filter((s) => player.likedSongs.has(s.id));
-                    if (likedInQueue.length === 0) {
-                      return (
-                        <div className="flex flex-col items-center justify-center h-40 text-white/25">
-                          <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-3"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
-                          <div className="text-sm">点击歌曲旁的红心加入我喜欢</div>
-                        </div>
-                      );
-                    }
-                    return likedInQueue.map((song) => {
-                      const isCurrent = player.currentSong?.id === song.id;
-                      const isLiked = true;
-                      return (
-                        <div key={song.id} className={`queue-item ${isCurrent ? 'current' : ''}`} onClick={() => { const idx = player.queue.findIndex((s) => s.id === song.id); if (idx >= 0) { player.playTrackAt(idx); setShowOverlay(false); } }}>
-                          <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-[#ff5e8a]'}`}>♥</div>
-                          {song.cover && <div className="w-9 h-9 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${song.cover})` }} />}
-                          <div className="flex-1 min-w-0">
-                            <div className={`text-sm truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/85'}`}>{song.title}</div>
-                            <div className="text-[11px] text-white/35 truncate">{song.artist}</div>
-                          </div>
-                          <div className="text-[11px] text-white/25 w-12 text-right">{formatTime(song.duration)}</div>
-                        </div>
-                      );
-                    });
-                  })()}
-
-                  <div className="text-[13px] font-bold text-white/80 mb-4 mt-8">播放列表</div>
+                  <div className="text-[13px] font-bold text-white/80 mb-4">播放列表</div>
                   {player.queue.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-40 text-white/25">
                       <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-3"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>

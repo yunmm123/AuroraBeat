@@ -207,8 +207,8 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 0.20em;
-  width: 92vw;
-  max-width: 1400px;
+  width: 46vw;
+  max-width: 720px;
   max-height: 72vh;
   padding: 0 3vw;
   pointer-events: none;
