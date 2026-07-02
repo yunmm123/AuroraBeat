@@ -228,36 +228,37 @@ function useVisualEngine(
         // === 节拍冲击波（4 层回响，从中心扩散，柔和 exp 衰减环）===
         // uShock0~3: vec4(x, y, startTime, intensity)；速度 0.15 + index*0.05 形成回响层次
         // 4 个展开的 if（避免数组循环）；超过 3 秒自动失效（w=0）
+        // v3.2.4: 衰减 1.2→0.5（2.4 倍慢，3 秒仍可见）+ 厚度 8→5（更宽）+ 亮度 0.18→0.35
         float shockSum = 0.0;
         // shock0（速度 0.15，最慢）
         { float age = uTime - uShock0.z;
           if (uShock0.w > 0.0 && age >= 0.0 && age <= 3.0) {
             float radius = age * 0.15;
             float dr = distance(uv, uShock0.xy) - radius;
-            shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock0.w;
+            shockSum += exp(-abs(dr) * 5.0) * exp(-age * 0.5) * uShock0.w;
           } }
         // shock1（速度 0.20）
         { float age = uTime - uShock1.z;
           if (uShock1.w > 0.0 && age >= 0.0 && age <= 3.0) {
             float radius = age * 0.20;
             float dr = distance(uv, uShock1.xy) - radius;
-            shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock1.w;
+            shockSum += exp(-abs(dr) * 5.0) * exp(-age * 0.5) * uShock1.w;
           } }
         // shock2（速度 0.25）
         { float age = uTime - uShock2.z;
           if (uShock2.w > 0.0 && age >= 0.0 && age <= 3.0) {
             float radius = age * 0.25;
             float dr = distance(uv, uShock2.xy) - radius;
-            shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock2.w;
+            shockSum += exp(-abs(dr) * 5.0) * exp(-age * 0.5) * uShock2.w;
           } }
         // shock3（速度 0.30，最快）
         { float age = uTime - uShock3.z;
           if (uShock3.w > 0.0 && age >= 0.0 && age <= 3.0) {
             float radius = age * 0.30;
             float dr = distance(uv, uShock3.xy) - radius;
-            shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock3.w;
+            shockSum += exp(-abs(dr) * 5.0) * exp(-age * 0.5) * uShock3.w;
           } }
-        col += uTint * shockSum * 0.18;   // 冲击波用主色 tint（区别于频谱环 accent/绽放 midLight）
+        col += uTint * shockSum * 0.35;   // v3.2.4: 0.18→0.35 增可见（冲击波用主色 tint）
 
         // === 频谱环（弱化辅助：uFreqTex 极坐标采样，低亮度，不抢戏）===
         float aRot = ang + uTime * 0.15;
@@ -1138,12 +1139,6 @@ const App: React.FC = () => {
           e.preventDefault(); { const v = Math.min(1, player.volume + 0.05); player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); } break;
         case 'ArrowDown':
           e.preventDefault(); { const v = Math.max(0, player.volume - 0.05); player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); } break;
-        case 'KeyL':
-          if (player.currentSong) {
-            handleLike(player.currentSong);
-            showGestureHint('红心');
-          }
-          break;
         case 'KeyF':
           setShowFx((v) => !v); showGestureHint('FX 面板'); break;
         case 'KeyM':
@@ -1245,10 +1240,6 @@ const App: React.FC = () => {
     if (result?.url) { setCustomVideo(result.url); setCustomBg(null); }
   };
 
-  const handleLike = async (song: Song) => {
-    await player.toggleLike(song);
-  };
-
   const formatTime = (s: number) => {
     if (!isFinite(s) || s < 0) return '0:00';
     return `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
@@ -1289,8 +1280,6 @@ const App: React.FC = () => {
       });
     }
   }, [searchResults, viewingTracks, panel, player.queue]);
-
-  const isCurrentLiked = player.currentSong ? player.likedSongs.has(player.currentSong.id) : false;
 
   return (
     <div className="fixed inset-0 overflow-hidden text-white select-none font-sans" style={{ background: bgColor, transition: 'background 1.5s ease' }}>
@@ -1423,9 +1412,7 @@ const App: React.FC = () => {
               <div className="text-[11px] text-white/35 truncate">{player.currentSong?.artist || '选择一首歌开始'}</div>
             </div>
             {player.currentSong && (
-              <button onClick={() => handleLike(player.currentSong!)} className={`w-9 h-9 flex items-center justify-center transition-all ${isCurrentLiked ? 'text-[#ff5e8a]' : 'text-white/30 hover:text-white/60'}`}>
-                <svg width="16" height="16" fill={isCurrentLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
-              </button>
+              <div className="w-9 h-9" />
             )}
           </div>
 
@@ -1618,15 +1605,11 @@ const App: React.FC = () => {
                     ) : (
                       viewingTracks.map((song, i) => {
                         const isCurrent = player.currentSong?.id === song.id;
-                        const isLiked = player.likedSongs.has(song.id);
                         return (
                           <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''} px-6 group`} onClick={() => { player.playTrackAt(i, viewingTracks); setShowOverlay(false); }}>
                             <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
                             <div className="flex-1 min-w-0"><div className={`text-sm truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/85'}`}>{song.title}</div></div>
                             <div className="w-36 text-xs text-white/35 truncate">{song.artist}</div>
-                            <button onClick={(e) => { e.stopPropagation(); handleLike(song); }} className={`w-6 h-6 flex items-center justify-center transition-all ${isLiked ? 'text-[#ff5e8a]' : 'text-white/15 hover:text-white/50'}`}>
-                              <svg width="14" height="14" fill={isLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
-                            </button>
                             <div className="w-12 text-xs text-white/25 text-right">{formatTime(song.duration)}</div>
                           </div>
                         );
@@ -1655,7 +1638,6 @@ const App: React.FC = () => {
                     )}
                     {searchResults.map((song, i) => {
                       const isCurrent = player.currentSong?.id === song.id;
-                      const isLiked = player.likedSongs.has(song.id);
                       return (
                         <div key={song.id + i} className="search-result-item group" onClick={() => { player.playSong(song, searchResults); setShowOverlay(false); }}>
                           {song.cover ? <div className="w-10 h-10 rounded-lg bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${song.cover})` }} /> : <div className="w-10 h-10 rounded-lg bg-white/[0.05] flex items-center justify-center flex-shrink-0 text-white/20">♪</div>}
@@ -1663,9 +1645,6 @@ const App: React.FC = () => {
                             <div className={`text-[13px] font-medium truncate ${isCurrent ? 'text-[#00f5d4]' : 'text-white/90'}`}>{song.title}</div>
                             <div className="text-[11px] text-white/35 truncate">{song.artist}</div>
                           </div>
-                          <button onClick={(e) => { e.stopPropagation(); handleLike(song); }} className={`w-6 h-6 flex items-center justify-center transition-all ${isLiked ? 'text-[#ff5e8a]' : 'text-white/15 hover:text-white/50'}`}>
-                            <svg width="14" height="14" fill={isLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
-                          </button>
                           <div className="text-[11px] text-white/25 w-12 text-right">{formatTime(song.duration)}</div>
                         </div>
                       );
