@@ -432,14 +432,15 @@ const server = http.createServer(async (req, res) => {
       if (!id) { sendJSON(res, { error: 'Missing id' }, 400); return; }
       const info = await getLoginInfo();
       if (!info.loggedIn) { sendJSON(res, { error: 'LOGIN_REQUIRED' }, 401); return; }
-      // trackId 必须是数字类型，字符串会让网易 API 抛类型错误（且异常可能无 message）
-      const trackId = typeof id === 'number' ? id : parseInt(String(id), 10);
-      if (!Number.isFinite(trackId)) {
+      // 网易云 like 接口必选参数是 id（歌曲id），不是 trackId
+      // 之前误用 trackId 导致网易返回 400 Bad Request
+      const songId = typeof id === 'number' ? id : parseInt(String(id), 10);
+      if (!Number.isFinite(songId)) {
         sendJSON(res, { ok: false, error: `Invalid id (not numeric): ${id}` });
         return;
       }
       try {
-        const r = await like_song({ trackId, like, cookie: userCookie, timestamp: Date.now() });
+        const r = await like_song({ id: songId, like, cookie: userCookie, timestamp: Date.now() });
         console.log('[Like] netease response:', JSON.stringify(r?.body || r));
         // 网易 API 即使 HTTP 200 也可能在 body 里返回 code != 200
         const code = r?.body?.code ?? r?.code;
