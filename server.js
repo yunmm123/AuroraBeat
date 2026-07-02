@@ -444,7 +444,9 @@ const server = http.createServer(async (req, res) => {
       }
       console.log('[Like] request params:', { id: songId, like, rawLike, cookieLen: userCookie.length });
       try {
-        const r = await like_song({ id: songId, like, cookie: userCookie, timestamp: Date.now() });
+        // v3.3.1: NeteaseCloudMusicApi 的 like 函数用 query.like == 'false'（字符串比较）判断
+        // 传布尔 false 会被当作 true（变成添加喜欢），所以必须传字符串 "false" 才能取消
+        const r = await like_song({ id: songId, like: like ? 'true' : 'false', cookie: userCookie, timestamp: Date.now() });
         console.log('[Like] netease response:', JSON.stringify(r?.body || r));
         // 网易 API 即使 HTTP 200 也可能在 body 里返回 code != 200
         const code = r?.body?.code ?? r?.code;
