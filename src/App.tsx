@@ -35,7 +35,7 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v3.1.17 — 节拍绽放光晕 + 频谱环 + 远景星尘 + 自然粒子点缀
+// Three.js 视觉引擎 v3.2.0 — 节拍绽放光晕 + 频谱环 + 远景星尘 + 自然粒子点缀
 // 单层架构（正交相机，单 PlaneGeometry(2,2) + ShaderMaterial）+ 35 颗粒子点缀：
 //   远景星尘（~144 颗）：网格 hash 生成位置/亮度/闪烁相位，静态不互动不节拍
 //     极小极暗铺满背景增加纵深，偏白偏冷融入夜空；区别于前景 35 颗粒子（大/互动/节拍亮）
@@ -47,7 +47,7 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 //     additive blending，软发光圆点，CPU 更新，z=1 前景 renderOrder=2
 //   频谱环（弱化辅助）：uFreqTex 极坐标采样，低亮度系数
 //   彗星椭圆拖尾（20 点）：椭圆长轴沿鼠标方向，速度越快越长轴；头亮(accent)尾暗(tint)
-//   鼠标光斑（三层柔光）+ 点击涟漪 + 拖拽探头 + vignette + grain + ACES
+//   鼠标光斑（静止隐藏，移动时显现）+ 点击涟漪 + 拖拽探头 + vignette + grain + ACES
 // 封面色 K-Means tint + accent 驱动色彩；CSS 变量联动歌词
 // 节拍驱动：蓄能池 energy + ADSR 包络 env（无阶跃，流动响应）
 // 节拍检测：离线预分析（Spectral Flux + DP）+ realtime fallback（beatDetector.ts）
@@ -282,13 +282,14 @@ function useVisualEngine(
         if (uRipple2.w > 0.5 && age2 >= 0.0 && age2 <= 2.5)
           col += uAccent * sin(distance(uv, uRipple2.xy) * 30.0 - age2 * 8.0) * exp(-age2 * 1.5) * 0.10;
 
-        // === 鼠标光斑（弱化柔化，融入背景不抢戏）===
-        // v3.1.17: 降低亮度系数 + 大范围混白降饱和 + 内核缩小，避免 accent 色大面积铺开突兀
-        float mouseGlow = exp(-mDist * 3.5) * (0.20 + uMouseStrength * 0.3);
+        // === 鼠标光斑（静止时完全隐藏，移动时才显现，融入背景不抢戏）===
+        // v3.2.0: 去掉基础值，纯 uMouseStrength 驱动；静止时归零，移动时渐显（0.15s 平滑）
+        float ms = uMouseStrength;   // 静止=0（无光斑），移动时增大，松手后 0.15s 渐隐
+        float mouseGlow = exp(-mDist * 3.5) * ms;
         col += mix(uTint, vec3(0.6, 0.62, 0.68), 0.5) * mouseGlow * 0.30;
-        float mouseMid = exp(-mDist * 12.0) * (0.25 + uMouseStrength * 0.4);
+        float mouseMid = exp(-mDist * 12.0) * ms;
         col += mix(uTint, uAccent, 0.3) * mouseMid * 0.20;
-        float mouseCore = exp(-mDist * 60.0) * (0.40 + uMouseStrength * 0.3);
+        float mouseCore = exp(-mDist * 60.0) * ms;
         col += vec3(mouseCore * 0.25);
 
         // === 彗星椭圆拖尾（20 个，展开）===

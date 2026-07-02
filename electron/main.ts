@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, session, globalShortcut, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, session, globalShortcut, dialog, screen } from 'electron'
 import path from 'path'
 import { spawn } from 'child_process'
 
@@ -181,6 +181,13 @@ function createMainWindow() {
   })
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
+
+  // 无边框窗口最大化时覆盖整个屏幕（含任务栏区域），避免底部任务栏露出
+  mainWindow.on('maximize', () => {
+    if (!mainWindow) return
+    const display = screen.getDisplayMatching(mainWindow.getBounds())
+    mainWindow.setBounds(display.bounds)
+  })
 
   if (process.env.NODE_ENV === 'development' || process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173')
