@@ -35,10 +35,10 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v3.1.14 — Aurora 渐变色块 + 节拍冲击波 + 自然粒子点缀
+// Three.js 视觉引擎 v3.1.15 — 体积雾分层流动 + 节拍冲击波 + 自然粒子点缀
 // 单层架构（正交相机，单 PlaneGeometry(2,2) + ShaderMaterial）+ 35 颗粒子点缀：
-//   Aurora 渐变色块（4 块）：缓慢漂移融合（似 macOS Monterey 壁纸）+ 高斯模糊 + bass 膨胀 + 不抢戏（0.16）
-//     似有似无的氛围底色，给频谱环一个呼吸底，绝对不抢戏
+//   体积雾分层流动（氛围底色）：fbm 三层不同尺度/速度流动 + 频段分层（bass 下/mid 中/treble 上）
+//     大面积缓慢流动的雾 + 柔和消融 + 鼠标范围高斯发光（半径 0.18，增益克制不过曝），似晨雾流动，不抢戏
 //   节拍冲击波（4 层回响）：onBeat 时 FIFO 替换最旧，从中心扩散
 //     速度 0.15/0.20/0.25/0.30 形成回响层次，exp 衰减柔和环，亮度系数 0.30
 //   自然粒子点缀（35 颗）：value noise 驱动漂浮 + 鼠标附近轻微聚集 + 节拍微微亮
@@ -196,38 +196,38 @@ function useVisualEngine(
         float mDist = distance(uv, uMouseUV);
         float mSpeed = length(uMouseVel);
 
-        // 深色底（带之间透出，不铺满）
+        // 深色底（雾透出，不铺满）
         vec3 col = vec3(0.03, 0.04, 0.07);
 
-        // === Aurora 渐变网格色块（氛围底色，替代丝绸薄纱）===
-        // 4 个柔和色块缓慢漂移融合（似 macOS Monterey 壁纸/Stripe 官网）
-        // 大幅模糊（高斯衰减）+ 封面色同色系 + bass 脉动膨胀 + 不抢戏（系数 0.16）
+        // === 体积雾分层流动（氛围底色，替代 Aurora）===
+        // 大面积缓慢流动的雾，按频段分层：bass 亮下层、mid 亮中层、treble 亮上层
+        // fbm noise 驱动流动 + 柔和消融 + 鼠标范围发光（自然过渡，不过曝，范围克制）
         float t = uTime;
-        float bassPulse = 1.0 + uBass * 0.25;   // bass 来临时色块微微膨胀
-        // 4 个色块：中心位置缓慢漂移（不同速度不同方向），半径较大，高斯衰减形成柔和边缘
-        // 每个色块用一个偏移的 exp 衰减场，叠加形成 mesh gradient 融合效果
-        vec2 c0 = vec2(0.30 + sin(t * 0.05) * 0.10, 0.40 + cos(t * 0.04) * 0.08);
-        vec2 c1 = vec2(0.70 + sin(t * 0.06 + 1.5) * 0.10, 0.60 + cos(t * 0.05 + 1.5) * 0.08);
-        vec2 c2 = vec2(0.50 + sin(t * 0.045 + 3.0) * 0.12, 0.25 + cos(t * 0.055 + 3.0) * 0.10);
-        vec2 c3 = vec2(0.55 + sin(t * 0.055 + 4.5) * 0.10, 0.80 + cos(t * 0.04 + 4.5) * 0.08);
-        float r0 = 0.35 * bassPulse;
-        float r1 = 0.38 * bassPulse;
-        float r2 = 0.32 * bassPulse;
-        float r3 = 0.36 * bassPulse;
-        // 高斯衰减场（柔和模糊边缘）
-        float b0 = exp(-pow(distance(uv, c0) / r0, 2.0));
-        float b1 = exp(-pow(distance(uv, c1) / r1, 2.0));
-        float b2 = exp(-pow(distance(uv, c2) / r2, 2.0));
-        float b3 = exp(-pow(distance(uv, c3) / r3, 2.0));
-        // 颜色：封面色 tint/accent + 混合色，低饱和柔和（掺一点白）
-        vec3 auroraCol = vec3(0.0);
-        auroraCol += mix(uTint, uAccent, 0.2) * b0;          // 偏 tint
-        auroraCol += mix(uTint, uAccent, 0.5) * b1;          // 中间
-        auroraCol += mix(uTint, uAccent, 0.8) * b2;          // 偏 accent
-        auroraCol += mix(uTint, uAccent, 0.35) * b3;         // 偏 tint
-        auroraCol = mix(auroraCol, vec3(0.55, 0.57, 0.65), 0.30);  // 掺白降饱和
-        // 亮度系数 0.16（克制）+ uEnv 微微脉动（0.04 幅度小）
-        col += auroraCol * (0.16 + uEnv * 0.04);
+        // 雾密度场：fbm 流动，三层不同尺度/速度叠加
+        float fog1 = fbm(vec2(uv.x * 1.2 + t * 0.04, uv.y * 1.0 - t * 0.03));
+        float fog2 = fbm(vec2(uv.x * 2.0 - t * 0.05, uv.y * 1.8 + t * 0.04));
+        float fog3 = fbm(vec2(uv.x * 3.5 + t * 0.06, uv.y * 3.0 - t * 0.05));
+        // 频段分层：下层 bass / 中层 mid / 上层 treble（y 坐标决定层权重）
+        float lower = smoothstep(0.65, 0.25, uv.y);   // 下层（y 小，bass 区）
+        float middle = 1.0 - abs(uv.y - 0.5) * 2.0;   // 中层（y=0.5，mid 区）
+        middle = smoothstep(0.0, 0.6, middle);
+        float upper = smoothstep(0.35, 0.75, uv.y);   // 上层（y 大，treble 区）
+        float fogDensity = fog1 * (0.4 + uBass * 0.6) * lower
+                         + fog2 * (0.4 + uMid * 0.5) * middle
+                         + fog3 * (0.3 + uTreble * 0.5) * upper;
+        fogDensity = smoothstep(0.15, 0.85, fogDensity);  // 柔和消融边缘
+        // 鼠标范围发光：高斯衰减过渡（半径 0.18，自然不生硬）
+        // 鼠标在哪哪里的雾就亮，但增益适中（+0.25）不过曝，范围克制不抢主角
+        float mouseGlow = exp(-pow(distance(uv, uMouseUV) / 0.18, 2.0));
+        mouseGlow *= uMouseStrength;   // 鼠标移动时增强，静止时仍有基础值
+        fogDensity += mouseGlow * 0.25 * (0.5 + uMouseStrength * 0.5);
+        // 雾色：封面色 tint/accent 混合，掺白降饱和
+        vec3 fogCol = mix(uTint, uAccent, fog1 * 0.7);
+        fogCol = mix(fogCol, vec3(0.55, 0.57, 0.65), 0.30);
+        // 亮度系数 0.18（克制）+ uEnv 微微脉动
+        col += fogCol * fogDensity * (0.18 + uEnv * 0.05);
+        // 鼠标处雾的额外增亮（accent 色，自然融入雾色）
+        col += uAccent * mouseGlow * 0.10 * fogDensity;
 
         // === 节拍冲击波（4 层回响，从中心扩散，柔和 exp 衰减环）===
         // uShock0~3: vec4(x, y, startTime, intensity)；速度 0.15 + index*0.05 形成回响层次
