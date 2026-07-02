@@ -127,6 +127,13 @@ function useVisualEngine(
     // 封面色 tint + accent 驱动云雾颜色（深处压暗，高密度提亮）
     // ==================================================================
     const RIPPLE_MAX = 3;
+    // v3.1.7: 真实 FFT 频谱纹理——传给 shader 做极坐标频谱环（音频驱动形态，非封面色）
+    const FREQ_BINS = 128;
+    const freqTexData = new Uint8Array(FREQ_BINS * 4);
+    const freqTex = new THREE.DataTexture(freqTexData, FREQ_BINS, 1, THREE.RGBAFormat);
+    freqTex.needsUpdate = true;
+    freqTex.minFilter = THREE.LinearFilter;
+    freqTex.magFilter = THREE.LinearFilter;
     const uniforms = {
       uTime: { value: 0 },
       uBass: { value: 0 }, uMid: { value: 0 }, uTreble: { value: 0 },
@@ -137,6 +144,7 @@ function useVisualEngine(
       uMouseStrength: { value: 0 },
       uCamPan: { value: new THREE.Vector2(0, 0) },
       uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+      uFreqTex: { value: freqTex },
       // 用 3 个单独 vec4 代替数组 uniform（避免 GLSL ES 1.00 数组 uniform 驱动兼容问题）
       uRipple0: { value: new THREE.Vector4(0, 0, -10, 0) },
       uRipple1: { value: new THREE.Vector4(0, 0, -10, 0) },
@@ -147,6 +155,7 @@ function useVisualEngine(
       uniform vec3 uTint, uAccent;
       uniform vec2 uMouseUV, uCamPan, uResolution;
       uniform vec4 uRipple0, uRipple1, uRipple2;
+      uniform sampler2D uFreqTex;
       varying vec2 vUv;
       ${NOISE_GLSL}
 
@@ -157,78 +166,89 @@ function useVisualEngine(
       }
 
       vec3 sampleField(vec2 uv) {
-        // 1. 鼠标 domain warping（v3.1.5: 系数 0.12→0.38，移动时明显搅动云雾）
+        // === 极坐标（v3.1.7 核心：音频驱动形态，不再只是封面色密度） ===
+        vec2 centered = uv - 0.5;
+        float r = length(centered) * 2.0;          // 0(中心) ~ 1.4(角落)
+        float a = atan(centered.y, centered.x);     // -π ~ π
+        float normA = (a + 3.14159) / 6.28318;      // 0 ~ 1，用于采样频谱纹理
+
+        // === 1. 鼠标 domain warping ===
         float mDist = distance(uv, uMouseUV);
         vec2 mouseWarp = vec2(
           snoise(vec3(uv * 1.5, uTime * 0.08)),
           snoise(vec3(uv * 1.5 + 17.3, uTime * 0.08))
-        ) * (uMouseStrength + 0.06) * 0.38 * smoothstep(0.7, 0.0, mDist);
-        vec2 p = uv + mouseWarp - uCamPan;
+        ) * (uMouseStrength + 0.04) * 0.30 * smoothstep(0.7, 0.0, mDist);
 
-        // 2. 点击涟漪
+        // === 2. 点击涟漪 ===
         float ripple = 0.0;
         vec4 rps[3];
         rps[0] = uRipple0; rps[1] = uRipple1; rps[2] = uRipple2;
         for (int i = 0; i < 3; i++) {
-          vec4 r = rps[i];
-          if (r.w > 0.5) {
-            float age = uTime - r.z;
+          vec4 rr = rps[i];
+          if (rr.w > 0.5) {
+            float age = uTime - rr.z;
             if (age >= 0.0 && age <= 2.5) {
-              float d = distance(uv, r.xy);
-              ripple += sin(d * 30.0 - age * 8.0) * exp(-age * 1.5) * 0.18;
+              float d = distance(uv, rr.xy);
+              ripple += sin(d * 30.0 - age * 8.0) * exp(-age * 1.5) * 0.16;
             }
           }
         }
 
-        // 3. 节拍冲击波：从画面中心向外扩散（每个节拍触发一次）
+        // === 3. 真实 FFT 频谱环（v3.1.7 核心新功能）===
+        // 每个角度对应一个频率 bin，振幅决定该方向环的延伸——花瓣状频谱可视化
+        float freq = texture2D(uFreqTex, vec2(normA, 0.5)).r;
+        float freqMirror = texture2D(uFreqTex, vec2(1.0 - normA, 0.5)).r;
+        float freqAvg = (freq + freqMirror) * 0.5;
+        // 频谱环基础半径 + 振幅延伸
+        float ringBase = 0.42;
+        float ringR = ringBase + freqAvg * 0.42;     // 0.42 ~ 0.84
+        float ringW = 0.014 + uEnergy * 0.012;
+        // 环形亮度：当前半径接近 ringR 时亮
+        float specRing = exp(-pow((r - ringR) / ringW, 2.0)) * (0.5 + freqAvg * 0.8);
+        // 环内填充（轻微），让花瓣有体积感
+        float specFill = smoothstep(ringR, ringR - 0.12, r) * smoothstep(ringBase - 0.05, ringBase, r) * freqAvg * 0.25;
+
+        // === 4. 径向光线（从中心向外，treble 驱动闪烁）===
+        float rayNoise = snoise(vec3(normA * 16.0, uTime * 0.15, 0.0));
+        float rays = pow(max(0.0, rayNoise), 4.0) * (0.25 + uTreble * 0.85);
+        rays *= smoothstep(1.3, 0.15, r) * smoothstep(0.15, 0.35, r);  // 中心留空给能量核，边缘淡出
+
+        // === 5. 节拍冲击波（从中心扩散的圆环）===
         float beatWave = 0.0;
         if (uEnv > 0.01) {
-          float distFromCenter = distance(uv, vec2(0.5));
-          float wavePos = (1.0 - uEnv) * 0.8;
-          float waveDist = abs(distFromCenter - wavePos);
-          beatWave = exp(-waveDist * 12.0) * uEnv * 0.3;
+          float wavePos = 0.3 + (1.0 - uEnv) * 0.7;
+          float waveDist = abs(r - wavePos);
+          beatWave = exp(-waveDist * 14.0) * uEnv * 0.35;
         }
 
-        // 4. 流动极光带（v3.1.6: 2条水平流动光带，更宽更亮，随节拍摆动，bass 驱动）
-        float aurora = 0.0;
-        for (int g = 0; g < 2; g++) {
-          float fi = float(g);
-          float bandY = 0.3 + fi * 0.4
-            + sin(uTime * 0.15 + fi * 2.1) * 0.14
-            + uBass * 0.10 * sin(uTime * 0.3 + fi);
-          float bandDist = abs(uv.y - bandY);
-          float bandWidth = 0.09 + uEnergy * 0.05;
-          float band = exp(-bandDist * bandDist / (bandWidth * bandWidth * 2.0));
-          float flow = snoise(vec3(uv.x * 3.0 + uTime * 0.4, fi * 5.0, uTime * 0.1)) * 0.5 + 0.5;
-          aurora += band * flow;
-        }
-        aurora *= (0.5 + uEnergy * 0.5);
-
-        // 5. 多层 FBM 云雾——流动速度提高 3 倍，视觉上有明显流动感
-        float t = uTime * 0.18;
-        // bass 驱动整体缩放（低频膨胀感）
-        float bassZoom = 1.0 - uBass * 0.15;
+        // === 6. FBM 云雾基底（封面色氛围，作为背景而非主体）===
+        vec2 p = uv + mouseWarp - uCamPan;
+        float t = uTime * 0.10;
+        float bassZoom = 1.0 - uBass * 0.12;
         vec2 bp = p * bassZoom;
-        float cloud1 = fbm(vec3(bp * 0.8, t));
-        float cloud2 = fbm(vec3(bp * 1.6 + cloud1 * 0.3, t * 1.4 + 31.4));
-        float cloud3 = fbm(vec3(bp * 3.2 + cloud2 * 0.2, t * 2.2 + 73.2)) * 0.3;
-        float density = cloud1 * 0.5 + cloud2 * 0.35 + cloud3 * 0.15 + 0.45;
-        // energy 驱动密度大幅膨胀（原 0.5 太弱，提到 1.2）
-        density *= (0.6 + uEnergy * 1.2);
-        density += uBass * 0.2 + ripple + beatWave + aurora * 0.5;
-        density = clamp(density, 0.0, 1.5);
+        float cloud1 = fbm(vec3(bp * 0.7, t));
+        float cloud2 = fbm(vec3(bp * 1.4 + cloud1 * 0.3, t * 1.3 + 31.4));
+        float density = cloud1 * 0.5 + cloud2 * 0.3 + 0.30;
+        density *= (0.65 + uEnergy * 0.5);
 
-        // 6. 色彩混合——节拍来临时明显提亮 + 色彩偏移
-        vec3 col = mix(uTint * 0.55, uAccent * 0.85, density);
-        col = mix(vec3(0.08, 0.10, 0.16), col, smoothstep(-0.1, 0.65, density));
-        // 节拍能量爆发：高密度区在节拍时明显发光
-        col += uAccent * uEnergy * 0.35 * smoothstep(0.4, 1.0, density);
-        // env 节拍脉冲：整个画面在节拍来临时变亮（明显感知）
-        col += vec3(0.12, 0.08, 0.04) * uEnv;
+        // === 7. 合成：结构层（频谱环+光线+冲击波）+ 氛围层（云雾）===
+        float struct = specRing + specFill + rays * 0.7 + beatWave + ripple;
+        float total = density * 0.55 + struct;
+
+        // 色彩：氛围用封面色，结构层偏亮（accent + 白）让形态清晰
+        vec3 col = mix(uTint * 0.4, uAccent * 0.7, density);
+        col = mix(vec3(0.05, 0.07, 0.12), col, smoothstep(-0.1, 0.55, density));
+        // 频谱环：accent 色高亮 + 白色强化
+        col += uAccent * specRing * 0.9;
+        col += vec3(specRing * 0.3);
+        // 径向光线：tint 色清亮
+        col += uTint * rays * 0.6;
         // 冲击波发光
-        col += uAccent * beatWave * 0.5;
-        // 极光带发光（偏 tint 色，清亮，v3.1.6 增强亮度）
-        col += mix(uTint, uAccent, 0.3) * aurora * 0.9;
+        col += uAccent * beatWave * 0.6;
+        // 节拍整体脉冲
+        col += vec3(0.10, 0.07, 0.04) * uEnv;
+        // bass 膨胀感
+        col += uAccent * uBass * 0.12 * smoothstep(0.6, 0.0, r);
         return col;
       }
 
@@ -438,8 +458,28 @@ function useVisualEngine(
         smoothMid = smoothLerp(smoothMid, bands.mid, 0.15);
         smoothTreb = smoothLerp(smoothTreb, bands.treble, 0.18);
         smoothEnergy = smoothLerp(smoothEnergy, bands.level, 0.15);
+        // v3.1.7: 把 FFT 数据写入纹理，传给 shader 做极坐标频谱环
+        // 对数采样 128 个 bin，低频密集高频稀疏，写入 RGBA 的 R 通道（0~255）
+        const fb = freqData.length;
+        for (let i = 0; i < FREQ_BINS; i++) {
+          const tt = i / (FREQ_BINS - 1);
+          const idx = Math.floor(Math.pow(tt, 1.7) * (fb * 0.65));
+          const v = (freqData[Math.min(fb - 1, idx)] || 0);
+          freqTexData[i * 4] = v;
+          freqTexData[i * 4 + 1] = v;
+          freqTexData[i * 4 + 2] = v;
+          freqTexData[i * 4 + 3] = 255;
+        }
+        freqTex.needsUpdate = true;
       } else {
         smoothBass *= 0.94; smoothMid *= 0.94; smoothTreb *= 0.94; smoothEnergy *= 0.94;
+        // 暂停时频谱纹理缓慢衰减
+        for (let i = 0; i < FREQ_BINS * 4; i += 4) {
+          freqTexData[i] = Math.floor(freqTexData[i] * 0.92);
+          freqTexData[i + 1] = freqTexData[i];
+          freqTexData[i + 2] = freqTexData[i];
+        }
+        freqTex.needsUpdate = true;
       }
 
       // === v2.3 蓄能池慢释放 + ADSR 包络（保留，平滑趋近，无阶跃） ===
