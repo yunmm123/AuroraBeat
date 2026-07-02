@@ -310,11 +310,11 @@ html, body {
   transform: scale(1) translateY(0) translateZ(0);
   opacity: 1;
   filter: blur(0);
-  /* v3.3.2: 渐变改为以白色为主（避免长歌词换行后首行深末行浅看不清）
-     tint 仅在顶部 15% 微染（保留封面色呼应），中段到末段全白保证可读性 */
+  /* v3.3.3: 渐变柔和过渡——tint 与 white 之间用中段混合色，避免首行深末行浅的悬殊对比
+     顶部 tint（封面色呼应）→ 中段混合色（tint+white 自然过渡）→ 末段接近白（保证可读） */
   background: linear-gradient(180deg,
     var(--cover-tint, #00f5d4) 0%,
-    #ffffff 15%,
+    color-mix(in srgb, var(--cover-tint, #00f5d4) 35%, #ffffff 65%) 50%,
     #ffffff 100%);
   -webkit-background-clip: text;
   background-clip: text;
