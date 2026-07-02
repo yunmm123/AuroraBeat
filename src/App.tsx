@@ -219,15 +219,16 @@ function useVisualEngine(
         // 鼠标范围发光：高斯衰减过渡（半径 0.18，自然不生硬）
         // 鼠标在哪哪里的雾就亮，但增益适中（+0.25）不过曝，范围克制不抢主角
         float mouseGlow = exp(-pow(distance(uv, uMouseUV) / 0.18, 2.0));
-        mouseGlow *= uMouseStrength;   // 鼠标移动时增强，静止时仍有基础值
-        fogDensity += mouseGlow * 0.25 * (0.5 + uMouseStrength * 0.5);
+        mouseGlow *= uMouseStrength;   // 鼠标移动时增强，静止时归零（符合"当鼠标移动时"）
+        fogDensity += mouseGlow * 0.25;   // 鼠标处雾密度提升（雾聚过来更浓）
         // 雾色：封面色 tint/accent 混合，掺白降饱和
         vec3 fogCol = mix(uTint, uAccent, fog1 * 0.7);
         fogCol = mix(fogCol, vec3(0.55, 0.57, 0.65), 0.30);
         // 亮度系数 0.18（克制）+ uEnv 微微脉动
         col += fogCol * fogDensity * (0.18 + uEnv * 0.05);
-        // 鼠标处雾的额外增亮（accent 色，自然融入雾色）
-        col += uAccent * mouseGlow * 0.10 * fogDensity;
+        // 鼠标处雾发光：雾色+accent 混合，独立增益不依赖 fogDensity
+        // （保证鼠标停在雾消融区也能看到发光，符合"既不会看不到"；增益 0.13 克制不过曝）
+        col += mix(fogCol, uAccent, 0.4) * mouseGlow * 0.13;
 
         // === 节拍冲击波（4 层回响，从中心扩散，柔和 exp 衰减环）===
         // uShock0~3: vec4(x, y, startTime, intensity)；速度 0.15 + index*0.05 形成回响层次
