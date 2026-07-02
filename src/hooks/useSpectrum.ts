@@ -2,9 +2,9 @@ import { useEffect, useRef } from 'react';
 import { usePlayer } from '../hooks/usePlayer';
 
 /**
- * v3.2.0 频谱可视化 hook（重做：自然融合，不抢戏也不看不见）
+ * v3.2.2 频谱可视化 hook（6 色渐变：从封面阴影→中暗→主→副→中亮→高光）
  * 在底部播放栏上方渲染居中镜像频谱条
- * - tint→accent 双色渐变（与主界面 shader 双色调一致，无彩虹）
+ * - 6 色渐变（按亮度从底到顶），呈现封面完整色彩构成
  * - 去掉顶部白高光，降低透明度，柔和融入背景
  * - 对数采样 + 居中镜像 + 峰值保持（缓慢下落，避免闪烁）
  */
@@ -51,6 +51,10 @@ export function useSpectrum(canvasRef: React.RefObject<HTMLCanvasElement>) {
 
       const [tr, tg, tb] = readCssColor('--cover-tint', [0, 245, 212]);
       const [ar, ag, ab] = readCssColor('--cover-accent', [200, 168, 122]);
+      const [hr, hg, hb] = readCssColor('--cover-highlight', [244, 232, 208]);
+      const [mr, mg, mb] = readCssColor('--cover-midlight', [216, 184, 144]);
+      const [dr, dg, db] = readCssColor('--cover-middark', [58, 66, 82]);
+      const [sr, sg, sb] = readCssColor('--cover-shadow', [10, 12, 18]);
 
       const analyser = player.getAnalyser();
       if (!analyser) return;
@@ -89,12 +93,15 @@ export function useSpectrum(canvasRef: React.RefObject<HTMLCanvasElement>) {
         const xRight = midX + j * (barW + gap);
 
         for (const x of [xLeft, xRight]) {
-          // tint→accent 双色渐变（与主界面 shader 双色调一致，无彩虹）
-          // 底部 tint 低透明 → 顶部 accent 高透明，柔和融入背景不抢戏
+          // 6 色渐变（按亮度从底到顶）：shadow→midDark→tint→accent→midLight→highlight
+          // 呈现封面完整色彩构成，从底到顶由暗到亮自然过渡，柔和融入背景不抢戏
           const grad = ctx.createLinearGradient(0, baseY, 0, baseY - barH);
-          grad.addColorStop(0, `rgba(${tr},${tg},${tb},0.22)`);
-          grad.addColorStop(0.6, `rgba(${tr},${tg},${tb},0.50)`);
-          grad.addColorStop(1, `rgba(${ar},${ag},${ab},0.70)`);
+          grad.addColorStop(0, `rgba(${sr},${sg},${sb},0.30)`);
+          grad.addColorStop(0.2, `rgba(${dr},${dg},${db},0.45)`);
+          grad.addColorStop(0.4, `rgba(${tr},${tg},${tb},0.55)`);
+          grad.addColorStop(0.6, `rgba(${ar},${ag},${ab},0.65)`);
+          grad.addColorStop(0.8, `rgba(${mr},${mg},${mb},0.72)`);
+          grad.addColorStop(1, `rgba(${hr},${hg},${hb},0.80)`);
           ctx.fillStyle = grad;
           const r = Math.min(barW / 2, 2);
           ctx.beginPath();

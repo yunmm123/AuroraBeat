@@ -35,7 +35,7 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v3.2.0 — 节拍绽放光晕 + 频谱环 + 远景星尘 + 自然粒子点缀
+// Three.js 视觉引擎 v3.2.2 — 6 色调色板驱动各元素（节拍绽放光晕 + 频谱环 + 远景星尘 + 自然粒子点缀）
 // 单层架构（正交相机，单 PlaneGeometry(2,2) + ShaderMaterial）+ 35 颗粒子点缀：
 //   远景星尘（~144 颗）：网格 hash 生成位置/亮度/闪烁相位，静态不互动不节拍
 //     极小极暗铺满背景增加纵深，偏白偏冷融入夜空；区别于前景 35 颗粒子（大/互动/节拍亮）
@@ -48,7 +48,9 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 //   频谱环（弱化辅助）：uFreqTex 极坐标采样，低亮度系数
 //   彗星椭圆拖尾（20 点）：椭圆长轴沿鼠标方向，速度越快越长轴；头亮(accent)尾暗(tint)
 //   鼠标光斑（静止隐藏，移动时显现）+ 点击涟漪 + 拖拽探头 + vignette + grain + ACES
-// 封面色 K-Means tint + accent 驱动色彩；CSS 变量联动歌词
+// 封面色 K-Means 6 色调色板（按亮度分层）：shadow/midDark/tint/accent/midLight/highlight
+//   各元素分配不同色：背景shadow/星尘highlight/冲击波tint/频谱环accent/绽放midLight/拖尾头accent尾midDark
+//   主界面色彩构成能大致反映封面，不单调不突兀；CSS 变量联动歌词+频谱条
 // 节拍驱动：蓄能池 energy + ADSR 包络 env（无阶跃，流动响应）
 // 节拍检测：离线预分析（Spectral Flux + DP）+ realtime fallback（beatDetector.ts）
 // 封面取色：K-Means 主色 tint + 副色 accent，驱动色彩
@@ -94,9 +96,13 @@ function useVisualEngine(
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
 
-    // 封面主色（K-Means 提取，驱动 tint + accent 双色 → 流光色彩）
-    const tintColor = new THREE.Color('#7a8fa6');
-    const accentColor = new THREE.Color('#c8a87a');
+    // 封面 6 色调色板（K-Means 按亮度分层提取，各元素分配不同色，主界面能大致看清封面色彩构成）
+    const shadowColor = new THREE.Color('#0a0c12');     // 最暗阴影（背景底色）
+    const midDarkColor = new THREE.Color('#3a4252');    // 中暗（拖尾尾部）
+    const tintColor = new THREE.Color('#7a8fa6');       // 主色（冲击波）
+    const accentColor = new THREE.Color('#c8a87a');     // 副色（频谱环/拖尾头）
+    const midLightColor = new THREE.Color('#d8b890');   // 中亮（绽放光晕/粒子）
+    const highlightColor = new THREE.Color('#f4e8d0');  // 最亮高光（星尘）
 
     // ==================================================================
     // 渐变流光 shader（全屏 quad）
@@ -117,6 +123,8 @@ function useVisualEngine(
       uEnergy: { value: 0 }, uEnv: { value: 0 },
       uAlpha: { value: 0 }, uIntensity: { value: intensity },
       uTint: { value: tintColor }, uAccent: { value: accentColor },
+      uHighlight: { value: highlightColor }, uMidLight: { value: midLightColor },
+      uMidDark: { value: midDarkColor }, uShadow: { value: shadowColor },
       uMouseUV: { value: new THREE.Vector2(0.5, 0.5) },
       uMouseStrength: { value: 0 },
       uMouseVel: { value: new THREE.Vector2(0, 0) },        // 鼠标速度向量（彗星椭圆拉伸方向）
@@ -158,7 +166,7 @@ function useVisualEngine(
     const fieldFS = `
       precision highp float;
       uniform float uTime, uBass, uMid, uTreble, uEnergy, uEnv, uAlpha, uIntensity, uMouseStrength;
-      uniform vec3 uTint, uAccent;
+      uniform vec3 uTint, uAccent, uHighlight, uMidLight, uMidDark, uShadow;
       uniform vec2 uMouseUV, uMouseVel, uCamPan, uResolution;
       uniform vec4 uRipple0, uRipple1, uRipple2;
       uniform vec4 uShock0, uShock1, uShock2, uShock3;   // 节拍冲击波（x, y, startTime, intensity）
@@ -198,13 +206,13 @@ function useVisualEngine(
         float mDist = distance(uv, uMouseUV);
         float mSpeed = length(uMouseVel);
 
-        // 深色底（封面 tint 压暗到 ~12%，带之间透出，不铺满；跟随封面色调）
-        vec3 col = uTint * 0.12;
+        // 深色底（封面最暗阴影色 uShadow，带之间透出，不铺满）
+        vec3 col = uShadow;
 
         // === 远景星尘（网格 hash 生成，~144 颗静态闪烁，纵深背景不抢戏）===
         // 每格一颗星，hash 决定位置/亮度/闪烁相位；极小极暗铺满背景增加纵深
         // 不互动不节拍，区别于前景 35 颗粒子（大/互动/节拍亮）
-        // 星点色 = tint/accent 混合提亮（跟随封面色，偏亮融入夜空，而非固定冷白色）
+        // 星点色 = highlight/midLight 混合（最亮色，星星本就该亮，区别于其他元素）
         vec2 sGrid = uv * 12.0;
         vec2 sGid = floor(sGrid);
         vec2 sGf = fract(sGrid);
@@ -214,7 +222,7 @@ function useVisualEngine(
         float sTwinkle = 0.6 + 0.4 * sin(uTime * (0.4 + sTw * 1.2) + sTw * 6.28);
         float sBright = hash(sGid + 9.1);
         float sStar = exp(-sD * 90.0) * sTwinkle * (0.3 + sBright * 0.7);
-        vec3 sCol = mix(uTint, uAccent, sBright) * 1.2 + vec3(0.25);  // 提亮 + 少量白保证可见
+        vec3 sCol = mix(uMidLight, uHighlight, sBright);  // 中亮→最亮渐变（跟随封面色）
         col += sCol * sStar * 0.18;
 
         // === 节拍冲击波（4 层回响，从中心扩散，柔和 exp 衰减环）===
@@ -249,7 +257,7 @@ function useVisualEngine(
             float dr = distance(uv, uShock3.xy) - radius;
             shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock3.w;
           } }
-        col += uAccent * shockSum * 0.18;   // 亮度系数 0.18（弱化，让位绽放光晕）
+        col += uTint * shockSum * 0.18;   // 冲击波用主色 tint（区别于频谱环 accent/绽放 midLight）
 
         // === 频谱环（弱化辅助：uFreqTex 极坐标采样，低亮度，不抢戏）===
         float aRot = ang + uTime * 0.15;
@@ -271,7 +279,7 @@ function useVisualEngine(
         float petal = 0.65 + 0.35 * sin(ang * 6.0 + uTime * 0.25);  // 6 瓣花瓣缓慢旋转
         float bloom = exp(-pow((r - bloomR) / bloomW, 2.0)) * petal;
         bloom *= (0.15 + uEnv * 0.25);                    // 静止 0.15 可见 + 节拍增亮
-        col += mix(uTint, uAccent, 0.5) * bloom * 0.25;   // tint/accent 混合，与圆环纯 accent 区分
+        col += uMidLight * bloom * 0.25;   // 绽放光晕用中亮色（区别于频谱环 accent/冲击波 tint）
 
         // === 点击涟漪（3 个，展开）===
         float age0 = uTime - uRipple0.z;
@@ -296,71 +304,71 @@ function useVisualEngine(
 
         // === 彗星椭圆拖尾（20 个，展开）===
         // 椭圆长轴沿鼠标移动方向，短轴垂直；速度越快越长轴
-        // 头部 uTrail0（最新，亮 accent）→ 尾部 uTrail19（最旧，暗 tint），透明度递减
+        // 头部 uTrail0（最新，亮 accent）→ 尾部 uTrail19（最旧，暗 midDark），透明度递减
         float angM = atan(uMouseVel.y, uMouseVel.x);
         float cm = cos(angM), sm = sin(angM);
         float longAxis = 0.02 + mSpeed * 0.15;
         float shortAxis = 0.015;
         // trail0（头部，最新）
         { vec2 d = uv - uTrail0.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail0.z;
-          if (uTrail0.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,0.0/20.0)*glow*(1.0 - 0.0/20.0*0.5); } }
+          if (uTrail0.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,0.0/20.0)*glow*(1.0 - 0.0/20.0*0.5); } }
         // trail1
         { vec2 d = uv - uTrail1.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail1.z;
-          if (uTrail1.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,1.0/20.0)*glow*(1.0 - 1.0/20.0*0.5); } }
+          if (uTrail1.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,1.0/20.0)*glow*(1.0 - 1.0/20.0*0.5); } }
         // trail2
         { vec2 d = uv - uTrail2.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail2.z;
-          if (uTrail2.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,2.0/20.0)*glow*(1.0 - 2.0/20.0*0.5); } }
+          if (uTrail2.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,2.0/20.0)*glow*(1.0 - 2.0/20.0*0.5); } }
         // trail3
         { vec2 d = uv - uTrail3.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail3.z;
-          if (uTrail3.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,3.0/20.0)*glow*(1.0 - 3.0/20.0*0.5); } }
+          if (uTrail3.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,3.0/20.0)*glow*(1.0 - 3.0/20.0*0.5); } }
         // trail4
         { vec2 d = uv - uTrail4.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail4.z;
-          if (uTrail4.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,4.0/20.0)*glow*(1.0 - 4.0/20.0*0.5); } }
+          if (uTrail4.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,4.0/20.0)*glow*(1.0 - 4.0/20.0*0.5); } }
         // trail5
         { vec2 d = uv - uTrail5.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail5.z;
-          if (uTrail5.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,5.0/20.0)*glow*(1.0 - 5.0/20.0*0.5); } }
+          if (uTrail5.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,5.0/20.0)*glow*(1.0 - 5.0/20.0*0.5); } }
         // trail6
         { vec2 d = uv - uTrail6.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail6.z;
-          if (uTrail6.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,6.0/20.0)*glow*(1.0 - 6.0/20.0*0.5); } }
+          if (uTrail6.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,6.0/20.0)*glow*(1.0 - 6.0/20.0*0.5); } }
         // trail7
         { vec2 d = uv - uTrail7.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail7.z;
-          if (uTrail7.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,7.0/20.0)*glow*(1.0 - 7.0/20.0*0.5); } }
+          if (uTrail7.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,7.0/20.0)*glow*(1.0 - 7.0/20.0*0.5); } }
         // trail8
         { vec2 d = uv - uTrail8.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail8.z;
-          if (uTrail8.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,8.0/20.0)*glow*(1.0 - 8.0/20.0*0.5); } }
+          if (uTrail8.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,8.0/20.0)*glow*(1.0 - 8.0/20.0*0.5); } }
         // trail9
         { vec2 d = uv - uTrail9.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail9.z;
-          if (uTrail9.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,9.0/20.0)*glow*(1.0 - 9.0/20.0*0.5); } }
+          if (uTrail9.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,9.0/20.0)*glow*(1.0 - 9.0/20.0*0.5); } }
         // trail10
         { vec2 d = uv - uTrail10.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail10.z;
-          if (uTrail10.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,10.0/20.0)*glow*(1.0 - 10.0/20.0*0.5); } }
+          if (uTrail10.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,10.0/20.0)*glow*(1.0 - 10.0/20.0*0.5); } }
         // trail11
         { vec2 d = uv - uTrail11.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail11.z;
-          if (uTrail11.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,11.0/20.0)*glow*(1.0 - 11.0/20.0*0.5); } }
+          if (uTrail11.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,11.0/20.0)*glow*(1.0 - 11.0/20.0*0.5); } }
         // trail12
         { vec2 d = uv - uTrail12.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail12.z;
-          if (uTrail12.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,12.0/20.0)*glow*(1.0 - 12.0/20.0*0.5); } }
+          if (uTrail12.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,12.0/20.0)*glow*(1.0 - 12.0/20.0*0.5); } }
         // trail13
         { vec2 d = uv - uTrail13.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail13.z;
-          if (uTrail13.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,13.0/20.0)*glow*(1.0 - 13.0/20.0*0.5); } }
+          if (uTrail13.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,13.0/20.0)*glow*(1.0 - 13.0/20.0*0.5); } }
         // trail14
         { vec2 d = uv - uTrail14.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail14.z;
-          if (uTrail14.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,14.0/20.0)*glow*(1.0 - 14.0/20.0*0.5); } }
+          if (uTrail14.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,14.0/20.0)*glow*(1.0 - 14.0/20.0*0.5); } }
         // trail15
         { vec2 d = uv - uTrail15.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail15.z;
-          if (uTrail15.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,15.0/20.0)*glow*(1.0 - 15.0/20.0*0.5); } }
+          if (uTrail15.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,15.0/20.0)*glow*(1.0 - 15.0/20.0*0.5); } }
         // trail16
         { vec2 d = uv - uTrail16.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail16.z;
-          if (uTrail16.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,16.0/20.0)*glow*(1.0 - 16.0/20.0*0.5); } }
+          if (uTrail16.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,16.0/20.0)*glow*(1.0 - 16.0/20.0*0.5); } }
         // trail17
         { vec2 d = uv - uTrail17.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail17.z;
-          if (uTrail17.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,17.0/20.0)*glow*(1.0 - 17.0/20.0*0.5); } }
+          if (uTrail17.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,17.0/20.0)*glow*(1.0 - 17.0/20.0*0.5); } }
         // trail18
         { vec2 d = uv - uTrail18.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail18.z;
-          if (uTrail18.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,18.0/20.0)*glow*(1.0 - 18.0/20.0*0.5); } }
+          if (uTrail18.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,18.0/20.0)*glow*(1.0 - 18.0/20.0*0.5); } }
         // trail19（尾部，最旧）
         { vec2 d = uv - uTrail19.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail19.z;
-          if (uTrail19.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,19.0/20.0)*glow*(1.0 - 19.0/20.0*0.5); } }
+          if (uTrail19.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uMidDark,19.0/20.0)*glow*(1.0 - 19.0/20.0*0.5); } }
 
         // Vignette
         float vignette = smoothstep(1.5, 0.25, length(uv - 0.5) * 1.3);
@@ -421,8 +429,8 @@ function useVisualEngine(
     const particleUniforms = {
       uBeatPulse: { value: 0 },
       uPixelRatio: { value: renderer.getPixelRatio() },
-      uTint: { value: tintColor },
-      uAccent: { value: accentColor },
+      uTint: { value: midLightColor },       // 粒子用中亮色（区别于频谱环 accent）
+      uAccent: { value: highlightColor },     // 粒子高光用最亮色
     };
     const particleVS = `
       attribute float aSize;
@@ -833,6 +841,14 @@ function useVisualEngine(
         `rgb(${(tintColor.r * 255) | 0},${(tintColor.g * 255) | 0},${(tintColor.b * 255) | 0})`);
       rootStyle.setProperty('--cover-accent',
         `rgb(${(accentColor.r * 255) | 0},${(accentColor.g * 255) | 0},${(accentColor.b * 255) | 0})`);
+      rootStyle.setProperty('--cover-highlight',
+        `rgb(${(highlightColor.r * 255) | 0},${(highlightColor.g * 255) | 0},${(highlightColor.b * 255) | 0})`);
+      rootStyle.setProperty('--cover-midlight',
+        `rgb(${(midLightColor.r * 255) | 0},${(midLightColor.g * 255) | 0},${(midLightColor.b * 255) | 0})`);
+      rootStyle.setProperty('--cover-middark',
+        `rgb(${(midDarkColor.r * 255) | 0},${(midDarkColor.g * 255) | 0},${(midDarkColor.b * 255) | 0})`);
+      rootStyle.setProperty('--cover-shadow',
+        `rgb(${(shadowColor.r * 255) | 0},${(shadowColor.g * 255) | 0},${(shadowColor.b * 255) | 0})`);
       rootStyle.setProperty('--lyric-active', curActiveIdx >= 0 ? '1' : '0');
 
       renderer.render(scene, camera);
@@ -883,7 +899,7 @@ function useVisualEngine(
     };
     window.addEventListener('resize', onResize);
 
-    // 封面主色 K-Means 提取（保留现有逻辑，驱动 tint + accent 双色 → 流光色彩）
+    // 封面 6 色调色板提取（K-Means 按亮度分层，各元素分配不同色，主界面能大致看清封面色彩构成）
     const updateCover = (coverUrl: string) => {
       if (!coverUrl) return;
       const img = new Image();
@@ -895,10 +911,9 @@ function useVisualEngine(
         const ctx = cv.getContext('2d')!;
         const s = Math.min(img.naturalWidth, img.naturalHeight);
         ctx.drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, size, size);
-        // K-Means 简化版：选两个对比度最高的色（主色 tint + 副色 accent）
+        // K-Means 简化版：量化到色桶，按亮度分 6 层，每层取像素数最多的色
         try {
           const src = ctx.getImageData(0, 0, size, size).data;
-          // 量化到 16 色桶
           const buckets: Record<string, { r: number; g: number; b: number; n: number; sat: number; lum: number }> = {};
           for (let i = 0; i < src.length; i += 4) {
             const r = src[i], g = src[i + 1], b = src[i + 2];
@@ -915,23 +930,28 @@ function useVisualEngine(
             r: bk.r / bk.n, g: bk.g / bk.n, b: bk.b / bk.n,
             sat: bk.sat, lum: bk.lum, n: bk.n,
           }));
-          // 主色：像素数 × 饱和度 排序，避开过暗过亮
-          const candidates = arr.filter(a => a.lum > 0.12 && a.lum < 0.85).sort((a, b) => (b.n * b.sat) - (a.n * a.sat));
-          if (candidates.length > 0) {
-            const main = candidates[0];
-            const mainCol = new THREE.Color(main.r / 255, main.g / 255, main.b / 255);
-            gsap.to(tintColor, { r: mainCol.r, g: mainCol.g, b: mainCol.b, duration: 1.5, ease: 'power2.inOut' });
-            // 副色：与主色色相距离最远的候选
-            let accent = candidates[0];
-            let maxDist = -1;
-            for (const c of candidates.slice(0, 8)) {
-              const dr = c.r - main.r, dg = c.g - main.g, db = c.b - main.b;
-              const d = dr * dr + dg * dg + db * db;
-              if (d > maxDist) { maxDist = d; accent = c; }
+          // 按亮度分 6 层：[0,0.16) shadow / [0.16,0.34) midDark / [0.34,0.52) tint
+          // / [0.52,0.70) accent / [0.70,0.85) midLight / [0.85,1.0] highlight
+          // 每层取 像素数×饱和度 最高的候选（饱和度权重避免取到纯白纯黑）
+          const layers = [
+            { range: [0, 0.16], target: shadowColor },
+            { range: [0.16, 0.34], target: midDarkColor },
+            { range: [0.34, 0.52], target: tintColor },
+            { range: [0.52, 0.70], target: accentColor },
+            { range: [0.70, 0.85], target: midLightColor },
+            { range: [0.85, 1.01], target: highlightColor },
+          ];
+          for (const layer of layers) {
+            const cands = arr.filter(a => a.lum >= layer.range[0] && a.lum < layer.range[1])
+                             .sort((a, b) => (b.n * (0.3 + b.sat)) - (a.n * (0.3 + a.sat)));
+            if (cands.length > 0) {
+              const c = cands[0];
+              const col = new THREE.Color(c.r / 255, c.g / 255, c.b / 255);
+              gsap.to(layer.target, { r: col.r, g: col.g, b: col.b, duration: 1.5, ease: 'power2.inOut' });
             }
-            const accentCol = new THREE.Color(accent.r / 255, accent.g / 255, accent.b / 255);
-            gsap.to(accentColor, { r: accentCol.r, g: accentCol.g, b: accentCol.b, duration: 1.5, ease: 'power2.inOut' });
           }
+          // 兜底：若某层无候选（极端封面），从相邻层借用
+          // （gsap 未触发则保持上一首颜色，过渡自然，不强制）
         } catch {}
       };
       img.onerror = () => {};
