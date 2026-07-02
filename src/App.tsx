@@ -35,11 +35,15 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v3.1.12 — 单层渐变流光 + 彗星椭圆拖尾
-// 单层架构（正交相机，单 PlaneGeometry(2,2) + ShaderMaterial）：
-//   流动光带（6 条）：沿 y 轴流动 + sin/value noise 扭曲 + fbm 显隐呼吸
-//     + 中心 sheen 高光 + 颜色 uTint→uAccent 沿流向渐变 + 节拍亮度/宽度脉冲
-//   频谱环（弱化辅助）：uFreqTex 极坐标采样，低亮度系数，不抢戏
+// Three.js 视觉引擎 v3.1.13 — 丝绸薄纱 + 节拍冲击波 + 自然粒子点缀
+// 单层架构（正交相机，单 PlaneGeometry(2,2) + ShaderMaterial）+ 35 颗粒子点缀：
+//   丝绸薄纱（6 条）：极低亮度流动带（系数 0.12）+ 饱和度降低（掺白）+ 速度放慢
+//     似有似无的氛围底色，给频谱环一个呼吸底，绝对不抢戏
+//   节拍冲击波（4 层回响）：onBeat 时 FIFO 替换最旧，从中心扩散
+//     速度 0.15/0.20/0.25/0.30 形成回响层次，exp 衰减柔和环，亮度系数 0.30
+//   自然粒子点缀（35 颗）：value noise 驱动漂浮 + 鼠标附近轻微聚集 + 节拍微微亮
+//     additive blending，软发光圆点，CPU 更新，z=1 前景 renderOrder=2
+//   频谱环（弱化辅助）：uFreqTex 极坐标采样，低亮度系数
 //   彗星椭圆拖尾（20 点）：椭圆长轴沿鼠标方向，速度越快越长轴；头亮(accent)尾暗(tint)
 //   鼠标光斑（三层柔光）+ 点击涟漪 + 拖拽探头 + vignette + grain + ACES
 // 封面色 K-Means tint + accent 驱动色彩；CSS 变量联动歌词
@@ -143,6 +147,11 @@ function useVisualEngine(
       uRipple0: { value: new THREE.Vector4(0, 0, -10, 0) },
       uRipple1: { value: new THREE.Vector4(0, 0, -10, 0) },
       uRipple2: { value: new THREE.Vector4(0, 0, -10, 0) },
+      // 节拍冲击波（4 层回响，vec4(x, y, startTime, intensity)）；onBeat 时 FIFO 替换最旧
+      uShock0: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uShock1: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uShock2: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uShock3: { value: new THREE.Vector4(0, 0, -10, 0) },
     };
     const fieldFS = `
       precision highp float;
@@ -150,6 +159,7 @@ function useVisualEngine(
       uniform vec3 uTint, uAccent;
       uniform vec2 uMouseUV, uMouseVel, uCamPan, uResolution;
       uniform vec4 uRipple0, uRipple1, uRipple2;
+      uniform vec4 uShock0, uShock1, uShock2, uShock3;   // 节拍冲击波（x, y, startTime, intensity）
       uniform vec4 uTrail0, uTrail1, uTrail2, uTrail3, uTrail4, uTrail5, uTrail6, uTrail7;
       uniform vec4 uTrail8, uTrail9, uTrail10, uTrail11, uTrail12, uTrail13, uTrail14, uTrail15;
       uniform vec4 uTrail16, uTrail17, uTrail18, uTrail19;
@@ -189,28 +199,66 @@ function useVisualEngine(
         // 深色底（带之间透出，不铺满）
         vec3 col = vec3(0.03, 0.04, 0.07);
 
-        // === 流动光带（6 条，常量循环）===
-        // 每条带：沿 y 流动 + sin/value noise 扭曲 + fbm 显隐呼吸 + 中心 sheen 高光
-        // uBass 驱动摆动幅度，uEnv 驱动带宽膨胀 + 亮度脉冲
+        // === 丝绸薄纱（6 条流动带，极低亮度氛围底色，似有似无）===
+        // 保留流动逻辑但大幅降亮度：系数 0.12 + 饱和度降低（掺白）+ 速度放慢
+        // uBass 驱动摆动幅度（减半），uEnv 微调带宽膨胀 + 微小亮度脉冲
         float t = uTime;
-        float wobbleAmp = 0.035 + uBass * 0.12;
-        float bandWidth = 0.022 + uEnv * 0.012;
+        float wobbleAmp = 0.030 + uBass * 0.06;
+        float bandWidth = 0.025 + uEnv * 0.008;
         for (int i = 0; i < 6; i++) {
           float fi = float(i);
           float phase = fi * 0.83;
-          float flowY = uv.y + t * (0.05 + fi * 0.012) + phase;
-          float xCenter = 0.5 + sin(fi * 1.7 + t * 0.25) * 0.28;
-          float xWobble = sin(uv.y * (2.5 + fi * 0.6) + t * (0.4 + fi * 0.08) + phase) * wobbleAmp
-                        + (vnoise(vec2(uv.y * (2.0 + fi * 0.3), t * 0.2 + phase)) - 0.5) * wobbleAmp * 2.0;
+          // 流速减半（更优雅）
+          float flowY = uv.y + t * (0.025 + fi * 0.006) + phase;
+          float xCenter = 0.5 + sin(fi * 1.7 + t * 0.12) * 0.28;
+          float xWobble = sin(uv.y * (2.5 + fi * 0.6) + t * (0.20 + fi * 0.04) + phase) * wobbleAmp
+                        + (vnoise(vec2(uv.y * (2.0 + fi * 0.3), t * 0.10 + phase)) - 0.5) * wobbleAmp * 2.0;
           float xc = uv.x - xCenter - xWobble;
           float band = exp(-pow(xc / bandWidth, 2.0));
-          float vis = fbm(vec2(uv.y * 1.5 + t * 0.3 + phase, fi * 0.7));
+          float vis = fbm(vec2(uv.y * 1.5 + t * 0.15 + phase, fi * 0.7));
           vis = smoothstep(0.25, 0.85, vis);
           float sheen = pow(band, 5.0);
+          // 颜色饱和度降低：mix 一点白色让更柔和
           vec3 bcol = mix(uTint, uAccent, fract(flowY * 1.2 + fi * 0.15));
-          col += bcol * band * vis * (0.45 + uEnv * 0.55);
-          col += bcol * sheen * vis * 0.7;
+          bcol = mix(bcol, vec3(0.60, 0.62, 0.70), 0.35);
+          // 亮度系数 ~0.12（薄纱）+ 节拍微微变亮（uEnv 系数 0.06，幅度小）
+          col += bcol * band * vis * (0.12 + uEnv * 0.06);
+          col += bcol * sheen * vis * 0.18;
         }
+
+        // === 节拍冲击波（4 层回响，从中心扩散，柔和 exp 衰减环）===
+        // uShock0~3: vec4(x, y, startTime, intensity)；速度 0.15 + index*0.05 形成回响层次
+        // 4 个展开的 if（避免数组循环）；超过 3 秒自动失效（w=0）
+        float shockSum = 0.0;
+        // shock0（速度 0.15，最慢）
+        { float age = uTime - uShock0.z;
+          if (uShock0.w > 0.0 && age >= 0.0 && age <= 3.0) {
+            float radius = age * 0.15;
+            float dr = distance(uv, uShock0.xy) - radius;
+            shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock0.w;
+          } }
+        // shock1（速度 0.20）
+        { float age = uTime - uShock1.z;
+          if (uShock1.w > 0.0 && age >= 0.0 && age <= 3.0) {
+            float radius = age * 0.20;
+            float dr = distance(uv, uShock1.xy) - radius;
+            shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock1.w;
+          } }
+        // shock2（速度 0.25）
+        { float age = uTime - uShock2.z;
+          if (uShock2.w > 0.0 && age >= 0.0 && age <= 3.0) {
+            float radius = age * 0.25;
+            float dr = distance(uv, uShock2.xy) - radius;
+            shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock2.w;
+          } }
+        // shock3（速度 0.30，最快）
+        { float age = uTime - uShock3.z;
+          if (uShock3.w > 0.0 && age >= 0.0 && age <= 3.0) {
+            float radius = age * 0.30;
+            float dr = distance(uv, uShock3.xy) - radius;
+            shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock3.w;
+          } }
+        col += uAccent * shockSum * 0.30;   // 亮度系数 0.30（克制，不抢频谱环的戏）
 
         // === 频谱环（弱化辅助：uFreqTex 极坐标采样，低亮度，不抢戏）===
         float aRot = ang + uTime * 0.15;
@@ -341,6 +389,101 @@ function useVisualEngine(
     fieldMesh.frustumCulled = false;
     scene.add(fieldMesh);
 
+    // ==================================================================
+    // 自然粒子点缀（35 颗，CPU 更新 + 软发光点 shader）
+    // 少量点缀：value noise 驱动漂浮 + 鼠标附近轻微聚集 + 节拍微微亮一下
+    // additive blending，z=1 前景（renderOrder=2，在拖尾之下、频谱环之上）
+    // ==================================================================
+    const PARTICLE_COUNT = 35;
+    const particlePositions = new Float32Array(PARTICLE_COUNT * 3);
+    const particleSizes = new Float32Array(PARTICLE_COUNT);
+    const particleBrightness = new Float32Array(PARTICLE_COUNT);
+    const particleColorMix = new Float32Array(PARTICLE_COUNT);
+    const particlePhase = new Float32Array(PARTICLE_COUNT);   // noise 驱动的相位（每颗独立）
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      particlePositions[i * 3] = (Math.random() - 0.5) * 2.0;       // x ∈ [-1, 1]
+      particlePositions[i * 3 + 1] = (Math.random() - 0.5) * 2.0;   // y ∈ [-1, 1]
+      particlePositions[i * 3 + 2] = 0.5;                            // z（前景，安全可见）
+      particleSizes[i] = 0.5 + Math.random() * 1.5;                  // 0.5x ~ 2x
+      particleBrightness[i] = 0.3 + Math.random() * 0.3;             // 0.3 ~ 0.6（低亮度）
+      particleColorMix[i] = Math.random();                           // tint→accent 随机偏移
+      particlePhase[i] = Math.random() * 100.0;
+    }
+    const particleGeo = new THREE.BufferGeometry();
+    particleGeo.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+    particleGeo.setAttribute('aSize', new THREE.BufferAttribute(particleSizes, 1));
+    particleGeo.setAttribute('aBrightness', new THREE.BufferAttribute(particleBrightness, 1));
+    particleGeo.setAttribute('aColorMix', new THREE.BufferAttribute(particleColorMix, 1));
+    // 粒子 uniforms：uTint/uAccent 共享 field uniforms 的 Color 对象（gsap 同步更新）
+    const particleUniforms = {
+      uBeatPulse: { value: 0 },
+      uPixelRatio: { value: renderer.getPixelRatio() },
+      uTint: { value: tintColor },
+      uAccent: { value: accentColor },
+    };
+    const particleVS = `
+      attribute float aSize;
+      attribute float aBrightness;
+      attribute float aColorMix;
+      uniform float uBeatPulse;
+      uniform float uPixelRatio;
+      uniform vec3 uTint, uAccent;
+      varying float vBrightness;
+      varying vec3 vColor;
+      void main() {
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        // 大小随亮度脉动 + 节拍时微微变大（不爆发）
+        float pulse = 1.0 + uBeatPulse * 0.15;
+        gl_PointSize = aSize * 22.0 * pulse * uPixelRatio;
+        vBrightness = aBrightness * (1.0 + uBeatPulse * 0.4);
+        vColor = mix(uTint, uAccent, aColorMix);
+      }
+    `;
+    const particleFS = `
+      precision highp float;
+      varying float vBrightness;
+      varying vec3 vColor;
+      void main() {
+        vec2 cp = gl_PointCoord - 0.5;
+        float d = length(cp);
+        if (d > 0.5) discard;
+        // 软发光圆点：核心亮，边缘 exp 衰减
+        float glow = exp(-d * 5.5);
+        gl_FragColor = vec4(vColor * glow * vBrightness, glow * 0.5);
+      }
+    `;
+    const particleMat = new THREE.ShaderMaterial({
+      uniforms: particleUniforms,
+      vertexShader: particleVS,
+      fragmentShader: particleFS,
+      transparent: true,
+      depthWrite: false,
+      depthTest: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const particleMesh = new THREE.Points(particleGeo, particleMat);
+    particleMesh.renderOrder = 2;         // 前景，在拖尾（field shader）之下
+    particleMesh.frustumCulled = false;
+    scene.add(particleMesh);
+
+    // value noise（CPU 端，驱动粒子速度方向，连续无突变，自然漂浮感）
+    const pHash = (x: number, y: number) => {
+      const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+      return s - Math.floor(s);
+    };
+    const pNoise = (x: number, y: number) => {
+      const ix = Math.floor(x), iy = Math.floor(y);
+      const fx = x - ix, fy = y - iy;
+      const ux = fx * fx * (3 - 2 * fx);
+      const uy = fy * fy * (3 - 2 * fy);
+      const a = pHash(ix, iy);
+      const b = pHash(ix + 1, iy);
+      const c = pHash(ix, iy + 1);
+      const d = pHash(ix + 1, iy + 1);
+      return a * (1 - ux) * (1 - uy) + b * ux * (1 - uy) + c * (1 - ux) * uy + d * ux * uy;
+    };
+
     // shader 编译错误检测：在 animate 首次 render 后进行（renderer.compile 是惰性的）
     renderer.compile(scene, camera);
 
@@ -396,6 +539,13 @@ function useVisualEngine(
 
     // === 节拍来源：player.onBeat（离线预分析为主，realtime 为 fallback） ===
     //   v3.1.4: 强节拍响应——energy 注入 25% + 慢释放 0.80，让节拍冲击持续可见
+    // v3.1.13: 节拍冲击波状态（4 槽位 FIFO 循环替换最旧）+ 粒子亮度脉冲
+    const SHOCK_MAX = 4;
+    const shocks: { t: number; intensity: number }[] = [];
+    for (let i = 0; i < SHOCK_MAX; i++) shocks.push({ t: -10, intensity: 0 });
+    let shockWriteIdx = 0;   // 环形写入指针（每次写最旧的槽位）
+    const shockUniforms = [uniforms.uShock0, uniforms.uShock1, uniforms.uShock2, uniforms.uShock3];
+    let particleBeatPulse = 0;   // 粒子节拍亮度脉冲（0.3 秒衰减回正常）
     const offBeat = player.onBeat((time: number) => {
       const impulse = 0.7 + smoothBass * 0.3;
       energy = energy * 0.75 + impulse * 0.25;   // 注入 25%（强节拍响应）
@@ -403,7 +553,15 @@ function useVisualEngine(
       beatCount++;
       const curBpm = player.getBpm();
       if (curBpm > 0) beatInterval = 60 / curBpm;
-      // v3.1.12: 单层架构已无粒子系统，节拍仅驱动 energy/env → shader 内带宽膨胀 + 亮度脉冲
+      // v3.1.13: 节拍冲击波 FIFO（4 槽位循环替换最旧）+ 粒子亮度脉冲
+      // 中心 0.5,0.5 + 当前时间 + bass 强度作为 intensity
+      const shockIntensity = 0.5 + smoothBass * 0.5;
+      shocks[shockWriteIdx] = { t: uniforms.uTime.value, intensity: shockIntensity };
+      shockWriteIdx = (shockWriteIdx + 1) % SHOCK_MAX;
+      for (let i = 0; i < SHOCK_MAX; i++) {
+        (shockUniforms[i].value as THREE.Vector4).set(0.5, 0.5, shocks[i].t, shocks[i].intensity);
+      }
+      particleBeatPulse = 1.0;   // 粒子亮度临时提升（animate 里 0.3 秒衰减回正常）
     });
 
     // 可视化频谱仍用 AnalyserNode（v2.2 删了 crossOrigin，频谱不再静默）
@@ -612,6 +770,41 @@ function useVisualEngine(
         }
       }
 
+      // v3.1.13: 自然粒子点缀 CPU 更新（35 颗，开销极小）
+      // value noise 驱动速度方向（连续漂浮）+ 鼠标附近轻微聚集（系数 0.02）+ 边界包裹
+      const mouseWorldX = mouseUV.x * 2.0 - 1.0;   // [0,1] → [-1,1] 世界坐标
+      const mouseWorldY = mouseUV.y * 2.0 - 1.0;
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        const px = particlePositions[i * 3];
+        const py = particlePositions[i * 3 + 1];
+        // value noise 驱动速度方向（连续无突变，自然漂浮感）
+        const n = pNoise(px * 0.6 + particlePhase[i], py * 0.6 + particlePhase[i] * 1.3);
+        const angle = n * Math.PI * 4.0;
+        const speed = 0.04;
+        let vx = Math.cos(angle) * speed;
+        let vy = Math.sin(angle) * speed;
+        // 鼠标附近轻微聚集（距离 < 0.25 时给一点向鼠标的力，系数 0.02，很弱）
+        const dx = mouseWorldX - px;
+        const dy = mouseWorldY - py;
+        const dist2 = dx * dx + dy * dy;
+        if (dist2 < 0.0625 && dist2 > 0.0001) {   // 0.25^2 = 0.0625
+          const dist = Math.sqrt(dist2);
+          vx += (dx / dist) * 0.02;
+          vy += (dy / dist) * 0.02;
+        }
+        particlePositions[i * 3] = px + vx * dt;
+        particlePositions[i * 3 + 1] = py + vy * dt;
+        // 边界包裹（飞出从另一边回来）
+        if (particlePositions[i * 3] > 1.05) particlePositions[i * 3] = -1.05;
+        if (particlePositions[i * 3] < -1.05) particlePositions[i * 3] = 1.05;
+        if (particlePositions[i * 3 + 1] > 1.05) particlePositions[i * 3 + 1] = -1.05;
+        if (particlePositions[i * 3 + 1] < -1.05) particlePositions[i * 3 + 1] = 1.05;
+      }
+      particleGeo.attributes.position.needsUpdate = true;
+      // 粒子节拍亮度脉冲衰减（0.3 秒衰减回正常）
+      particleBeatPulse = Math.max(0, particleBeatPulse - dt / 0.3);
+      particleUniforms.uBeatPulse.value = particleBeatPulse;
+
       // === 更新所有 uniforms（全部读 energy/env，无瞬时阶跃） ===
       uniforms.uBass.value = smoothBass;
       uniforms.uMid.value = smoothMid;
@@ -619,8 +812,8 @@ function useVisualEngine(
       uniforms.uEnergy.value = energy;
       uniforms.uEnv.value = env;
 
-      // === v3.1.12: 单层架构——无三层视差、无粒子 CPU 更新（全在 shader 内）===
-      // 拖拽探头 uCamPan 已在上方同步；其余效果（流光/频谱环/拖尾/光斑/涟漪）由 shader 完成
+      // === v3.1.13: 单层 shader + 35 颗自然粒子点缀（CPU 更新）===
+      // 拖拽探头 uCamPan 已在上方同步；其余效果（薄纱/冲击波/频谱环/拖尾/光斑/涟漪）由 shader 完成
 
       // 调试信息
       (window as any).__beatDebug = {
@@ -641,12 +834,12 @@ function useVisualEngine(
 
       renderer.render(scene, camera);
 
-      // v3.1.12: 首次 render 后检测 shader 编译状态（renderer.compile 是惰性的，真正编译在首次 render）
-      // 单层架构：仅检测 fieldMat
+      // v3.1.13: 首次 render 后检测 shader 编译状态（renderer.compile 是惰性的，真正编译在首次 render）
+      // 单层架构 + 粒子材质：检测 fieldMat 与 particleMat
       if (!shaderChecked) {
         shaderChecked = true;
         const gl2 = renderer.getContext() as WebGLRenderingContext | null;
-        const mats: [string, any][] = [['field', fieldMat]];
+        const mats: [string, any][] = [['field', fieldMat], ['particle', particleMat]];
         let failed = false;
         let failLog = '';
         for (const [name, mat] of mats) {
@@ -756,8 +949,9 @@ function useVisualEngine(
       canvasRef.current?.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('blur', onPointerLeaveWin);
-      // 单层几何/材质清理（仅 fieldMat；v3.1.12 已移除云层与粒子）
+      // 几何/材质清理（fieldMat 单层 + v3.1.13 粒子系统）
       fieldGeo.dispose(); fieldMat.dispose();
+      particleGeo.dispose(); particleMat.dispose();
       renderer.dispose();
       delete (window as any).__updateCover;
       delete (window as any).__beatDebug;
