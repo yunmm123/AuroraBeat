@@ -35,12 +35,12 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v3.1.13 — 丝绸薄纱 + 节拍冲击波 + 自然粒子点缀
+// Three.js 视觉引擎 v3.1.16 — 节拍绽放光晕 + 频谱环 + 自然粒子点缀
 // 单层架构（正交相机，单 PlaneGeometry(2,2) + ShaderMaterial）+ 35 颗粒子点缀：
-//   丝绸薄纱（6 条）：极低亮度流动带（系数 0.12）+ 饱和度降低（掺白）+ 速度放慢
-//     似有似无的氛围底色，给频谱环一个呼吸底，绝对不抢戏
-//   节拍冲击波（4 层回响）：onBeat 时 FIFO 替换最旧，从中心扩散
-//     速度 0.15/0.20/0.25/0.30 形成回响层次，exp 衰减柔和环，亮度系数 0.30
+//   节拍绽放光晕（圆环外围花瓣）：6 瓣角度调制 + 节拍膨胀消散 + 静止低亮可见
+//     与频谱环同心，比冲击波更柔和弥散，花瓣形区别于均匀环；自然不生硬，不抢戏
+//   节拍冲击波（4 层回响，弱化辅助）：onBeat 时 FIFO 替换最旧，从中心扩散
+//     速度 0.15/0.20/0.25/0.30 形成回响层次，exp 衰减柔和环，亮度系数 0.18（弱化让位绽放光晕）
 //   自然粒子点缀（35 颗）：value noise 驱动漂浮 + 鼠标附近轻微聚集 + 节拍微微亮
 //     additive blending，软发光圆点，CPU 更新，z=1 前景 renderOrder=2
 //   频谱环（弱化辅助）：uFreqTex 极坐标采样，低亮度系数
@@ -199,32 +199,7 @@ function useVisualEngine(
         // 深色底（带之间透出，不铺满）
         vec3 col = vec3(0.03, 0.04, 0.07);
 
-        // === 丝绸薄纱（6 条流动带，极低亮度氛围底色，似有似无）===
-        // 保留流动逻辑但大幅降亮度：系数 0.12 + 饱和度降低（掺白）+ 速度放慢
-        // uBass 驱动摆动幅度（减半），uEnv 微调带宽膨胀 + 微小亮度脉冲
-        float t = uTime;
-        float wobbleAmp = 0.030 + uBass * 0.06;
-        float bandWidth = 0.025 + uEnv * 0.008;
-        for (int i = 0; i < 6; i++) {
-          float fi = float(i);
-          float phase = fi * 0.83;
-          // 流速减半（更优雅）
-          float flowY = uv.y + t * (0.025 + fi * 0.006) + phase;
-          float xCenter = 0.5 + sin(fi * 1.7 + t * 0.12) * 0.28;
-          float xWobble = sin(uv.y * (2.5 + fi * 0.6) + t * (0.20 + fi * 0.04) + phase) * wobbleAmp
-                        + (vnoise(vec2(uv.y * (2.0 + fi * 0.3), t * 0.10 + phase)) - 0.5) * wobbleAmp * 2.0;
-          float xc = uv.x - xCenter - xWobble;
-          float band = exp(-pow(xc / bandWidth, 2.0));
-          float vis = fbm(vec2(uv.y * 1.5 + t * 0.15 + phase, fi * 0.7));
-          vis = smoothstep(0.25, 0.85, vis);
-          float sheen = pow(band, 5.0);
-          // 颜色饱和度降低：mix 一点白色让更柔和
-          vec3 bcol = mix(uTint, uAccent, fract(flowY * 1.2 + fi * 0.15));
-          bcol = mix(bcol, vec3(0.60, 0.62, 0.70), 0.35);
-          // 亮度系数 ~0.12（薄纱）+ 节拍微微变亮（uEnv 系数 0.06，幅度小）
-          col += bcol * band * vis * (0.12 + uEnv * 0.06);
-          col += bcol * sheen * vis * 0.18;
-        }
+        // 丝绸薄纱已移除（v3.1.16），由节拍绽放光晕替代与频谱环互补
 
         // === 节拍冲击波（4 层回响，从中心扩散，柔和 exp 衰减环）===
         // uShock0~3: vec4(x, y, startTime, intensity)；速度 0.15 + index*0.05 形成回响层次
@@ -258,7 +233,7 @@ function useVisualEngine(
             float dr = distance(uv, uShock3.xy) - radius;
             shockSum += exp(-abs(dr) * 8.0) * exp(-age * 1.2) * uShock3.w;
           } }
-        col += uAccent * shockSum * 0.30;   // 亮度系数 0.30（克制，不抢频谱环的戏）
+        col += uAccent * shockSum * 0.18;   // 亮度系数 0.18（弱化，让位绽放光晕）
 
         // === 频谱环（弱化辅助：uFreqTex 极坐标采样，低亮度，不抢戏）===
         float aRot = ang + uTime * 0.15;
@@ -271,6 +246,16 @@ function useVisualEngine(
         float ringW = 0.018 + uEnergy * 0.012;
         float specRing = exp(-pow((r - ringR) / ringW, 2.0)) * (0.3 + freqAvg * 0.5);
         col += uAccent * specRing * 0.45;
+
+        // === 节拍绽放光晕（圆环外围花瓣，节拍绽放膨胀消散，自然不抢戏）===
+        // 与频谱环同心，6 瓣角度调制（区别于冲击波均匀环）；比冲击波更柔和弥散
+        // 节拍时半径随 energy 缓慢膨胀 + 亮度随 env 冲击消散；静止时低亮基础可见（不看不见）
+        float bloomR = ringR + 0.07 + uEnergy * 0.05;     // 节拍外膨胀（energy 慢释放，自然消散）
+        float bloomW = 0.05 + uEnv * 0.03;                // 节拍时变宽
+        float petal = 0.65 + 0.35 * sin(ang * 6.0 + uTime * 0.25);  // 6 瓣花瓣缓慢旋转
+        float bloom = exp(-pow((r - bloomR) / bloomW, 2.0)) * petal;
+        bloom *= (0.15 + uEnv * 0.25);                    // 静止 0.15 可见 + 节拍增亮
+        col += mix(uTint, uAccent, 0.5) * bloom * 0.25;   // tint/accent 混合，与圆环纯 accent 区分
 
         // === 点击涟漪（3 个，展开）===
         float age0 = uTime - uRipple0.z;
