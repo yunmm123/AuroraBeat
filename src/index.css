@@ -196,10 +196,15 @@ html, body {
   display: block;
 }
 
-/* === 沉浸式歌词 v3.1 — 色彩呼吸场域主角 === */
-/* 当前行超大发光随节拍呼吸；过去行被雾向上吞没（translateY 递增 + blur 递增 + opacity 衰减） */
-/* 未来行缩小 + 模糊 + 透明度低；歌词浮在场域之上但融合（backdrop blur + 轻微半透明） */
+/* === 沉浸式歌词 v3.2.8 — 以圆环中心为基准居中，单行显示 === */
+/* fixed 定位精确锁定视口中心（= Three.js 圆环中心 uv 0.5,0.5），不受顶部导航栏 pt-11 影响 */
+/* 宽度以短边 vh 为基准，保证明显小于圆环直径，长歌词换行也不超出圆环 */
 .lyrics-field {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 30;
   perspective: 1000px;
   perspective-origin: 50% 50%;
   display: flex;
@@ -207,8 +212,9 @@ html, body {
   align-items: center;
   justify-content: center;
   gap: 0.20em;
-  width: 46vw;
-  max-width: 720px;
+  /* v3.2.8: 宽度以视口短边为基准，确保被圆环包围（圆环半径约 0.4*短边） */
+  width: min(58vh, 540px);
+  max-width: 540px;
   max-height: 72vh;
   padding: 0 3vw;
   pointer-events: none;
