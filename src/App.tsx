@@ -35,21 +35,20 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 };
 
 // ====================================================================
-// Three.js 视觉引擎 v3.1.11 — 三层视差沉浸式可视化 + 歌词主角
-// 三层架构（正交相机，z=-1/0/1，视差由 uParallax uniform 联动）：
-//   第1层 远景体积云（z=-1，视差 0.02）：简化 raymarching（24 步，2D value noise
-//     + 时间维度近似 3D）+ Beer-Lambert 散射，低饱和氛围底色，bass 膨胀 + env 脉动
-//   第2层 中景频谱环（z=0，视差 0.05）：FBM 云雾 + 极坐标频谱环旋转 + 节拍呼吸
-//     + 径向光线 + 冲击波 + 鼠标光斑/拖尾/涟漪，音乐可视化主体（亮区不透明，暗区半透）
-//   第3层 前景粒子（z=1，视差 0.12 反向）：150 颗发光粒子，磁吸鼠标 + 拖动尾迹
-//     + 节拍爆发 + 边界包裹，additive blending
-//   封面色 K-Means tint + accent 驱动三层色彩；CSS 变量联动歌词
+// Three.js 视觉引擎 v3.1.12 — 单层渐变流光 + 彗星椭圆拖尾
+// 单层架构（正交相机，单 PlaneGeometry(2,2) + ShaderMaterial）：
+//   流动光带（6 条）：沿 y 轴流动 + sin/value noise 扭曲 + fbm 显隐呼吸
+//     + 中心 sheen 高光 + 颜色 uTint→uAccent 沿流向渐变 + 节拍亮度/宽度脉冲
+//   频谱环（弱化辅助）：uFreqTex 极坐标采样，低亮度系数，不抢戏
+//   彗星椭圆拖尾（20 点）：椭圆长轴沿鼠标方向，速度越快越长轴；头亮(accent)尾暗(tint)
+//   鼠标光斑（三层柔光）+ 点击涟漪 + 拖拽探头 + vignette + grain + ACES
+// 封面色 K-Means tint + accent 驱动色彩；CSS 变量联动歌词
 // 节拍驱动：蓄能池 energy + ADSR 包络 env（无阶跃，流动响应）
 // 节拍检测：离线预分析（Spectral Flux + DP）+ realtime fallback（beatDetector.ts）
-// 封面取色：K-Means 主色 tint + 副色 accent，驱动三层色彩
+// 封面取色：K-Means 主色 tint + 副色 accent，驱动色彩
 // ====================================================================
 
-// ashima/webgl-noise simplex noise 已移除（v3.1.10 改用轻量 hash+value noise，保证 shader 编译通过）
+// 轻量 hash + 2D value noise（保证 shader 编译通过 + 性能，无 simplex）
 
 function useVisualEngine(
   canvasRef: React.RefObject<HTMLCanvasElement>,
@@ -63,12 +62,12 @@ function useVisualEngine(
     if (!canvasRef.current) return;
 
     // ==================================================================
-    // v3.1 基础 scene/camera/renderer
-    // 整个画面就是一个全屏 shader quad（正交相机），无几何体、无粒子
+    // 基础 scene/camera/renderer
+    // 单层全屏 shader quad（正交相机），无粒子、无体积云
     // ==================================================================
     const scene = new THREE.Scene();
-    // near=-2/far=2：三层 mesh 分别放 z=-1/0/1，确保全部在视锥内
-    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -2, 2);
+    // 单层 mesh 放 z=0，near=-1/far=1 足够
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
     // 错误兜底：WebGL 上下文创建失败时提示用户
     let renderer: THREE.WebGLRenderer;
     try {
@@ -89,14 +88,14 @@ function useVisualEngine(
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
 
-    // 封面主色（K-Means 提取，驱动 tint + accent 双色 → 云雾色彩）
+    // 封面主色（K-Means 提取，驱动 tint + accent 双色 → 流光色彩）
     const tintColor = new THREE.Color('#7a8fa6');
     const accentColor = new THREE.Color('#c8a87a');
 
     // ==================================================================
-    // 色彩呼吸场域 shader（全屏 quad）
-    // FBM 多层流动渐变云雾 + 鼠标 domain warping + 点击涟漪 + 节拍呼吸
-    // 封面色 tint + accent 驱动云雾颜色（深处压暗，高密度提亮）
+    // 渐变流光 shader（全屏 quad）
+    // 多条流动光带 + fbm 显隐呼吸 + 中心 sheen 高光 + 频谱环辅助
+    // + 彗星椭圆拖尾 + 鼠标光斑 + 涟漪 + 节拍响应；封面色 tint/accent 驱动
     // ==================================================================
     const RIPPLE_MAX = 3;
     // v3.1.7: 真实 FFT 频谱纹理——传给 shader 做极坐标频谱环（音频驱动形态，非封面色）
@@ -114,12 +113,12 @@ function useVisualEngine(
       uTint: { value: tintColor }, uAccent: { value: accentColor },
       uMouseUV: { value: new THREE.Vector2(0.5, 0.5) },
       uMouseStrength: { value: 0 },
-      uMouseVel: { value: new THREE.Vector2(0, 0) },        // v3.1.8: 鼠标速度向量（流体推动方向）
-      uCamPan: { value: new THREE.Vector2(0, 0) },
-      uParallax: { value: new THREE.Vector2(0, 0) },        // 中景视差偏移（鼠标联动，强度 0.05）
+      uMouseVel: { value: new THREE.Vector2(0, 0) },        // 鼠标速度向量（彗星椭圆拉伸方向）
+      uCamPan: { value: new THREE.Vector2(0, 0) },          // 拖拽探头偏移
       uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
       uFreqTex: { value: freqTex },
-      // v3.1.8: 鼠标拖尾轨迹（8 个历史位置 uv.xy + time.z + active.w）
+      // 彗星拖尾轨迹（20 个历史位置 uv.xy + time.z + active.w）
+      // 用单独 vec4 代替数组 uniform（避免 GLSL ES 1.00 数组 uniform 驱动兼容问题）
       uTrail0: { value: new THREE.Vector4(0, 0, -10, 0) },
       uTrail1: { value: new THREE.Vector4(0, 0, -10, 0) },
       uTrail2: { value: new THREE.Vector4(0, 0, -10, 0) },
@@ -128,7 +127,19 @@ function useVisualEngine(
       uTrail5: { value: new THREE.Vector4(0, 0, -10, 0) },
       uTrail6: { value: new THREE.Vector4(0, 0, -10, 0) },
       uTrail7: { value: new THREE.Vector4(0, 0, -10, 0) },
-      // 用 3 个单独 vec4 代替数组 uniform（避免 GLSL ES 1.00 数组 uniform 驱动兼容问题）
+      uTrail8: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail9: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail10: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail11: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail12: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail13: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail14: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail15: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail16: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail17: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail18: { value: new THREE.Vector4(0, 0, -10, 0) },
+      uTrail19: { value: new THREE.Vector4(0, 0, -10, 0) },
+      // 涟漪（3 个，单独 vec4）
       uRipple0: { value: new THREE.Vector4(0, 0, -10, 0) },
       uRipple1: { value: new THREE.Vector4(0, 0, -10, 0) },
       uRipple2: { value: new THREE.Vector4(0, 0, -10, 0) },
@@ -138,13 +149,14 @@ function useVisualEngine(
       uniform float uTime, uBass, uMid, uTreble, uEnergy, uEnv, uAlpha, uIntensity, uMouseStrength;
       uniform vec3 uTint, uAccent;
       uniform vec2 uMouseUV, uMouseVel, uCamPan, uResolution;
-      uniform vec2 uParallax;
       uniform vec4 uRipple0, uRipple1, uRipple2;
       uniform vec4 uTrail0, uTrail1, uTrail2, uTrail3, uTrail4, uTrail5, uTrail6, uTrail7;
+      uniform vec4 uTrail8, uTrail9, uTrail10, uTrail11, uTrail12, uTrail13, uTrail14, uTrail15;
+      uniform vec4 uTrail16, uTrail17, uTrail18, uTrail19;
       uniform sampler2D uFreqTex;
       varying vec2 vUv;
 
-      // hash + value noise（比 simplex 轻量得多，保证编译通过 + 性能）
+      // hash + 2D value noise（轻量，保证编译通过 + 性能）
       float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
       float vnoise(vec2 p){
         vec2 i = floor(p); vec2 f = fract(p);
@@ -152,6 +164,7 @@ function useVisualEngine(
         return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
                    mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
       }
+      // fbm 最多 4 octave
       float fbm(vec2 p){
         float v = 0.0; float a = 0.5;
         for (int i = 0; i < 4; i++) { v += a * vnoise(p); p *= 2.0; a *= 0.5; }
@@ -164,25 +177,42 @@ function useVisualEngine(
       }
 
       void main() {
-        vec2 uv = vUv + uParallax;   // 视差偏移（中景层）
+        vec2 uv = vUv + uCamPan;            // 拖拽探头偏移
         vec2 centered = uv - 0.5;
         float r = length(centered) * 2.0;
         float ang = atan(centered.y, centered.x);
 
         // 鼠标影响
         float mDist = distance(uv, uMouseUV);
-        float mInfluence = smoothstep(0.5, 0.0, mDist);
-        vec2 fluidPush = uMouseVel * mInfluence * 0.8;
+        float mSpeed = length(uMouseVel);
 
-        // === 1. FBM 云雾（流动 + 鼠标推动）===
-        float t = uTime * 0.15;
-        vec2 bp = uv + fluidPush - uCamPan;
-        float cloud = fbm(bp * 1.2 + vec2(t * 0.3, t * 0.2));
-        float cloud2 = fbm(bp * 2.0 + vec2(-t * 0.2, t * 0.25) + cloud * 0.3);
-        float density = cloud * 0.55 + cloud2 * 0.35 + 0.25;
-        density *= (0.7 + uEnergy * 0.6);
+        // 深色底（带之间透出，不铺满）
+        vec3 col = vec3(0.03, 0.04, 0.07);
 
-        // === 2. 频谱环（旋转 + 节拍呼吸）===
+        // === 流动光带（6 条，常量循环）===
+        // 每条带：沿 y 流动 + sin/value noise 扭曲 + fbm 显隐呼吸 + 中心 sheen 高光
+        // uBass 驱动摆动幅度，uEnv 驱动带宽膨胀 + 亮度脉冲
+        float t = uTime;
+        float wobbleAmp = 0.035 + uBass * 0.12;
+        float bandWidth = 0.022 + uEnv * 0.012;
+        for (int i = 0; i < 6; i++) {
+          float fi = float(i);
+          float phase = fi * 0.83;
+          float flowY = uv.y + t * (0.05 + fi * 0.012) + phase;
+          float xCenter = 0.5 + sin(fi * 1.7 + t * 0.25) * 0.28;
+          float xWobble = sin(uv.y * (2.5 + fi * 0.6) + t * (0.4 + fi * 0.08) + phase) * wobbleAmp
+                        + (vnoise(vec2(uv.y * (2.0 + fi * 0.3), t * 0.2 + phase)) - 0.5) * wobbleAmp * 2.0;
+          float xc = uv.x - xCenter - xWobble;
+          float band = exp(-pow(xc / bandWidth, 2.0));
+          float vis = fbm(vec2(uv.y * 1.5 + t * 0.3 + phase, fi * 0.7));
+          vis = smoothstep(0.25, 0.85, vis);
+          float sheen = pow(band, 5.0);
+          vec3 bcol = mix(uTint, uAccent, fract(flowY * 1.2 + fi * 0.15));
+          col += bcol * band * vis * (0.45 + uEnv * 0.55);
+          col += bcol * sheen * vis * 0.7;
+        }
+
+        // === 频谱环（弱化辅助：uFreqTex 极坐标采样，低亮度，不抢戏）===
         float aRot = ang + uTime * 0.15;
         float normA = fract((aRot + 3.14159) / 6.28318);
         float freq = texture2D(uFreqTex, vec2(normA, 0.5)).r;
@@ -190,81 +220,96 @@ function useVisualEngine(
         float freqAvg = (freq + freqM) * 0.5;
         float breath = 1.0 + uEnv * 0.20 + uBass * 0.10;
         float ringR = 0.40 * breath + freqAvg * 0.40;
-        float ringW = 0.016 + uEnergy * 0.012;
-        float specRing = exp(-pow((r - ringR) / ringW, 2.0)) * (0.6 + freqAvg * 0.9);
+        float ringW = 0.018 + uEnergy * 0.012;
+        float specRing = exp(-pow((r - ringR) / ringW, 2.0)) * (0.3 + freqAvg * 0.5);
+        col += uAccent * specRing * 0.45;
 
-        // === 3. 径向光线 ===
-        float rayN = vnoise(vec2(normA * 20.0, uTime * 0.3));
-        float rays = pow(max(0.0, rayN), 3.0) * (0.2 + uTreble * 0.9);
-        rays *= smoothstep(1.3, 0.2, r) * smoothstep(0.15, 0.35, r);
-
-        // === 4. 节拍冲击波 ===
-        float beatWave = 0.0;
-        if (uEnv > 0.01) {
-          float wavePos = 0.3 + (1.0 - uEnv) * 0.7;
-          beatWave = exp(-abs(r - wavePos) * 14.0) * uEnv * 0.35;
-        }
-
-        // === 5. 点击涟漪（3 个，展开避免数组）===
-        float ripple = 0.0;
+        // === 点击涟漪（3 个，展开）===
         float age0 = uTime - uRipple0.z;
-        if (uRipple0.w > 0.5 && age0 >= 0.0 && age0 <= 2.5) {
-          ripple += sin(distance(uv, uRipple0.xy) * 30.0 - age0 * 8.0) * exp(-age0 * 1.5) * 0.16;
-        }
+        if (uRipple0.w > 0.5 && age0 >= 0.0 && age0 <= 2.5)
+          col += uAccent * sin(distance(uv, uRipple0.xy) * 30.0 - age0 * 8.0) * exp(-age0 * 1.5) * 0.10;
         float age1 = uTime - uRipple1.z;
-        if (uRipple1.w > 0.5 && age1 >= 0.0 && age1 <= 2.5) {
-          ripple += sin(distance(uv, uRipple1.xy) * 30.0 - age1 * 8.0) * exp(-age1 * 1.5) * 0.16;
-        }
+        if (uRipple1.w > 0.5 && age1 >= 0.0 && age1 <= 2.5)
+          col += uAccent * sin(distance(uv, uRipple1.xy) * 30.0 - age1 * 8.0) * exp(-age1 * 1.5) * 0.10;
         float age2 = uTime - uRipple2.z;
-        if (uRipple2.w > 0.5 && age2 >= 0.0 && age2 <= 2.5) {
-          ripple += sin(distance(uv, uRipple2.xy) * 30.0 - age2 * 8.0) * exp(-age2 * 1.5) * 0.16;
-        }
+        if (uRipple2.w > 0.5 && age2 >= 0.0 && age2 <= 2.5)
+          col += uAccent * sin(distance(uv, uRipple2.xy) * 30.0 - age2 * 8.0) * exp(-age2 * 1.5) * 0.10;
 
-        // === 合成 ===
-        vec3 col = mix(uTint * 0.45, uAccent * 0.75, density);
-        col = mix(vec3(0.05, 0.07, 0.12), col, smoothstep(-0.1, 0.55, density));
-        col += uAccent * specRing * 1.0;
-        col += vec3(specRing * 0.35);
-        col += uTint * rays * 0.7;
-        col += uAccent * beatWave * 0.7;
-        col += vec3(0.10, 0.07, 0.04) * uEnv;
-        col += uAccent * uBass * 0.12 * smoothstep(0.6, 0.0, r);
-        col += uAccent * ripple * 0.8;
+        // === 鼠标光斑（三层：大范围柔光 + 中范围 + 内核）===
+        float mouseGlow = exp(-mDist * 3.5) * (0.40 + uMouseStrength * 0.6);
+        col += uAccent * mouseGlow * 0.70 + vec3(mouseGlow * 0.18);
+        float mouseMid = exp(-mDist * 12.0) * (0.50 + uMouseStrength * 0.8);
+        col += mix(uTint, uAccent, 0.4) * mouseMid * 0.50;
+        float mouseCore = exp(-mDist * 50.0) * (0.80 + uMouseStrength * 0.5);
+        col += vec3(mouseCore * 0.55);
 
-        // 中心光晕
-        float centerGlow = exp(-r * 1.4) * (0.20 + uEnv * 0.5 + uBass * 0.3);
-        col += mix(uTint, uAccent, 0.5) * centerGlow * 0.6;
-
-        // 鼠标光斑（三层）
-        float mouseGlow = exp(-mDist * 3.5) * (0.45 + uMouseStrength * 0.6);
-        col += uAccent * mouseGlow * 0.85 + vec3(mouseGlow * 0.22);
-        float mouseMid = exp(-mDist * 12.0) * (0.55 + uMouseStrength * 0.8);
-        col += mix(uTint, uAccent, 0.4) * mouseMid * 0.55;
-        float mouseCore = exp(-mDist * 50.0) * (0.85 + uMouseStrength * 0.5);
-        col += vec3(mouseCore * 0.65);
-
-        // 鼠标拖尾（8 个，展开）
-        float td, age, tg;
-        td = distance(uv, uTrail0.xy); age = uTime - uTrail0.z;
-        if (uTrail0.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.0)*tg*0.6 + mix(uTint,uAccent,0.0)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
-        td = distance(uv, uTrail1.xy); age = uTime - uTrail1.z;
-        if (uTrail1.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.14)*tg*0.6 + mix(uTint,uAccent,0.14)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
-        td = distance(uv, uTrail2.xy); age = uTime - uTrail2.z;
-        if (uTrail2.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.28)*tg*0.6 + mix(uTint,uAccent,0.28)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
-        td = distance(uv, uTrail3.xy); age = uTime - uTrail3.z;
-        if (uTrail3.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.42)*tg*0.6 + mix(uTint,uAccent,0.42)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
-        td = distance(uv, uTrail4.xy); age = uTime - uTrail4.z;
-        if (uTrail4.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.57)*tg*0.6 + mix(uTint,uAccent,0.57)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
-        td = distance(uv, uTrail5.xy); age = uTime - uTrail5.z;
-        if (uTrail5.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.71)*tg*0.6 + mix(uTint,uAccent,0.71)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
-        td = distance(uv, uTrail6.xy); age = uTime - uTrail6.z;
-        if (uTrail6.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.85)*tg*0.6 + mix(uTint,uAccent,0.85)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
-        td = distance(uv, uTrail7.xy); age = uTime - uTrail7.z;
-        if (uTrail7.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,1.0)*tg*0.6 + mix(uTint,uAccent,1.0)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
-
-        // 星点
-        float stars = pow(max(0.0, hash(uv * 150.0) - 0.96), 1.0) * 4.0;
-        col += vec3(stars * 0.5);
+        // === 彗星椭圆拖尾（20 个，展开）===
+        // 椭圆长轴沿鼠标移动方向，短轴垂直；速度越快越长轴
+        // 头部 uTrail0（最新，亮 accent）→ 尾部 uTrail19（最旧，暗 tint），透明度递减
+        float angM = atan(uMouseVel.y, uMouseVel.x);
+        float cm = cos(angM), sm = sin(angM);
+        float longAxis = 0.02 + mSpeed * 0.15;
+        float shortAxis = 0.015;
+        // trail0（头部，最新）
+        { vec2 d = uv - uTrail0.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail0.z;
+          if (uTrail0.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,0.0/20.0)*glow*(1.0 - 0.0/20.0*0.5); } }
+        // trail1
+        { vec2 d = uv - uTrail1.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail1.z;
+          if (uTrail1.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,1.0/20.0)*glow*(1.0 - 1.0/20.0*0.5); } }
+        // trail2
+        { vec2 d = uv - uTrail2.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail2.z;
+          if (uTrail2.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,2.0/20.0)*glow*(1.0 - 2.0/20.0*0.5); } }
+        // trail3
+        { vec2 d = uv - uTrail3.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail3.z;
+          if (uTrail3.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,3.0/20.0)*glow*(1.0 - 3.0/20.0*0.5); } }
+        // trail4
+        { vec2 d = uv - uTrail4.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail4.z;
+          if (uTrail4.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,4.0/20.0)*glow*(1.0 - 4.0/20.0*0.5); } }
+        // trail5
+        { vec2 d = uv - uTrail5.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail5.z;
+          if (uTrail5.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,5.0/20.0)*glow*(1.0 - 5.0/20.0*0.5); } }
+        // trail6
+        { vec2 d = uv - uTrail6.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail6.z;
+          if (uTrail6.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,6.0/20.0)*glow*(1.0 - 6.0/20.0*0.5); } }
+        // trail7
+        { vec2 d = uv - uTrail7.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail7.z;
+          if (uTrail7.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,7.0/20.0)*glow*(1.0 - 7.0/20.0*0.5); } }
+        // trail8
+        { vec2 d = uv - uTrail8.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail8.z;
+          if (uTrail8.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,8.0/20.0)*glow*(1.0 - 8.0/20.0*0.5); } }
+        // trail9
+        { vec2 d = uv - uTrail9.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail9.z;
+          if (uTrail9.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,9.0/20.0)*glow*(1.0 - 9.0/20.0*0.5); } }
+        // trail10
+        { vec2 d = uv - uTrail10.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail10.z;
+          if (uTrail10.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,10.0/20.0)*glow*(1.0 - 10.0/20.0*0.5); } }
+        // trail11
+        { vec2 d = uv - uTrail11.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail11.z;
+          if (uTrail11.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,11.0/20.0)*glow*(1.0 - 11.0/20.0*0.5); } }
+        // trail12
+        { vec2 d = uv - uTrail12.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail12.z;
+          if (uTrail12.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,12.0/20.0)*glow*(1.0 - 12.0/20.0*0.5); } }
+        // trail13
+        { vec2 d = uv - uTrail13.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail13.z;
+          if (uTrail13.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,13.0/20.0)*glow*(1.0 - 13.0/20.0*0.5); } }
+        // trail14
+        { vec2 d = uv - uTrail14.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail14.z;
+          if (uTrail14.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,14.0/20.0)*glow*(1.0 - 14.0/20.0*0.5); } }
+        // trail15
+        { vec2 d = uv - uTrail15.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail15.z;
+          if (uTrail15.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,15.0/20.0)*glow*(1.0 - 15.0/20.0*0.5); } }
+        // trail16
+        { vec2 d = uv - uTrail16.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail16.z;
+          if (uTrail16.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,16.0/20.0)*glow*(1.0 - 16.0/20.0*0.5); } }
+        // trail17
+        { vec2 d = uv - uTrail17.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail17.z;
+          if (uTrail17.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,17.0/20.0)*glow*(1.0 - 17.0/20.0*0.5); } }
+        // trail18
+        { vec2 d = uv - uTrail18.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail18.z;
+          if (uTrail18.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,18.0/20.0)*glow*(1.0 - 18.0/20.0*0.5); } }
+        // trail19（尾部，最旧）
+        { vec2 d = uv - uTrail19.xy; vec2 dr = vec2(d.x*cm - d.y*sm, d.x*sm + d.y*cm); float age = uTime - uTrail19.z;
+          if (uTrail19.w > 0.5 && age >= 0.0 && age <= 0.8) { float ed = sqrt((dr.x/longAxis)*(dr.x/longAxis) + (dr.y/shortAxis)*(dr.y/shortAxis)); float glow = exp(-ed*3.0)*exp(-age*2.5); col += mix(uAccent,uTint,19.0/20.0)*glow*(1.0 - 19.0/20.0*0.5); } }
 
         // Vignette
         float vignette = smoothstep(1.5, 0.25, length(uv - 0.5) * 1.3);
@@ -272,7 +317,7 @@ function useVisualEngine(
 
         // 简化 bloom
         float brightness = dot(col, vec3(0.299, 0.587, 0.114));
-        col += col * smoothstep(0.5, 0.9, brightness) * (0.4 + uEnergy * 0.5);
+        col += col * smoothstep(0.5, 0.9, brightness) * (0.3 + uEnergy * 0.4);
 
         // film grain
         col += (hash(uv * uResolution + uTime) - 0.5) * 0.04;
@@ -282,10 +327,7 @@ function useVisualEngine(
 
         col = aces(col);
         col = pow(col, vec3(1.0 / 2.2));
-        // 中景层透明度：亮区不透明，暗区半透（让远景云层透出，形成纵深）
-        float lum = dot(col, vec3(0.299, 0.587, 0.114));
-        float layerAlpha = uAlpha * mix(0.3, 1.0, smoothstep(0.03, 0.3, lum));
-        gl_FragColor = vec4(col, layerAlpha);
+        gl_FragColor = vec4(col, uAlpha);
       }
     `;
     const fieldMat = new THREE.ShaderMaterial({
@@ -295,204 +337,9 @@ function useVisualEngine(
     });
     const fieldGeo = new THREE.PlaneGeometry(2, 2);
     const fieldMesh = new THREE.Mesh(fieldGeo, fieldMat);
-    fieldMesh.position.z = 0;          // 第2层 中景：z=0
-    fieldMesh.renderOrder = 1;
+    fieldMesh.position.z = 0;          // 单层：z=0
     fieldMesh.frustumCulled = false;
     scene.add(fieldMesh);
-
-    // ==================================================================
-    // 第1层：远景体积云（raymarching，z=-1，视差系数 0.02）
-    // 简化 raymarching：2D value noise + 时间维度近似 3D，24 步保证编译通过
-    // 低饱和（uTint*0.5）+ 慢节奏流动 + Beer-Lambert 散射，作为氛围底色（不抢戏）
-    // ==================================================================
-    const cloudUniforms = {
-      uTime: uniforms.uTime, uBass: uniforms.uBass, uMid: uniforms.uMid, uTreble: uniforms.uTreble,
-      uEnergy: uniforms.uEnergy, uEnv: uniforms.uEnv, uAlpha: uniforms.uAlpha, uIntensity: uniforms.uIntensity,
-      uTint: uniforms.uTint, uAccent: uniforms.uAccent, uResolution: uniforms.uResolution,
-      uParallax: { value: new THREE.Vector2(0, 0) },   // 远景视差（独立，强度 0.02）
-    };
-    const cloudFS = `
-      precision highp float;
-      uniform float uTime, uBass, uEnv, uEnergy, uAlpha, uIntensity;
-      uniform vec3 uTint, uAccent;
-      uniform vec2 uParallax, uResolution;
-      varying vec2 vUv;
-
-      // hash + value noise（轻量，保证编译通过）
-      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-      float vnoise(vec2 p){
-        vec2 i = floor(p); vec2 f = fract(p);
-        vec2 u = f * f * (3.0 - 2.0 * f);
-        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
-                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
-      }
-      // 用 2D noise + 时间维度近似 3D value noise（避免 simplex 指令过多）
-      float noise3(vec3 p){
-        float a = vnoise(p.xy + p.z * 17.0);
-        float b = vnoise(p.xy + (p.z + 1.0) * 17.0);
-        float fz = fract(p.z);
-        float u = fz * fz * (3.0 - 2.0 * fz);
-        return mix(a, b, u);
-      }
-      float fbm3(vec3 p){
-        float v = 0.0; float a = 0.5;
-        for (int i = 0; i < 3; i++) { v += a * noise3(p); p *= 2.0; a *= 0.5; }
-        return v;
-      }
-
-      vec3 aces(vec3 x) {
-        const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
-        return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
-      }
-
-      void main() {
-        vec2 uv = vUv + uParallax;
-        // 相机原点在 uv 平面，视线沿 +z 步进穿过体积
-        vec3 ro = vec3(uv, 0.0);
-        vec3 rd = vec3(0.0, 0.0, 1.0);
-
-        float t = uTime * 0.08;            // 云缓慢流动
-        float bassExp = 1.0 + uBass * 0.6; // bass 驱动密度膨胀
-        float envLight = 0.4 + uEnv * 0.9; // env 驱动光照脉动
-
-        const int STEPS = 24;
-        float stepSize = 1.0 / float(STEPS);
-        float transmittance = 1.0;
-        vec3 col = vec3(0.0);
-
-        for (int i = 0; i < STEPS; i++) {
-          vec3 pos = ro + rd * (float(i) * stepSize);
-          vec3 np = pos * 2.2 + vec3(0.0, 0.0, t);
-          // 3D 密度（fbm3 近似）+ bass 膨胀
-          float d = fbm3(np * bassExp);
-          // 阈值化：低于 0.42 视为空气，0.78 以上为密云
-          d = smoothstep(0.42, 0.78, d);
-          d *= stepSize * 2.2;
-          if (d > 0.001) {
-            // Beer-Lambert 衰减
-            float dt = exp(-d * 1.4);
-            // 光照散射：朝光源方向采样
-            float lightSample = noise3(np * 0.7 + vec3(0.0, 0.35, t * 1.3));
-            float scatter = exp(-d * 0.7) * lightSample * envLight;
-            // 云色：低饱和（uTint*0.5 + 少量 uAccent，不抢戏）
-            vec3 cloudCol = mix(uTint * 0.5, uAccent * 0.35, lightSample);
-            col += cloudCol * scatter * transmittance * stepSize * 4.0;
-            transmittance *= dt;
-          }
-          if (transmittance < 0.02) break;
-        }
-
-        // 远景氛围底色（暗深色 + 少量 tint），始终覆盖作为底色
-        vec3 bgCol = mix(vec3(0.025, 0.035, 0.06), uTint * 0.12, 0.35);
-        col = bgCol + col;
-
-        // 缓慢流动的高光点缀（少量 accent，不抢戏）
-        float hi = pow(vnoise(uv * 3.0 + t * 0.5), 5.0) * (uEnergy * 0.25 + 0.05);
-        col += uAccent * hi * 0.25;
-
-        // Vignette
-        float vig = smoothstep(1.3, 0.3, length(uv - 0.5) * 1.4);
-        col *= vig;
-
-        float inten = mix(0.4, 0.9, clamp((uIntensity - 0.2) / 1.3, 0.0, 1.0));
-        col *= inten;
-        col = aces(col);
-        col = pow(col, vec3(1.0 / 2.2));
-
-        // 远景作为底色，全屏覆盖
-        gl_FragColor = vec4(col, uAlpha);
-      }
-    `;
-    const cloudMat = new THREE.ShaderMaterial({
-      uniforms: cloudUniforms,
-      vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
-      fragmentShader: cloudFS, transparent: true, depthWrite: false, depthTest: false,
-    });
-    const cloudGeo = new THREE.PlaneGeometry(2, 2);
-    const cloudMesh = new THREE.Mesh(cloudGeo, cloudMat);
-    cloudMesh.position.z = -1;         // 第1层 远景：z=-1
-    cloudMesh.renderOrder = 0;         // 最先渲染（远景底色）
-    cloudMesh.frustumCulled = false;
-    scene.add(cloudMesh);
-
-    // ==================================================================
-    // 第3层：前景粒子（THREE.Points，z=1，视差系数 0.12，反向移动）
-    // 约 150 颗发光粒子：磁吸鼠标 + 拖动出尾迹 + 节拍爆发 + 边界包裹
-    // additive blending，软发光圆点，颜色 mix(uTint, uAccent, hueOffset)
-    // ==================================================================
-    const PARTICLE_COUNT = 150;
-    const pPos = new Float32Array(PARTICLE_COUNT * 3);
-    const pVel = new Float32Array(PARTICLE_COUNT * 2);
-    const pLife = new Float32Array(PARTICLE_COUNT);
-    const pSize = new Float32Array(PARTICLE_COUNT);
-    const pHue = new Float32Array(PARTICLE_COUNT);
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      // 位置在 [-1,1] 正交相机空间（全屏）
-      pPos[i * 3] = (Math.random() - 0.5) * 2;
-      pPos[i * 3 + 1] = (Math.random() - 0.5) * 2;
-      pPos[i * 3 + 2] = 0;
-      pVel[i * 2] = (Math.random() - 0.5) * 0.08;
-      pVel[i * 2 + 1] = (Math.random() - 0.5) * 0.08;
-      pLife[i] = Math.random();
-      pSize[i] = 10 + Math.random() * 18;
-      pHue[i] = Math.random();
-    }
-    const pGeo = new THREE.BufferGeometry();
-    const pPosAttr = new THREE.BufferAttribute(pPos, 3);
-    pPosAttr.setUsage(THREE.DynamicDrawUsage);
-    const pLifeAttr = new THREE.BufferAttribute(pLife, 1);
-    pLifeAttr.setUsage(THREE.DynamicDrawUsage);
-    pGeo.setAttribute('position', pPosAttr);
-    pGeo.setAttribute('aLife', pLifeAttr);
-    pGeo.setAttribute('aSize', new THREE.BufferAttribute(pSize, 1));
-    pGeo.setAttribute('aHue', new THREE.BufferAttribute(pHue, 1));
-    const pointsUniforms = {
-      uTint: uniforms.uTint, uAccent: uniforms.uAccent, uAlpha: uniforms.uAlpha,
-      uPixelRatio: { value: renderer.getPixelRatio() },
-    };
-    const pointsMat = new THREE.ShaderMaterial({
-      uniforms: pointsUniforms,
-      vertexShader: `
-        attribute float aSize;
-        attribute float aLife;
-        attribute float aHue;
-        uniform float uPixelRatio;
-        varying float vLife;
-        varying float vHue;
-        void main() {
-          vLife = aLife;
-          vHue = aHue;
-          // 大小随 life 衰减（正交相机无需透视除法）
-          gl_PointSize = aSize * uPixelRatio * (0.3 + aLife * 0.7);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        precision highp float;
-        uniform vec3 uTint, uAccent;
-        uniform float uAlpha;
-        varying float vLife;
-        varying float vHue;
-        void main() {
-          vec2 c = gl_PointCoord - 0.5;
-          float d = length(c);
-          if (d > 0.5) discard;
-          // 软发光圆点：外层光晕 + 内核
-          float glow = exp(-d * 7.0);
-          float core = exp(-d * 28.0);
-          vec3 col = mix(uTint, uAccent, vHue);
-          float inten = (glow * 0.55 + core * 1.0) * vLife;
-          gl_FragColor = vec4(col * inten, inten * uAlpha * 0.85);
-        }
-      `,
-      transparent: true, depthWrite: false, depthTest: false,
-      blending: THREE.AdditiveBlending,
-    });
-    const pointsObj = new THREE.Points(pGeo, pointsMat);
-    pointsObj.position.z = 1;          // 第3层 前景：z=1
-    pointsObj.renderOrder = 2;         // 最后渲染（前景）
-    pointsObj.frustumCulled = false;
-    scene.add(pointsObj);
 
     // shader 编译错误检测：在 animate 首次 render 后进行（renderer.compile 是惰性的）
     renderer.compile(scene, camera);
@@ -542,8 +389,8 @@ function useVisualEngine(
     let isDragging = false;
     let dragDeltaX = 0, dragDeltaY = 0;
     const ripples: { uv: THREE.Vector2; time: number }[] = [];
-    // v3.1.8: 鼠标拖尾轨迹（FIFO，8 个历史位置）
-    const TRAIL_MAX = 8;
+    // v3.1.12: 彗星拖尾轨迹（FIFO，20 个历史位置；头部最新亮 accent，尾部最旧暗 tint）
+    const TRAIL_MAX = 20;
     const trail: { uv: THREE.Vector2; time: number }[] = [];
     let lastTrailTime = 0;
 
@@ -556,18 +403,7 @@ function useVisualEngine(
       beatCount++;
       const curBpm = player.getBpm();
       if (curBpm > 0) beatInterval = 60 / curBpm;
-      // 第3层 节拍爆发：所有粒子向外径向冲量 + life 重置
-      const burst = 0.6 + smoothBass * 0.5;
-      for (let i = 0; i < PARTICLE_COUNT; i++) {
-        const px = pPos[i * 3];
-        const py = pPos[i * 3 + 1];
-        const len = Math.sqrt(px * px + py * py) || 0.001;
-        pVel[i * 2] += (px / len) * burst;
-        pVel[i * 2 + 1] += (py / len) * burst;
-        pLife[i] = 1.0;
-      }
-      pPosAttr.needsUpdate = true;
-      pLifeAttr.needsUpdate = true;
+      // v3.1.12: 单层架构已无粒子系统，节拍仅驱动 energy/env → shader 内带宽膨胀 + 亮度脉冲
     });
 
     // 可视化频谱仍用 AnalyserNode（v2.2 删了 crossOrigin，频谱不再静默）
@@ -597,8 +433,8 @@ function useVisualEngine(
       mouseVelVecTarget.set((dx / dirLen) * velScale, -(dy / dirLen) * velScale);
       lastPointerX = e.clientX; lastPointerY = e.clientY; lastPointerT = nowMs;
       mouseUVTarget.set(newUvx, newUvy);
-      // v3.1.8: 拖尾轨迹——移动时每 40ms 记录一个位置（避免过密）
-      if (nowMs - lastTrailTime > 40 && speed > 0.05) {
+      // v3.1.12: 彗星拖尾——移动时每 20ms 记录一个位置（更密，长拖尾感）
+      if (nowMs - lastTrailTime > 20 && speed > 0.05) {
         trail.push({ uv: new THREE.Vector2(newUvx, newUvy), time: nowMs });
         if (trail.length > TRAIL_MAX) trail.shift();
         lastTrailTime = nowMs;
@@ -755,15 +591,21 @@ function useVisualEngine(
           (rippleUniforms[i].value as THREE.Vector4).set(0, 0, -10, 0);
         }
       }
-      // v3.1.8: 拖尾轨迹 age 更新，超过 0.8s 移除，同步到 8 个 vec4 uniform
+      // v3.1.12: 彗星拖尾 age 更新，超过 0.8s 移除，同步到 20 个 vec4 uniform
+      // 反序映射：uTrail0 = 最新点（彗星头部，亮 accent），uTrail19 = 最旧点（尾部，暗 tint）
       for (let i = trail.length - 1; i >= 0; i--) {
         if ((now - trail[i].time) / 1000 > 0.8) trail.splice(i, 1);
       }
       const trailUniforms = [uniforms.uTrail0, uniforms.uTrail1, uniforms.uTrail2, uniforms.uTrail3,
-        uniforms.uTrail4, uniforms.uTrail5, uniforms.uTrail6, uniforms.uTrail7];
+        uniforms.uTrail4, uniforms.uTrail5, uniforms.uTrail6, uniforms.uTrail7, uniforms.uTrail8,
+        uniforms.uTrail9, uniforms.uTrail10, uniforms.uTrail11, uniforms.uTrail12, uniforms.uTrail13,
+        uniforms.uTrail14, uniforms.uTrail15, uniforms.uTrail16, uniforms.uTrail17, uniforms.uTrail18,
+        uniforms.uTrail19];
       for (let i = 0; i < TRAIL_MAX; i++) {
-        if (i < trail.length) {
-          const tr = trail[i];
+        // trail 数组：[0]=最旧，[len-1]=最新；uTrail{i} 想要第 i 新（i=0 最新）
+        const trailIdx = trail.length - 1 - i;
+        if (trailIdx >= 0) {
+          const tr = trail[trailIdx];
           (trailUniforms[i].value as THREE.Vector4).set(tr.uv.x, tr.uv.y, tr.time / 1000, 1);
         } else {
           (trailUniforms[i].value as THREE.Vector4).set(0, 0, -10, 0);
@@ -777,72 +619,15 @@ function useVisualEngine(
       uniforms.uEnergy.value = energy;
       uniforms.uEnv.value = env;
 
-      // === 三层视差联动 ===
-      // parallax = (mouseUV - 0.5)：远景*0.02、中景*0.05、前景反向*0.12（产生纵深）
-      const parallaxX = mouseUV.x - 0.5;
-      const parallaxY = mouseUV.y - 0.5;
-      (cloudUniforms.uParallax.value as THREE.Vector2).set(parallaxX * 0.02, parallaxY * 0.02);
-      (uniforms.uParallax.value as THREE.Vector2).set(parallaxX * 0.05, parallaxY * 0.05);
-      // 前景粒子整体反向移动产生纵深
-      pointsObj.position.x = -parallaxX * 0.12;
-      pointsObj.position.y = -parallaxY * 0.12;
-
-      // === 第3层 前景粒子 CPU 更新（磁吸 + 拖动尾迹 + 阻尼 + 边界包裹） ===
-      const mx = parallaxX * 2;          // 鼠标在 [-1,1] 正交空间
-      const my = parallaxY * 2;
-      const mSpd = mouseStrength;        // 0~0.8
-      for (let i = 0; i < PARTICLE_COUNT; i++) {
-        let px = pPos[i * 3];
-        let py = pPos[i * 3 + 1];
-        let vx = pVel[i * 2];
-        let vy = pVel[i * 2 + 1];
-        // 磁吸：0.3 半径内向鼠标施力
-        const dx = mx - px;
-        const dy = my - py;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 0.3 && dist > 0.001) {
-          const force = (0.3 - dist) / 0.3 * 0.6;
-          vx += (dx / dist) * force * dt;
-          vy += (dy / dist) * force * dt;
-        }
-        // 鼠标拖动出尾迹：鼠标速度大时附近粒子被拖走
-        if (mSpd > 0.1 && dist < 0.4) {
-          const dragF = mSpd * (1 - dist / 0.4) * 1.2;
-          vx += mouseVelVec.x * dragF * dt * 5;
-          vy += mouseVelVec.y * dragF * dt * 5;
-        }
-        // 阻尼（自然减速）
-        const damp = Math.pow(0.45, dt);
-        vx *= damp; vy *= damp;
-        // 位置更新
-        px += vx * dt;
-        py += vy * dt;
-        // 边界包裹（飞出画面从另一边回来）
-        if (px > 1.15) px = -1.15; else if (px < -1.15) px = 1.15;
-        if (py > 1.15) py = -1.15; else if (py < -1.15) py = 1.15;
-        // life 衰减，归零后重生
-        pLife[i] -= dt * 0.12;
-        if (pLife[i] <= 0) {
-          pLife[i] = 1.0;
-          px = (Math.random() - 0.5) * 2;
-          py = (Math.random() - 0.5) * 2;
-          vx = (Math.random() - 0.5) * 0.05;
-          vy = (Math.random() - 0.5) * 0.05;
-        }
-        pPos[i * 3] = px;
-        pPos[i * 3 + 1] = py;
-        pVel[i * 2] = vx;
-        pVel[i * 2 + 1] = vy;
-      }
-      pPosAttr.needsUpdate = true;
-      pLifeAttr.needsUpdate = true;
+      // === v3.1.12: 单层架构——无三层视差、无粒子 CPU 更新（全在 shader 内）===
+      // 拖拽探头 uCamPan 已在上方同步；其余效果（流光/频谱环/拖尾/光斑/涟漪）由 shader 完成
 
       // 调试信息
       (window as any).__beatDebug = {
         count: beatCount, beat: env, energy: energy, bass: smoothBass,
         mid: smoothMid, treble: smoothTreb,
         ripples: ripples.length, mouse: mouseStrength,
-        renderMode: '3-layer-parallax',
+        renderMode: 'single-flow',
         uAlpha: uniforms.uAlpha.value,
       };
       // 同步 CSS 变量驱动沉浸式歌词（beat 脉冲 + 封面色辉光）— 用平滑 env（节拍包络）
@@ -856,12 +641,12 @@ function useVisualEngine(
 
       renderer.render(scene, camera);
 
-      // v3.1.11: 首次 render 后检测 shader 编译状态（renderer.compile 是惰性的，真正编译在首次 render）
-      // 覆盖三层材质：远景云层 / 中景场域 / 前景粒子
+      // v3.1.12: 首次 render 后检测 shader 编译状态（renderer.compile 是惰性的，真正编译在首次 render）
+      // 单层架构：仅检测 fieldMat
       if (!shaderChecked) {
         shaderChecked = true;
         const gl2 = renderer.getContext() as WebGLRenderingContext | null;
-        const mats: [string, any][] = [['cloud', cloudMat], ['field', fieldMat], ['points', pointsMat]];
+        const mats: [string, any][] = [['field', fieldMat]];
         let failed = false;
         let failLog = '';
         for (const [name, mat] of mats) {
@@ -890,7 +675,7 @@ function useVisualEngine(
           dbg.textContent = 'Shader 编译失败:\n\n' + failLog + '\n请把此信息发给开发者';
           document.body.appendChild(dbg);
         } else {
-          console.log('[Visual] All shaders linked OK ✓ (3 layers)');
+          console.log('[Visual] field shader linked OK ✓ (single layer)');
         }
       }
     };
@@ -902,7 +687,7 @@ function useVisualEngine(
     };
     window.addEventListener('resize', onResize);
 
-    // 封面主色 K-Means 提取（保留现有逻辑，驱动 tint + accent 双色 → 云雾色彩）
+    // 封面主色 K-Means 提取（保留现有逻辑，驱动 tint + accent 双色 → 流光色彩）
     const updateCover = (coverUrl: string) => {
       if (!coverUrl) return;
       const img = new Image();
@@ -971,10 +756,8 @@ function useVisualEngine(
       canvasRef.current?.removeEventListener('pointerdown', onPointerDown);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('blur', onPointerLeaveWin);
-      // 三层几何/材质清理（远景云层 + 中景场域 + 前景粒子）
+      // 单层几何/材质清理（仅 fieldMat；v3.1.12 已移除云层与粒子）
       fieldGeo.dispose(); fieldMat.dispose();
-      cloudGeo.dispose(); cloudMat.dispose();
-      pGeo.dispose(); pointsMat.dispose();
       renderer.dispose();
       delete (window as any).__updateCover;
       delete (window as any).__beatDebug;
