@@ -741,7 +741,8 @@ class PlayerCore {
         const data = await res.json();
         console.log('[PlayerCore] toggleLike response: HTTP', res.status, 'body:', JSON.stringify(data));
         if (!data.ok) {
-          console.warn('[PlayerCore] toggleLike sync failed (kept local):', data.error, data.raw || '');
+          // 打印完整 data，避免 error 字段为 undefined 被省略时丢失线索
+          console.warn('[PlayerCore] toggleLike sync failed (kept local):', { error: data.error, raw: data.raw, full: data });
         } else {
           console.log('[PlayerCore] toggleLike sync ok:', data.raw || '');
         }

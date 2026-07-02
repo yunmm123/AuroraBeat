@@ -432,8 +432,14 @@ const server = http.createServer(async (req, res) => {
       if (!id) { sendJSON(res, { error: 'Missing id' }, 400); return; }
       const info = await getLoginInfo();
       if (!info.loggedIn) { sendJSON(res, { error: 'LOGIN_REQUIRED' }, 401); return; }
+      // trackId 必须是数字类型，字符串会让网易 API 抛类型错误（且异常可能无 message）
+      const trackId = typeof id === 'number' ? id : parseInt(String(id), 10);
+      if (!Number.isFinite(trackId)) {
+        sendJSON(res, { ok: false, error: `Invalid id (not numeric): ${id}` });
+        return;
+      }
       try {
-        const r = await like_song({ trackId: id, like, cookie: userCookie, timestamp: Date.now() });
+        const r = await like_song({ trackId, like, cookie: userCookie, timestamp: Date.now() });
         console.log('[Like] netease response:', JSON.stringify(r?.body || r));
         // 网易 API 即使 HTTP 200 也可能在 body 里返回 code != 200
         const code = r?.body?.code ?? r?.code;
@@ -444,8 +450,13 @@ const server = http.createServer(async (req, res) => {
         }
         sendJSON(res, { ok: true, liked: like, raw: r?.body || r });
       } catch (e) {
-        console.error('[Like] error:', e.message, e.stack);
-        sendJSON(res, { ok: false, error: e.message });
+        // 健壮处理：e 可能是 Error / 字符串 / 对象 / 无 message 的异常
+        const errStr = (e instanceof Error) ? e.message
+          : (typeof e === 'string') ? e
+          : (e && typeof e === 'object') ? (e.message || e.msg || JSON.stringify(e))
+          : String(e);
+        console.error('[Like] error:', errStr, e?.stack || '', e);
+        sendJSON(res, { ok: false, error: errStr, raw: e?.body || (typeof e === 'object' ? e : { value: e }) });
       }
       return;
     }
