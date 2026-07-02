@@ -49,35 +49,7 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 // 封面取色：K-Means 主色 tint + 副色 accent，驱动云雾色彩
 // ====================================================================
 
-// ashima/webgl-noise simplex noise（共享 GLSL 片段，核心体位移用）
-const NOISE_GLSL = `
-  vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
-  vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
-  vec4 permute(vec4 x){return mod289(((x*34.0)+10.0)*x);}
-  vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
-  float snoise(vec3 v){
-    const vec2 C=vec2(1.0/6.0,1.0/3.0); const vec4 D=vec4(0.0,0.5,1.0,2.0);
-    vec3 i=floor(v+dot(v,C.yyy)); vec3 x0=v-i+dot(i,C.xxx);
-    vec3 g=step(x0.yzx,x0.xyz); vec3 l=1.0-g; vec3 i1=min(g.xyz,l.zxy); vec3 i2=max(g.xyz,l.zxy);
-    vec3 x1=x0-i1+C.xxx; vec3 x2=x0-i2+C.yyy; vec3 x3=x0-D.yyy;
-    i=mod289(i);
-    vec4 p=permute(permute(permute(i.z+vec4(0.0,i1.z,i2.z,1.0))+i.y+vec4(0.0,i1.y,i2.y,1.0))+i.x+vec4(0.0,i1.x,i2.x,1.0));
-    float n_=0.142857142857; vec3 ns=n_*D.wyz-D.xzx;
-    vec4 j=p-49.0*floor(p*ns.z*ns.z);
-    vec4 x_=floor(j*ns.z); vec4 y_=floor(j-7.0*x_);
-    vec4 x=x_*ns.x+ns.yyyy; vec4 y=y_*ns.x+ns.yyyy; vec4 h=1.0-abs(x)-abs(y);
-    vec4 b0=vec4(x.xy,y.xy); vec4 b1=vec4(x.zw,y.zw);
-    vec4 s0=floor(b0)*2.0+1.0; vec4 s1=floor(b1)*2.0+1.0; vec4 sh=-step(h,vec4(0.0));
-    vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy; vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
-    vec3 p0=vec3(a0.xy,h.x); vec3 p1=vec3(a0.zw,h.y); vec3 p2=vec3(a1.xy,h.z); vec3 p3=vec3(a1.zw,h.w);
-    vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
-    p0*=norm.x; p1*=norm.y; p2*=norm.z; p3*=norm.w;
-    vec4 m=max(0.5-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0);
-    m=m*m;
-    return 105.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
-  }
-  float fbm(vec3 p){ float v=0.0,a=0.5; for(int i=0;i<4;i++){ v+=a*snoise(p); p*=2.0; a*=0.5; } return v; }
-`;
+// ashima/webgl-noise simplex noise 已移除（v3.1.10 改用轻量 hash+value noise，保证 shader 编译通过）
 
 function useVisualEngine(
   canvasRef: React.RefObject<HTMLCanvasElement>,
@@ -161,6 +133,7 @@ function useVisualEngine(
       uRipple2: { value: new THREE.Vector4(0, 0, -10, 0) },
     };
     const fieldFS = `
+      precision highp float;
       uniform float uTime, uBass, uMid, uTreble, uEnergy, uEnv, uAlpha, uIntensity, uMouseStrength;
       uniform vec3 uTint, uAccent;
       uniform vec2 uMouseUV, uMouseVel, uCamPan, uResolution;
@@ -168,167 +141,145 @@ function useVisualEngine(
       uniform vec4 uTrail0, uTrail1, uTrail2, uTrail3, uTrail4, uTrail5, uTrail6, uTrail7;
       uniform sampler2D uFreqTex;
       varying vec2 vUv;
-      ${NOISE_GLSL}
 
-      // ACES Filmic tonemapping（单 pass 内完成，不用 OutputPass）
+      // hash + value noise（比 simplex 轻量得多，保证编译通过 + 性能）
+      float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float vnoise(vec2 p){
+        vec2 i = floor(p); vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+      }
+      float fbm(vec2 p){
+        float v = 0.0; float a = 0.5;
+        for (int i = 0; i < 4; i++) { v += a * vnoise(p); p *= 2.0; a *= 0.5; }
+        return v;
+      }
+
       vec3 aces(vec3 x) {
         const float a=2.51, b=0.03, c=2.43, d=0.59, e=0.14;
         return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
       }
 
-      vec3 sampleField(vec2 uv) {
-        // === 极坐标（v3.1.7 核心：音频驱动形态，不再只是封面色密度） ===
+      void main() {
+        vec2 uv = vUv;
         vec2 centered = uv - 0.5;
-        float r = length(centered) * 2.0;          // 0(中心) ~ 1.4(角落)
-        float a = atan(centered.y, centered.x);     // -π ~ π
-        // v3.1.8: 频谱环慢速旋转——整体形态有运动感（不再静态）
-        float aRot = a + uTime * 0.12;
-        float normA = (aRot + 3.14159) / 6.28318;   // 0 ~ 1，旋转后采样频谱纹理
-        normA = fract(normA);                        // 包裹到 0~1
+        float r = length(centered) * 2.0;
+        float ang = atan(centered.y, centered.x);
 
-        // === 1. 鼠标流体推动（v3.1.8 核心：鼠标移动产生明显的方向性偏移） ===
+        // 鼠标影响
         float mDist = distance(uv, uMouseUV);
-        float mInfluence = smoothstep(0.5, 0.0, mDist);  // 鼠标附近影响强
-        // 速度向量推动采样位置——鼠标向右移，云雾被推向右（明显流体感）
+        float mInfluence = smoothstep(0.5, 0.0, mDist);
         vec2 fluidPush = uMouseVel * mInfluence * 0.8;
-        vec2 mouseWarp = vec2(
-          snoise(vec3(uv * 1.5, uTime * 0.10)),
-          snoise(vec3(uv * 1.5 + 17.3, uTime * 0.10))
-        ) * (uMouseStrength + 0.04) * 0.25 * mInfluence;
-        vec2 p = uv + mouseWarp + fluidPush - uCamPan;
 
-        // === 2. 点击涟漪 ===
-        float ripple = 0.0;
-        vec4 rps[3];
-        rps[0] = uRipple0; rps[1] = uRipple1; rps[2] = uRipple2;
-        for (int i = 0; i < 3; i++) {
-          vec4 rr = rps[i];
-          if (rr.w > 0.5) {
-            float age = uTime - rr.z;
-            if (age >= 0.0 && age <= 2.5) {
-              float d = distance(uv, rr.xy);
-              ripple += sin(d * 30.0 - age * 8.0) * exp(-age * 1.5) * 0.16;
-            }
-          }
-        }
+        // === 1. FBM 云雾（流动 + 鼠标推动）===
+        float t = uTime * 0.15;
+        vec2 bp = uv + fluidPush - uCamPan;
+        float cloud = fbm(bp * 1.2 + vec2(t * 0.3, t * 0.2));
+        float cloud2 = fbm(bp * 2.0 + vec2(-t * 0.2, t * 0.25) + cloud * 0.3);
+        float density = cloud * 0.55 + cloud2 * 0.35 + 0.25;
+        density *= (0.7 + uEnergy * 0.6);
 
-        // === 3. 真实 FFT 频谱环（v3.1.8: 旋转 + 节拍呼吸缩放）===
+        // === 2. 频谱环（旋转 + 节拍呼吸）===
+        float aRot = ang + uTime * 0.15;
+        float normA = fract((aRot + 3.14159) / 6.28318);
         float freq = texture2D(uFreqTex, vec2(normA, 0.5)).r;
-        float freqMirror = texture2D(uFreqTex, vec2(1.0 - normA, 0.5)).r;
-        float freqAvg = (freq + freqMirror) * 0.5;
-        // 节拍呼吸：整个环在节拍来临时膨胀（明显缩放运动）
-        float breath = 1.0 + uEnv * 0.18 + uBass * 0.10;
-        float ringBase = 0.42 * breath;
-        float ringR = ringBase + freqAvg * 0.42;
-        float ringW = 0.014 + uEnergy * 0.012;
-        float specRing = exp(-pow((r - ringR) / ringW, 2.0)) * (0.5 + freqAvg * 0.8);
-        float specFill = smoothstep(ringR, ringR - 0.12, r) * smoothstep(ringBase - 0.05, ringBase, r) * freqAvg * 0.25;
+        float freqM = texture2D(uFreqTex, vec2(1.0 - normA, 0.5)).r;
+        float freqAvg = (freq + freqM) * 0.5;
+        float breath = 1.0 + uEnv * 0.20 + uBass * 0.10;
+        float ringR = 0.40 * breath + freqAvg * 0.40;
+        float ringW = 0.016 + uEnergy * 0.012;
+        float specRing = exp(-pow((r - ringR) / ringW, 2.0)) * (0.6 + freqAvg * 0.9);
 
-        // === 4. 径向光线（v3.1.8: 也跟随旋转）===
-        float rayNoise = snoise(vec3(normA * 16.0, uTime * 0.20, 0.0));
-        float rays = pow(max(0.0, rayNoise), 4.0) * (0.25 + uTreble * 0.85);
-        rays *= smoothstep(1.3, 0.15, r) * smoothstep(0.15, 0.35, r);
+        // === 3. 径向光线 ===
+        float rayN = vnoise(vec2(normA * 20.0, uTime * 0.3));
+        float rays = pow(max(0.0, rayN), 3.0) * (0.2 + uTreble * 0.9);
+        rays *= smoothstep(1.3, 0.2, r) * smoothstep(0.15, 0.35, r);
 
-        // === 5. 节拍冲击波 ===
+        // === 4. 节拍冲击波 ===
         float beatWave = 0.0;
         if (uEnv > 0.01) {
           float wavePos = 0.3 + (1.0 - uEnv) * 0.7;
-          float waveDist = abs(r - wavePos);
-          beatWave = exp(-waveDist * 14.0) * uEnv * 0.35;
+          beatWave = exp(-abs(r - wavePos) * 14.0) * uEnv * 0.35;
         }
 
-        // === 6. FBM 云雾基底（v3.1.8: 流动加速，明显流动感）===
-        float t = uTime * 0.16;   // 加速流动
-        float bassZoom = 1.0 - uBass * 0.12;
-        vec2 bp = p * bassZoom;
-        float cloud1 = fbm(vec3(bp * 0.7, t));
-        float cloud2 = fbm(vec3(bp * 1.4 + cloud1 * 0.3, t * 1.3 + 31.4));
-        float density = cloud1 * 0.5 + cloud2 * 0.3 + 0.30;
-        density *= (0.65 + uEnergy * 0.5);
+        // === 5. 点击涟漪（3 个，展开避免数组）===
+        float ripple = 0.0;
+        float age0 = uTime - uRipple0.z;
+        if (uRipple0.w > 0.5 && age0 >= 0.0 && age0 <= 2.5) {
+          ripple += sin(distance(uv, uRipple0.xy) * 30.0 - age0 * 8.0) * exp(-age0 * 1.5) * 0.16;
+        }
+        float age1 = uTime - uRipple1.z;
+        if (uRipple1.w > 0.5 && age1 >= 0.0 && age1 <= 2.5) {
+          ripple += sin(distance(uv, uRipple1.xy) * 30.0 - age1 * 8.0) * exp(-age1 * 1.5) * 0.16;
+        }
+        float age2 = uTime - uRipple2.z;
+        if (uRipple2.w > 0.5 && age2 >= 0.0 && age2 <= 2.5) {
+          ripple += sin(distance(uv, uRipple2.xy) * 30.0 - age2 * 8.0) * exp(-age2 * 1.5) * 0.16;
+        }
 
-        // === 7. 合成 ===
-        float struct = specRing + specFill + rays * 0.7 + beatWave + ripple;
-        float total = density * 0.55 + struct;
-        vec3 col = mix(uTint * 0.4, uAccent * 0.7, density);
+        // === 合成 ===
+        vec3 col = mix(uTint * 0.45, uAccent * 0.75, density);
         col = mix(vec3(0.05, 0.07, 0.12), col, smoothstep(-0.1, 0.55, density));
-        col += uAccent * specRing * 0.9;
-        col += vec3(specRing * 0.3);
-        col += uTint * rays * 0.6;
-        col += uAccent * beatWave * 0.6;
+        col += uAccent * specRing * 1.0;
+        col += vec3(specRing * 0.35);
+        col += uTint * rays * 0.7;
+        col += uAccent * beatWave * 0.7;
         col += vec3(0.10, 0.07, 0.04) * uEnv;
         col += uAccent * uBass * 0.12 * smoothstep(0.6, 0.0, r);
-        return col;
-      }
+        col += uAccent * ripple * 0.8;
 
-      void main() {
-        vec2 uv = vUv;
-        // v3.1.9: sampleField 只调用一次（原 RGB shift+bloom 调用 28 次，超出 GPU 指令限制致编译失败）
-        vec3 col = sampleField(uv);
+        // 中心光晕
+        float centerGlow = exp(-r * 1.4) * (0.20 + uEnv * 0.5 + uBass * 0.3);
+        col += mix(uTint, uAccent, 0.5) * centerGlow * 0.6;
 
-        // 轻微色差（用偏移 uv 重新计算一次色彩偏移，只算亮度差，开销小）
-        float shiftAmt = 0.0015 + uEnergy * 0.001;
-        float rShift = sampleField(uv + vec2(shiftAmt, 0.0)).r;
-        col.r = mix(col.r, rShift, 0.5);
+        // 鼠标光斑（三层）
+        float mouseGlow = exp(-mDist * 3.5) * (0.45 + uMouseStrength * 0.6);
+        col += uAccent * mouseGlow * 0.85 + vec3(mouseGlow * 0.22);
+        float mouseMid = exp(-mDist * 12.0) * (0.55 + uMouseStrength * 0.8);
+        col += mix(uTint, uAccent, 0.4) * mouseMid * 0.55;
+        float mouseCore = exp(-mDist * 50.0) * (0.85 + uMouseStrength * 0.5);
+        col += vec3(mouseCore * 0.65);
 
-        // 简化 bloom：仅对高亮区做一次亮增强（不用 25 次采样）
-        float brightness = dot(col, vec3(0.299, 0.587, 0.114));
-        float bloomBoost = smoothstep(0.5, 0.9, brightness) * (0.4 + uEnergy * 0.5);
-        col += col * bloomBoost;
+        // 鼠标拖尾（8 个，展开）
+        float td, age, tg;
+        td = distance(uv, uTrail0.xy); age = uTime - uTrail0.z;
+        if (uTrail0.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.0)*tg*0.6 + mix(uTint,uAccent,0.0)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
+        td = distance(uv, uTrail1.xy); age = uTime - uTrail1.z;
+        if (uTrail1.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.14)*tg*0.6 + mix(uTint,uAccent,0.14)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
+        td = distance(uv, uTrail2.xy); age = uTime - uTrail2.z;
+        if (uTrail2.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.28)*tg*0.6 + mix(uTint,uAccent,0.28)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
+        td = distance(uv, uTrail3.xy); age = uTime - uTrail3.z;
+        if (uTrail3.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.42)*tg*0.6 + mix(uTint,uAccent,0.42)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
+        td = distance(uv, uTrail4.xy); age = uTime - uTrail4.z;
+        if (uTrail4.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.57)*tg*0.6 + mix(uTint,uAccent,0.57)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
+        td = distance(uv, uTrail5.xy); age = uTime - uTrail5.z;
+        if (uTrail5.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.71)*tg*0.6 + mix(uTint,uAccent,0.71)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
+        td = distance(uv, uTrail6.xy); age = uTime - uTrail6.z;
+        if (uTrail6.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,0.85)*tg*0.6 + mix(uTint,uAccent,0.85)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
+        td = distance(uv, uTrail7.xy); age = uTime - uTrail7.z;
+        if (uTrail7.w > 0.5 && age >= 0.0 && age <= 0.8) { tg = exp(-td*30.0)*exp(-age*3.0); col += mix(uTint,uAccent,1.0)*tg*0.6 + mix(uTint,uAccent,1.0)*exp(-td*8.0)*exp(-age*2.5)*0.15; }
 
-        // Vignette（减弱，让四周也可见特效）
+        // 星点
+        float stars = pow(max(0.0, hash(uv * 150.0) - 0.96), 1.0) * 4.0;
+        col += vec3(stars * 0.5);
+
+        // Vignette
         float vignette = smoothstep(1.5, 0.25, length(uv - 0.5) * 1.3);
         col *= vignette;
 
-        // 中心径向光晕——始终可见的视觉焦点，节拍来临时膨胀
-        float centerDist = distance(uv, vec2(0.5));
-        float centerGlow = exp(-centerDist * 2.8) * (0.22 + uEnv * 0.6 + uBass * 0.35);
-        col += mix(uTint, uAccent, 0.5) * centerGlow * 0.7;
+        // 简化 bloom
+        float brightness = dot(col, vec3(0.299, 0.587, 0.114));
+        col += col * smoothstep(0.5, 0.9, brightness) * (0.4 + uEnergy * 0.5);
 
-        // v3.1.8: 鼠标光斑——三层（大范围柔光 + 中范围亮带 + 内核亮点），静止时也明显可见
-        float mDistMain = distance(uv, uMouseUV);
-        float mouseGlow = exp(-mDistMain * 3.5) * (0.45 + uMouseStrength * 0.6);
-        col += uAccent * mouseGlow * 0.85 + vec3(mouseGlow * 0.22);
-        float mouseMid = exp(-mDistMain * 12.0) * (0.55 + uMouseStrength * 0.8);
-        col += mix(uTint, uAccent, 0.4) * mouseMid * 0.55;
-        float mouseCore = exp(-mDistMain * 50.0) * (0.85 + uMouseStrength * 0.5);
-        col += vec3(mouseCore * 0.65);
+        // film grain
+        col += (hash(uv * uResolution + uTime) - 0.5) * 0.04;
 
-        // v3.1.8: 鼠标拖尾光迹——8 个历史位置，越新越亮，形成彩色光带
-        vec4 trails[8];
-        trails[0]=uTrail0; trails[1]=uTrail1; trails[2]=uTrail2; trails[3]=uTrail3;
-        trails[4]=uTrail4; trails[5]=uTrail5; trails[6]=uTrail6; trails[7]=uTrail7;
-        for (int i = 0; i < 8; i++) {
-          vec4 tr = trails[i];
-          if (tr.w > 0.5) {
-            float age = uTime - tr.z;
-            if (age >= 0.0 && age <= 0.8) {
-              float td = distance(uv, tr.xy);
-              float trailGlow = exp(-td * 30.0) * exp(-age * 3.0);
-              float hue = float(i) / 8.0;
-              vec3 trailCol = mix(uTint, uAccent, hue);
-              col += trailCol * trailGlow * 0.6;
-              float trailSoft = exp(-td * 8.0) * exp(-age * 2.5);
-              col += trailCol * trailSoft * 0.15;
-            }
-          }
-        }
-
-        // 星点
-        float stars = pow(max(0.0, snoise(uv * 150.0)), 18.0) * (0.3 + uTreble * 0.5);
-        col += vec3(stars * 0.5);
-
-        // Film grain（抗 banding + 电影感）
-        float grain = snoise(vec3(uv * uResolution.xy * 0.5, uTime * 2.0)) * 0.04;
-        col += grain;
-
-        // intensity
         float inten = mix(0.5, 1.0, clamp((uIntensity - 0.2) / 1.3, 0.0, 1.0));
         col *= inten;
 
-        // ACES tonemapping + sRGB（单 pass 完成，不用 OutputPass）
         col = aces(col);
         col = pow(col, vec3(1.0 / 2.2));
-
         gl_FragColor = vec4(col, uAlpha);
       }
     `;
@@ -342,37 +293,8 @@ function useVisualEngine(
     fieldMesh.frustumCulled = false;
     scene.add(fieldMesh);
 
-    // shader 编译错误检测（编译失败会静默黑屏，必须主动检测）
-    // 必须在 mesh 加入 scene 之后 compile
+    // shader 编译错误检测：在 animate 首次 render 后进行（renderer.compile 是惰性的）
     renderer.compile(scene, camera);
-    const gl = renderer.getContext() as WebGLRenderingContext | null;
-    if (gl) {
-      const err = gl.getError();
-      if (err !== gl.NO_ERROR) {
-        console.warn('[Visual] WebGL error after compile:', err);
-      }
-      // v3.1.9: 主动检测 shader/program 编译链接错误（getError 不能可靠捕获）
-      const program = (fieldMat as any).program;
-      const glProgram = program?.program || program;
-      if (glProgram && gl.isProgram(glProgram)) {
-        const linkStatus = gl.getProgramParameter(glProgram, gl.LINK_STATUS);
-        if (!linkStatus) {
-          console.error('[Visual] Shader program LINK FAILED:', gl.getProgramInfoLog(glProgram));
-        } else {
-          console.log('[Visual] Shader program linked OK');
-        }
-        const shaders = gl.getAttachedShaders(glProgram);
-        if (shaders) {
-          for (const sh of shaders) {
-            const compiled = gl.getShaderParameter(sh, gl.COMPILE_STATUS);
-            if (!compiled) {
-              const isFrag = gl.getShaderParameter(sh, gl.SHADER_TYPE) === gl.FRAGMENT_SHADER;
-              console.error(`[Visual] ${isFrag ? 'Fragment' : 'Vertex'} shader COMPILE FAILED:`, gl.getShaderInfoLog(sh));
-            }
-          }
-        }
-      }
-    }
 
     // ==================================================================
     // 单 pass 直接渲染——所有效果（bloom/vignette/grain/RGBShift/ACES）都在 shader 内完成
@@ -398,6 +320,7 @@ function useVisualEngine(
     const A = 0.05, D = 0.15, S = 0.55;    // ADSR attack/decay(秒) 与 sustain 电平
     let prevTime = performance.now();
     let beatCount = 0;
+    let shaderChecked = false;   // v3.1.10: 首次 render 后检测一次 shader 编译
 
     // === 歌词协同状态（场域与歌词 1+1=3） ===
     //   lyricPulse：歌词切换时注入微小能量脉冲（场域应答）
@@ -659,6 +582,35 @@ function useVisualEngine(
       rootStyle.setProperty('--lyric-active', curActiveIdx >= 0 ? '1' : '0');
 
       renderer.render(scene, camera);
+
+      // v3.1.10: 首次 render 后检测 shader 编译状态（renderer.compile 是惰性的，真正编译在首次 render）
+      if (!shaderChecked) {
+        shaderChecked = true;
+        const gl2 = renderer.getContext() as WebGLRenderingContext | null;
+        const prog = (fieldMat as any).program;
+        const glProg = prog?.program || prog;
+        if (gl2 && glProg && gl2.isProgram(glProg)) {
+          const linked = gl2.getProgramParameter(glProg, gl2.LINK_STATUS);
+          if (!linked) {
+            const log = gl2.getProgramInfoLog(glProg) || 'unknown';
+            console.error('[Visual] Shader LINK FAILED:', log);
+            // 在画面上显示错误（帮助远程诊断，不再静默黑屏）
+            const dbg = document.createElement('div');
+            dbg.id = 'shader-err';
+            dbg.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9999;background:rgba(20,0,0,.92);color:#ff6b6b;padding:20px 28px;font:13px/1.5 monospace;max-width:80vw;white-space:pre-wrap;border:1px solid #ff6b6b;border-radius:8px;pointer-events:none';
+            dbg.textContent = 'Shader 编译失败:\n\n' + log + '\n\n请把此信息发给开发者';
+            document.body.appendChild(dbg);
+          } else {
+            console.log('[Visual] Shader linked OK ✓');
+            const shs = gl2.getAttachedShaders(glProg);
+            if (shs) for (const sh of shs) {
+              if (!gl2.getShaderParameter(sh, gl2.COMPILE_STATUS)) {
+                console.error('[Visual] shader COMPILE FAILED:', gl2.getShaderInfoLog(sh));
+              }
+            }
+          }
+        }
+      }
     };
     animate();
 
