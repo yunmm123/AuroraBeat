@@ -310,8 +310,12 @@ html, body {
   transform: scale(1) translateY(0) translateZ(0);
   opacity: 1;
   filter: blur(0);
-  /* 渐变填充（封面 tint → white）+ background-clip:text */
-  background: linear-gradient(180deg, var(--cover-tint, #00f5d4) 0%, #ffffff 100%);
+  /* v3.3.2: 渐变改为以白色为主（避免长歌词换行后首行深末行浅看不清）
+     tint 仅在顶部 15% 微染（保留封面色呼应），中段到末段全白保证可读性 */
+  background: linear-gradient(180deg,
+    var(--cover-tint, #00f5d4) 0%,
+    #ffffff 15%,
+    #ffffff 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
