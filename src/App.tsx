@@ -1262,19 +1262,11 @@ const App: React.FC = () => {
     return idx;
   }, [player.currentTime, player.lyrics]);
 
-  // v2.1 行级隧道式歌词：仅渲染当前行前后各 5 行（虚拟窗口，避免 DOM 过多）
-  // v3.1 色彩呼吸场域主角：当前行前后各 4 行（过去行被雾吞没，未来行虚化）
-  const VISIBLE_RANGE = 4;
+  // v3.2.7 歌词始终居中：只渲染当前行，不再滚动（过去/未来行不显示）
   const visibleLines = useMemo(() => {
     if (player.lyrics.length === 0) return [] as { idx: number; text: string; offset: number }[];
     const active = activeLyricIdx < 0 ? 0 : activeLyricIdx;
-    const start = Math.max(0, active - VISIBLE_RANGE);
-    const end = Math.min(player.lyrics.length, active + VISIBLE_RANGE + 1);
-    const arr: { idx: number; text: string; offset: number }[] = [];
-    for (let i = start; i < end; i++) {
-      arr.push({ idx: i, text: player.lyrics[i].text || '', offset: i - active });
-    }
-    return arr;
+    return [{ idx: active, text: player.lyrics[active].text || '', offset: 0 }];
   }, [activeLyricIdx, player.lyrics]);
 
   const playModeIcon = player.playMode === 'single' ? '1' : player.playMode === 'shuffle' ? '⇄' : '↻';
