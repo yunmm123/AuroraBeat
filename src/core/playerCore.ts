@@ -721,15 +721,15 @@ class PlayerCore {
 
   async toggleLike(song: Song): Promise<boolean> {
     const liked = this.state.likedSongs.has(song.id);
-    // 未登录/无服务器：仅本地收藏（不阻塞点击响应）
-    if (!this.serverPort) {
-      const newSet = new Set(this.state.likedSongs);
-      if (liked) newSet.delete(song.id);
-      else newSet.add(song.id);
-      this.state.likedSongs = newSet;
-      this.notify();
-      return !liked;
-    }
+    // 乐观更新：先立即更新本地状态，让点击有反馈（不阻塞 UI）
+    const newSet = new Set(this.state.likedSongs);
+    if (liked) newSet.delete(song.id);
+    else newSet.add(song.id);
+    this.state.likedSongs = newSet;
+    this.notify();
+    // 无服务器：仅本地收藏
+    if (!this.serverPort) return !liked;
+    // 有服务器：尝试同步到网易云，失败时回退本地状态
     try {
       const res = await fetch(`${this.apiBase}/api/song/like`, {
         method: 'POST',
@@ -737,18 +737,27 @@ class PlayerCore {
         body: JSON.stringify({ id: song.id, like: !liked }),
       });
       const data = await res.json();
-      if (data.ok) {
-        const newSet = new Set(this.state.likedSongs);
-        if (liked) newSet.delete(song.id);
-        else newSet.add(song.id);
-        this.state.likedSongs = newSet;
+      if (!data.ok) {
+        // API 失败（登录过期/网易限制等）：回退本地状态
+        console.warn('[PlayerCore] toggleLike API failed:', data.error);
+        const rollback = new Set(this.state.likedSongs);
+        if (liked) rollback.add(song.id);
+        else rollback.delete(song.id);
+        this.state.likedSongs = rollback;
         this.notify();
-        return !liked;
+        return liked;
       }
+      return !liked;
     } catch (e) {
+      // 网络错误：回退本地状态
       console.error('[PlayerCore] toggleLike error:', e);
+      const rollback = new Set(this.state.likedSongs);
+      if (liked) rollback.add(song.id);
+      else rollback.delete(song.id);
+      this.state.likedSongs = rollback;
+      this.notify();
+      return liked;
     }
-    return liked;
   }
 
   async fetchLikedList(): Promise<string[]> {
