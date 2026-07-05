@@ -6,6 +6,7 @@
 const {
   search,
   cloudsearch,
+  search_hot_detail,
   song_detail,
   song_url,
   song_url_v1,
@@ -305,6 +306,22 @@ const server = http.createServer(async (req, res) => {
       const limit = parseInt(url.searchParams.get('limit') || '30');
       const songs = await handleSearch(kw, limit);
       sendJSON(res, { songs });
+      return;
+    }
+
+    // ========== v3.6.0 A2: 热搜榜（搜索框聚焦时展示） ==========
+    if (pn === '/api/search/hot') {
+      try {
+        const r = await search_hot_detail({ cookie: userCookie });
+        const list = (r.body?.data || []).map(h => ({
+          searchWord: h.searchWord,
+          score: h.score,
+          content: h.content || '',
+        })).slice(0, 15);
+        sendJSON(res, { hots: list });
+      } catch (e) {
+        sendJSON(res, { hots: [], error: String(e?.message || e) });
+      }
       return;
     }
 

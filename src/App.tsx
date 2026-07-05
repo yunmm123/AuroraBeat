@@ -26,6 +26,21 @@ const QUALITY_OPTIONS = [
 ];
 const QUALITY_LABELS: Record<string, string> = { standard: '标准', exhigh: '极高', lossless: '无损', hires: 'Hi-Res' };
 
+// v3.6.0 B1: 把 KeyboardEvent.code 转为人类可读的字符串
+function formatKeyCode(code: string): string {
+  if (!code || code === '未设置') return '未设置';
+  if (code === 'Space') return '空格';
+  if (code.startsWith('Key')) return code.slice(3);
+  if (code.startsWith('Digit')) return code.slice(5);
+  if (code.startsWith('Arrow')) {
+    const map: Record<string, string> = { ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' };
+    return map[code] || code;
+  }
+  if (code.startsWith('MediaTrack')) return code === 'MediaTrackNext' ? '下一首键' : '上一首键';
+  if (code === 'Escape') return 'Esc';
+  return code;
+}
+
 const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string }> = {
   calm: { primary: '#00f5d4', secondary: '#2442ff', bg: '#0a1a1a' },
   energetic: { primary: '#ff6b35', secondary: '#ffd23f', bg: '#1a0a0a' },
@@ -1059,11 +1074,18 @@ const App: React.FC = () => {
   // v3.5.0 B3: 工具栏面板状态（歌词偏移）
   const [showToolsMenu, setShowToolsMenu] = useState(false);
   const [showLyricOffsetTip, setShowLyricOffsetTip] = useState(false);
+  // v3.6.0 B1: 快捷键设置面板 + 录制状态
+  const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
+  const [recordingShortcut, setRecordingShortcut] = useState<string | null>(null);
   const [showFx, setShowFx] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Song[]>([]);
+  // v3.6.0 A2: 搜索框聚焦浮层（最近搜索 + 热搜榜）
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [hotSearch, setHotSearch] = useState<{ searchWord: string; score: number; content: string }[]>([]);
+  const [hotsLoading, setHotsLoading] = useState(false);
   const [searching, setSearching] = useState(false);
   const [playlists, setPlaylists] = useState<any[]>([]);
   const [userPlaylists, setUserPlaylists] = useState<any[]>([]);
@@ -1121,41 +1143,28 @@ const App: React.FC = () => {
     gestureHintTimer.current = setTimeout(() => setGestureHint(null), 1100);
   }, []);
 
-  // 键盘快捷键（沉浸式控制）
+  // 键盘快捷键主 useEffect 移到 handleLike 声明之后（依赖 handleLike）
+  // v3.6.0 B1: 录制新快捷键（监听 keydown 完成录制）
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      switch (e.code) {
-        case 'Space':
-          e.preventDefault(); player.togglePlay(); showGestureHint('播放 / 暂停'); break;
-        case 'ArrowRight':
-          if (e.shiftKey) { player.next(); showGestureHint('下一首'); }
-          else { player.seek(player.currentTime + 5); showGestureHint('+5s'); }
-          break;
-        case 'ArrowLeft':
-          if (e.shiftKey) { player.prev(); showGestureHint('上一首'); }
-          else { player.seek(Math.max(0, player.currentTime - 5)); showGestureHint('-5s'); }
-          break;
-        case 'ArrowUp':
-          e.preventDefault(); { const v = Math.min(1, player.volume + 0.05); player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); } break;
-        case 'ArrowDown':
-          e.preventDefault(); { const v = Math.max(0, player.volume - 0.05); player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); } break;
-        case 'KeyL':
-          if (player.currentSong) {
-            handleLike(player.currentSong);
-            showGestureHint('红心');
-          }
-          break;
-        case 'KeyF':
-          setShowFx((v) => !v); showGestureHint('FX 面板'); break;
-        case 'KeyM':
-          player.setVolume(player.volume > 0 ? 0 : 0.8); showGestureHint(player.volume > 0 ? '静音' : '取消静音'); break;
+    if (!recordingShortcut) return;
+    const onRecord = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.code === 'Escape') {
+        setRecordingShortcut(null);
+        return;
       }
+      // 不允许 Tab / 修饰键单独绑定
+      if (e.code === 'Tab' || ['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight'].includes(e.code)) {
+        return;
+      }
+      player.setShortcut(recordingShortcut, e.code);
+      setRecordingShortcut(null);
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [player, showGestureHint]);
+    // 用 capture 阶段抢先捕获，防止触发主快捷键逻辑
+    window.addEventListener('keydown', onRecord, true);
+    return () => window.removeEventListener('keydown', onRecord, true);
+  }, [recordingShortcut, player]);
 
   useEffect(() => {
     if (!serverPort) return;
@@ -1187,6 +1196,7 @@ const App: React.FC = () => {
 
   const handleSearch = useCallback(async () => {
     if (!searchQuery.trim() || !serverPort) return;
+    player.pushSearchHistory(searchQuery.trim());
     const seq = ++searchSeqRef.current;
     setSearching(true);
     try {
@@ -1201,7 +1211,43 @@ const App: React.FC = () => {
       setSearchResults(songs);
     } catch { if (seq === searchSeqRef.current) setSearchResults([]); }
     finally { if (seq === searchSeqRef.current) setSearching(false); }
-  }, [searchQuery, serverPort]);
+  }, [searchQuery, serverPort, player]);
+
+  // v3.6.0 A2: 用关键词快速搜索（点击历史/热搜时调用）
+  const searchWith = useCallback((keyword: string) => {
+    setSearchQuery(keyword);
+    setSearchFocused(false);
+    (async () => {
+      if (!serverPort) return;
+      player.pushSearchHistory(keyword);
+      const seq = ++searchSeqRef.current;
+      setSearching(true);
+      try {
+        const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(keyword)}&limit=30`);
+        if (seq !== searchSeqRef.current) return;
+        const data = await res.json();
+        const songs: Song[] = (data.songs || []).map((s: any) => ({
+          id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
+          album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
+          url: '', source: 'netease' as const,
+        }));
+        setSearchResults(songs);
+      } catch { if (seq === searchSeqRef.current) setSearchResults([]); }
+      finally { if (seq === searchSeqRef.current) setSearching(false); }
+    })();
+  }, [serverPort, player]);
+
+  // v3.6.0 A2: 搜索框聚焦时拉取热搜榜（懒加载）
+  const fetchHotSearch = useCallback(async () => {
+    if (hotSearch.length > 0 || hotsLoading || !serverPort) return;
+    setHotsLoading(true);
+    try {
+      const res = await fetch(`${apiBase}/api/search/hot`);
+      const data = await res.json();
+      setHotSearch(data.hots || []);
+    } catch {}
+    finally { setHotsLoading(false); }
+  }, [hotSearch.length, hotsLoading, serverPort]);
 
   const openPlaylist = async (id: string, name: string) => {
     setPanel('playlist'); setViewingName(name); setViewingTracks([]);
@@ -1251,6 +1297,58 @@ const App: React.FC = () => {
   const handleLike = async (song: Song) => {
     await player.toggleLike(song);
   };
+
+  // 键盘快捷键（沉浸式控制）— v3.6.0 B1: 支持自定义快捷键
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      // v3.6.0 B1: 当用户正在录制新快捷键时禁用快捷键触发
+      if (recordingShortcut) return;
+
+      const sc = player.shortcuts;
+      const code = e.code;
+      // 找到对应动作
+      let action: string | null = null;
+      for (const [act, c] of Object.entries(sc)) {
+        if (c === code) { action = act; break; }
+      }
+      if (!action) return;
+
+      e.preventDefault();
+      switch (action) {
+        case 'play/pause':
+          player.togglePlay(); showGestureHint('播放 / 暂停'); break;
+        case 'next':
+          player.next(); showGestureHint('下一首'); break;
+        case 'prev':
+          player.prev(); showGestureHint('上一首'); break;
+        case 'volume-up': {
+          const v = Math.min(1, player.volume + 0.05);
+          player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); break;
+        }
+        case 'volume-down': {
+          const v = Math.max(0, player.volume - 0.05);
+          player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); break;
+        }
+        case 'mute':
+          player.setVolume(player.volume > 0 ? 0 : 0.8);
+          showGestureHint(player.volume > 0 ? '静音' : '取消静音'); break;
+        case 'like':
+          if (player.currentSong) {
+            handleLike(player.currentSong);
+            showGestureHint('红心');
+          }
+          break;
+        case 'toggle-lyrics':
+          player.toggleLyrics(); showGestureHint(player.showLyrics ? '显示歌词' : '隐藏歌词'); break;
+        case 'toggle-queue':
+          setShowQueue(v => !v); showGestureHint(showQueue ? '隐藏队列' : '显示队列'); break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [player, showGestureHint, handleLike, showQueue, recordingShortcut]);
 
   const formatTime = (s: number) => {
     if (!isFinite(s) || s < 0) return '0:00';
@@ -1332,6 +1430,62 @@ const App: React.FC = () => {
       <BeatDebugOverlay visible={showDebug} bpm={player.bpm} analyzing={player.beatAnalyzing} />
       {/* 渐变遮罩 */}
       <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: `linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)` }} />
+
+      {/* v3.6.0 B1: 快捷键设置弹窗 */}
+      {showShortcutsPanel && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => { setShowShortcutsPanel(false); setRecordingShortcut(null); }} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[420px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.05]">
+              <div className="text-sm font-bold text-white/90">快捷键设置</div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => player.resetShortcuts()}
+                  className="text-[11px] text-white/40 hover:text-red-400 transition-colors"
+                >重置全部</button>
+                <button
+                  onClick={() => { setShowShortcutsPanel(false); setRecordingShortcut(null); }}
+                  className="w-6 h-6 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-sm"
+                >×</button>
+              </div>
+            </div>
+            <div className="px-5 py-3 max-h-[420px] overflow-y-auto">
+              {[
+                { id: 'play/pause', label: '播放 / 暂停' },
+                { id: 'next', label: '下一首' },
+                { id: 'prev', label: '上一首' },
+                { id: 'volume-up', label: '音量+' },
+                { id: 'volume-down', label: '音量−' },
+                { id: 'mute', label: '静音' },
+                { id: 'like', label: '喜欢' },
+                { id: 'toggle-lyrics', label: '切换歌词' },
+                { id: 'toggle-queue', label: '切换队列' },
+              ].map(item => {
+                const code = player.shortcuts[item.id] || '未设置';
+                const isRecording = recordingShortcut === item.id;
+                return (
+                  <div key={item.id} className="flex items-center justify-between py-2 border-b border-white/[0.03] last:border-b-0">
+                    <div className="text-xs text-white/75">{item.label}</div>
+                    <button
+                      onClick={() => setRecordingShortcut(isRecording ? null : item.id)}
+                      className={`min-w-[80px] px-3 py-1.5 rounded-md text-[11px] font-mono transition-all ${
+                        isRecording
+                          ? 'bg-[#00f5d4]/20 border border-[#00f5d4] text-[#00f5d4] animate-pulse'
+                          : 'bg-white/[0.05] border border-white/[0.08] text-white/70 hover:bg-white/[0.1]'
+                      }`}
+                    >
+                      {isRecording ? '按下一个键…' : formatKeyCode(code)}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="px-5 py-3 text-[10px] text-white/35 border-t border-white/[0.05]">
+              点击右侧按键开始录制，按下任意键完成设置。按 Esc 取消。
+            </div>
+          </div>
+        </>
+      )}
 
       {/* 手势提示气泡 */}
       {gestureHint && (
@@ -1603,6 +1757,14 @@ const App: React.FC = () => {
                         </div>
                       )}
                     </div>
+                    {/* v3.6.0 B1: 快捷键设置入口 */}
+                    <button
+                      onClick={() => { setShowShortcutsPanel(true); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>快捷键设置</span>
+                      <span className="text-white/40">⌨</span>
+                    </button>
                   </div>
                 </>
               )}
@@ -1761,10 +1923,64 @@ const App: React.FC = () => {
               {/* 搜索 */}
               {panel === 'search' && (
                 <div className="flex-1 flex flex-col overflow-hidden p-6">
-                  <div className="flex gap-3 mb-4">
-                    <div className="flex-1 search-box">
+                  <div className="flex gap-3 mb-4 relative">
+                    <div className="flex-1 search-box relative">
                       <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" className="text-white/25 mr-3 flex-shrink-0" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                      <input className="search-input" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && handleSearch()} placeholder="搜索歌曲、歌手..." />
+                      <input
+                        className="search-input"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                        onFocus={() => { setSearchFocused(true); fetchHotSearch(); }}
+                        onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
+                        placeholder="搜索歌曲、歌手..."
+                      />
+                      {/* v3.6.0 A2: 聚焦浮层（最近搜索 + 热搜榜） */}
+                      {searchFocused && (player.searchHistory.length > 0 || hotSearch.length > 0) && (
+                        <div className="absolute top-full left-0 right-0 mt-2 rounded-xl border border-white/[0.06] bg-black/85 backdrop-blur-2xl py-2 shadow-2xl z-30 max-h-[420px] overflow-y-auto">
+                          {/* 最近搜索 */}
+                          {player.searchHistory.length > 0 && (
+                            <div className="mb-2">
+                              <div className="flex items-center justify-between px-4 py-1.5">
+                                <div className="text-[10px] text-white/40 tracking-wider">最近搜索</div>
+                                <button
+                                  onClick={() => player.clearSearchHistory()}
+                                  className="text-[10px] text-white/30 hover:text-red-400 transition-colors"
+                                >清空</button>
+                              </div>
+                              <div className="px-2 flex flex-wrap gap-1.5">
+                                {player.searchHistory.map((kw, i) => (
+                                  <button
+                                    key={i}
+                                    onMouseDown={(e) => { e.preventDefault(); searchWith(kw); }}
+                                    className="px-2.5 py-1 rounded-md text-[11px] text-white/65 bg-white/[0.04] hover:bg-white/[0.08] hover:text-white transition-colors"
+                                  >{kw}</button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {/* 热搜榜 */}
+                          {hotSearch.length > 0 && (
+                            <div>
+                              <div className="px-4 py-1.5 text-[10px] text-white/40 tracking-wider">热搜榜</div>
+                              {hotSearch.slice(0, 10).map((h, i) => (
+                                <button
+                                  key={i}
+                                  onMouseDown={(e) => { e.preventDefault(); searchWith(h.searchWord); }}
+                                  className="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-white/[0.04] transition-colors text-left"
+                                >
+                                  <span className={`text-xs w-4 text-center font-medium ${i < 3 ? 'text-[#ff6b35]' : 'text-white/35'}`}>{i + 1}</span>
+                                  <span className="text-[12px] text-white/80 truncate flex-1">{h.searchWord}</span>
+                                  {h.score > 0 && <span className="text-[10px] text-white/25">{h.score > 10000 ? `${(h.score / 10000).toFixed(1)}万` : h.score}</span>}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {hotsLoading && hotSearch.length === 0 && (
+                            <div className="px-4 py-3 text-center text-[11px] text-white/30">加载中...</div>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <button onClick={handleSearch} disabled={searching || !searchQuery.trim()} className="px-6 py-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all">{searching ? '搜索中' : '搜索'}</button>
                   </div>

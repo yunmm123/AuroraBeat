@@ -112,6 +112,14 @@ export function usePlayer() {
   const adjustLyricOffset = useCallback((delta: number) => playerCore.adjustLyricOffset(delta), []);
   const resetLyricOffset = useCallback(() => playerCore.resetLyricOffset(), []);
 
+  // v3.6.0 A2: 搜索历史
+  const pushSearchHistory = useCallback((k: string) => playerCore.pushSearchHistory(k), []);
+  const clearSearchHistory = useCallback(() => playerCore.clearSearchHistory(), []);
+
+  // v3.6.0 B1: 自定义快捷键
+  const setShortcut = useCallback((actionId: string, code: string) => playerCore.setShortcut(actionId, code), []);
+  const resetShortcuts = useCallback(() => playerCore.resetShortcuts(), []);
+
   return {
     ...state,
     playSong,
@@ -146,5 +154,9 @@ export function usePlayer() {
     getLyricOffset,
     adjustLyricOffset,
     resetLyricOffset,
+    pushSearchHistory,
+    clearSearchHistory,
+    setShortcut,
+    resetShortcuts,
   };
 }

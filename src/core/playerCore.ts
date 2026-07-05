@@ -6,9 +6,24 @@ export type PlayMode = 'list' | 'single' | 'shuffle';
 export type AudioQuality = 'standard' | 'exhigh' | 'lossless' | 'hires';
 
 // v3.5.0 A1: 设置持久化 — 重启后恢复音量/音质/播放模式/喜欢歌单/历史/歌词偏移
+// v3.6.0 A2/B1: 增加搜索历史 + 快捷键配置持久化
 const STORAGE_KEY = 'aurorabeat:settings:v1';
 const HISTORY_MAX = 50;
 const LYRIC_OFFSET_MAX = 5; // ±5s 上限，超出视为异常
+const SEARCH_HISTORY_MAX = 10;
+
+// v3.6.0 B1: 默认快捷键映射（用户可在设置面板自定义）
+export const DEFAULT_SHORTCUTS: Record<string, string> = {
+  'play/pause': 'Space',
+  'next': 'MediaTrackNext',
+  'prev': 'MediaTrackPrevious',
+  'volume-up': 'ArrowUp',
+  'volume-down': 'ArrowDown',
+  'mute': 'KeyM',
+  'like': 'KeyL',
+  'toggle-lyrics': 'KeyK',
+  'toggle-queue': 'KeyQ',
+};
 
 interface PersistedSettings {
   volume: number;
@@ -16,7 +31,9 @@ interface PersistedSettings {
   playMode: PlayMode;
   likedSongs: string[];
   history: Song[];
-  lyricOffsets: Record<string, number>; // songId → 偏移秒（正=歌词延后，负=提前）
+  lyricOffsets: Record<string, number>;
+  searchHistory: string[];        // v3.6.0 A2: 搜索词历史
+  shortcuts: Record<string, string>; // v3.6.0 B1: 自定义快捷键
 }
 
 function loadSettings(): Partial<PersistedSettings> {
@@ -50,6 +67,8 @@ export interface PlayerState {
   beatAnalyzing: boolean; // 离线节拍分析进行中
   isSeeking: boolean;     // v3.1.5: seek 进行中（拖拽进度条时）
   history: Song[];        // v3.5.0 A4: 最近播放历史
+  searchHistory: string[];   // v3.6.0 A2: 搜索词历史
+  shortcuts: Record<string, string>; // v3.6.0 B1: 自定义快捷键
 }
 
 type Listener = (state: PlayerState) => void;
@@ -66,6 +85,8 @@ class PlayerCore {
     likedSongs: [],
     history: [],
     lyricOffsets: {},
+    searchHistory: [],
+    shortcuts: { ...DEFAULT_SHORTCUTS },
   };
   private lyricOffset = 0; // v3.5.0 B3: 当前歌曲的歌词偏移（秒）
   private state: PlayerState = {
@@ -87,6 +108,8 @@ class PlayerCore {
     beatAnalyzing: false,
     isSeeking: false,
     history: [],
+    searchHistory: [],
+    shortcuts: { ...DEFAULT_SHORTCUTS },
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -134,6 +157,16 @@ class PlayerCore {
     }
     if (loaded.lyricOffsets) {
       this.persisted.lyricOffsets = loaded.lyricOffsets;
+    }
+    // v3.6.0 A2: 加载搜索历史
+    if (loaded.searchHistory) {
+      this.persisted.searchHistory = loaded.searchHistory;
+      this.state.searchHistory = loaded.searchHistory;
+    }
+    // v3.6.0 B1: 加载自定义快捷键（合并默认值，缺的用默认）
+    if (loaded.shortcuts) {
+      this.persisted.shortcuts = { ...DEFAULT_SHORTCUTS, ...loaded.shortcuts };
+      this.state.shortcuts = { ...DEFAULT_SHORTCUTS, ...loaded.shortcuts };
     }
 
     this.initAudio();
@@ -376,6 +409,8 @@ class PlayerCore {
     this.persisted.playMode = this.state.playMode;
     this.persisted.likedSongs = Array.from(this.state.likedSongs);
     this.persisted.history = this.state.history;
+    this.persisted.searchHistory = this.state.searchHistory;
+    this.persisted.shortcuts = this.state.shortcuts;
     saveSettings(this.persisted);
     this.listeners.forEach((l) => l({ ...this.state }));
   }
@@ -1021,6 +1056,40 @@ class PlayerCore {
       return;
     }
     this.lyricOffset = this.persisted.lyricOffsets[song.id] || 0;
+  }
+
+  // ============================================================
+  // v3.6.0 A2: 搜索历史
+  // ============================================================
+  /** 添加搜索词到历史（去重，最多 10 条） */
+  pushSearchHistory(keyword: string) {
+    const k = keyword.trim();
+    if (!k) return;
+    const filtered = this.state.searchHistory.filter(s => s !== k);
+    filtered.unshift(k);
+    if (filtered.length > SEARCH_HISTORY_MAX) filtered.length = SEARCH_HISTORY_MAX;
+    this.state.searchHistory = filtered;
+    this.notify();
+  }
+
+  clearSearchHistory() {
+    this.state.searchHistory = [];
+    this.notify();
+  }
+
+  // ============================================================
+  // v3.6.0 B1: 自定义快捷键
+  // ============================================================
+  /** 设置某个动作的快捷键（actionId → 键码，如 'Space' / 'KeyL'） */
+  setShortcut(actionId: string, code: string) {
+    this.state.shortcuts = { ...this.state.shortcuts, [actionId]: code };
+    this.notify();
+  }
+
+  /** 重置快捷键为默认 */
+  resetShortcuts() {
+    this.state.shortcuts = { ...DEFAULT_SHORTCUTS };
+    this.notify();
   }
 }
 
