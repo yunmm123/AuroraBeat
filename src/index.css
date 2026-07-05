@@ -307,9 +307,20 @@ html, body {
   font-weight: 800;
   line-height: 1.22;
   letter-spacing: 0.02em;
-  transform: scale(1) translateY(0) translateZ(0);
+  /* v3.3.6 D: 节拍呼吸脉动——scale 随 --beat-pulse 0→0.04 放大
+     用 CSS calc + 自定义属性，节拍来时字轻微"呼吸"放大 */
+  transform: scale(calc(1 + var(--beat-pulse, 0) * 0.04)) translateY(0) translateZ(0);
   opacity: 1;
   filter: blur(0);
+  /* v3.3.6: 覆盖 transition——transform/text-shadow 改为 80ms（节拍即时响应）
+     因 --beat-pulse 每帧由主循环更新，原 1200ms transition 会让响应迟钝 */
+  transition:
+    transform 80ms linear,
+    opacity 600ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 600ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 600ms cubic-bezier(0.16, 1, 0.3, 1),
+    letter-spacing 600ms cubic-bezier(0.16, 1, 0.3, 1),
+    text-shadow 80ms linear;
   /* v3.3.4: 渐变明度差缩小——tint 与 white 之间用高白占比混合色，
      避免两行歌词时首行取 tint 末行取 white 色差集中显得突兀。
      顶部 tint 混 70% 白（明亮、保留色相）→ 末段 tint 混 90% 白（接近白），
@@ -321,8 +332,17 @@ html, body {
   background-clip: text;
   -webkit-text-fill-color: transparent;
   color: transparent;
-  /* v3.1.6: 辉光克制——只保留一层白色微光，幅度小，节拍时轻微扩大（不淹没字形） */
-  text-shadow: 0 0 calc(10px + var(--beat-pulse, 0) * 14px) rgba(255, 255, 255, 0.28);
+  /* v3.3.6 E: 封面色辉光环绕——三层叠加
+     内层 midLight 色近距高强（节拍来时扩大）
+     中层 accent 色中距中强（封面主调呼应）
+     外层 tint 色远距低强（场域融合）
+     节拍来时三层半径同步扩大（用 --beat-pulse 驱动）
+     --beat-pulse 0-1，节拍包络值（App.tsx 主渲染循环设置）
+     透明度用 color-mix(in srgb, 色 X%, transparent) 实现（var 无法直接拼 alpha） */
+  text-shadow:
+    0 0 calc(8px + var(--beat-pulse, 0) * 10px) color-mix(in srgb, var(--cover-midlight, #d8b890) 80%, transparent),
+    0 0 calc(16px + var(--beat-pulse, 0) * 18px) color-mix(in srgb, var(--cover-accent, #c8a87a) 60%, transparent),
+    0 0 calc(28px + var(--beat-pulse, 0) * 28px) color-mix(in srgb, var(--cover-tint, #00f5d4) 35%, transparent);
 }
 
 /* 减少动效偏好：过渡收窄 */

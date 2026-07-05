@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { gsap } from 'gsap';
 import { sampleFrequencyBands, smoothLerp } from './core/beatDetector';
 import { useSpectrum } from './hooks/useSpectrum';
+import { useLyricParticles } from './hooks/useLyricParticles';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
@@ -1079,6 +1080,7 @@ const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lyricsRef = useRef<HTMLDivElement>(null);
   const activeLyricRef = useRef<HTMLDivElement>(null);
+  const lyricParticlesCanvasRef = useRef<HTMLCanvasElement>(null);   // v3.3.6: 歌词粒子画布
   const searchSeqRef = useRef(0);
   const electron = (window as any).electronAPI;
   const gestureHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1269,6 +1271,17 @@ const App: React.FC = () => {
     return [{ idx: active, text: player.lyrics[active].text || '', offset: 0 }];
   }, [activeLyricIdx, player.lyrics]);
 
+  // v3.3.6: 歌词粒子解构/聚合——歌词切换时旧字散成粒子飘散、新字从粒子聚合
+  // 接入 hook，监听 activeLyricIdx 和当前文本变化触发
+  const currentLyricText = visibleLines.length > 0 ? visibleLines[0].text : '';
+  useLyricParticles(
+    lyricParticlesCanvasRef,
+    activeLyricRef,
+    activeLyricIdx,
+    currentLyricText,
+    player.isPlaying
+  );
+
   const playModeIcon = player.playMode === 'single' ? '1' : player.playMode === 'shuffle' ? '⇄' : '↻';
 
   // GSAP 列表入场
@@ -1365,8 +1378,15 @@ const App: React.FC = () => {
 
       {/* 主内容：沉浸式歌词舞台（行级隧道式，克制高级） */}
       <div className="absolute inset-0 z-30 flex flex-col pt-11 pointer-events-none">
+        {/* v3.3.6: 歌词粒子画布——覆盖整个视口，pointer-events:none 不挡鼠标 */}
+        {/* 放在最底层，歌词字渲染在它之上；粒子用加法混合，从字背后透出来 */}
+        <canvas
+          ref={lyricParticlesCanvasRef}
+          className="absolute inset-0 w-full h-full pointer-events-none"
+          style={{ zIndex: 1 }}
+        />
         {/* 舞台歌词（沉浸式主界面） */}
-        <div className="flex-1 flex items-center justify-center relative overflow-hidden">
+        <div className="flex-1 flex items-center justify-center relative overflow-hidden" style={{ zIndex: 2 }}>
           {player.currentSong && player.showLyrics ? (
             <div className="lyrics-field" ref={lyricsRef}>
               {player.lyricsLoading && player.lyrics.length === 0 && (
