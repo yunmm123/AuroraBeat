@@ -406,6 +406,19 @@ html, body {
   .lyric-line { transition-duration: 600ms; }
 }
 
+/* v3.5.0 A3: 歌词翻译双语 — 在原行下方小字 */
+.lyric-translation {
+  font-size: clamp(14px, 1.4vw, 20px);
+  font-weight: 400;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  color: rgba(255, 255, 255, 0.45);
+  margin-top: 0.4em;
+  text-shadow: 0 0 8px color-mix(in srgb, var(--cover-tint, #00f5d4) 18%, transparent);
+  opacity: 0.85;
+  transition: opacity 600ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 /* === 搜索框 === */
 .search-box {
   display: flex; align-items: center; height: 58px; border-radius: 22px;

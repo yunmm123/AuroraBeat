@@ -104,6 +104,19 @@ export function usePlayer() {
   const toggleLike = useCallback((song: Song) => playerCore.toggleLike(song), []);
   const fetchLikedList = useCallback(() => playerCore.fetchLikedList(), []);
 
+  // v3.5.0 A4: 播放历史
+  const clearHistory = useCallback(() => playerCore.clearHistory(), []);
+
+  // v3.5.0 B3: 歌词偏移微调
+  const getLyricOffset = useCallback(() => playerCore.getLyricOffset(), []);
+  const adjustLyricOffset = useCallback((delta: number) => playerCore.adjustLyricOffset(delta), []);
+  const resetLyricOffset = useCallback(() => playerCore.resetLyricOffset(), []);
+
+  // v3.5.0 B2: 睡眠定时器
+  const setSleepTimer = useCallback((minutes: number, endsAfterCurrent: boolean) =>
+    playerCore.setSleepTimer(minutes, endsAfterCurrent), []);
+  const clearSleepTimer = useCallback(() => playerCore.clearSleepTimer(), []);
+
   return {
     ...state,
     playSong,
@@ -134,5 +147,11 @@ export function usePlayer() {
     isLiked,
     toggleLike,
     fetchLikedList,
+    clearHistory,
+    getLyricOffset,
+    adjustLyricOffset,
+    resetLyricOffset,
+    setSleepTimer,
+    clearSleepTimer,
   };
 }

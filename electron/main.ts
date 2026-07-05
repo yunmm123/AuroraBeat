@@ -3,6 +3,7 @@ import path from 'path'
 import { spawn } from 'child_process'
 
 let mainWindow: BrowserWindow | null = null
+let miniWindow: BrowserWindow | null = null
 let serverProcess: ReturnType<typeof spawn> | null = null
 let serverPort = 0
 
@@ -212,6 +213,65 @@ app.whenReady().then(async () => {
     else mainWindow?.setFullScreen(true)
   })
   ipcMain.handle('window:close', () => { mainWindow?.close() })
+
+  // ========== v3.5.0 B4: 迷你模式 ==========
+  // 320x120 置顶小窗，仅封面+歌名+播放/上下首控制
+  ipcMain.handle('window:toggleMini', () => {
+    if (miniWindow && !miniWindow.isDestroyed()) {
+      // 关闭迷你窗口，恢复主窗口
+      miniWindow.close()
+      miniWindow = null
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+        mainWindow.show()
+      }
+      return { mini: false }
+    }
+    // 创建迷你窗口
+    const display = screen.getPrimaryDisplay()
+    const W = 320, H = 120
+    miniWindow = new BrowserWindow({
+      width: W, height: H,
+      x: display.bounds.width - W - 20,
+      y: display.bounds.height - H - 60,
+      frame: false, resizable: false, minimizable: false, maximizable: false,
+      alwaysOnTop: true, skipTaskbar: true, show: false,
+      backgroundColor: '#08090B',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true, nodeIntegration: false,
+      },
+    })
+    miniWindow.on('ready-to-show', () => {
+      miniWindow?.show()
+      // 隐藏主窗口
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide()
+    })
+    miniWindow.on('closed', () => {
+      miniWindow = null
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+        mainWindow.show()
+      }
+    })
+    if (process.env.NODE_ENV === 'development' || process.env.VITE_DEV_SERVER_URL) {
+      miniWindow.loadURL(`${process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'}/#/mini`)
+    } else {
+      miniWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { hash: 'mini' })
+    }
+    return { mini: true }
+  })
+
+  // 迷你窗口的窗口控制
+  ipcMain.handle('mini:minimize', () => miniWindow?.minimize())
+  ipcMain.handle('mini:close', async () => {
+    if (miniWindow && !miniWindow.isDestroyed()) {
+      miniWindow.close()
+      miniWindow = null
+    }
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.show()
+    }
+    return { ok: true }
+  })
 
   ipcMain.handle('netease:openLogin', async () => {
     const result = await openNeteaseLoginWindow(mainWindow)

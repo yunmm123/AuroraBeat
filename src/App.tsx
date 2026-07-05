@@ -1056,6 +1056,10 @@ const App: React.FC = () => {
   const player = usePlayer();
   const [panel, setPanel] = useState<Panel>('home');
   const [showQueue, setShowQueue] = useState(false);
+  // v3.5.0 B2/B3/B4: 工具栏面板状态
+  const [showToolsMenu, setShowToolsMenu] = useState(false);
+  const [showSleepMenu, setShowSleepMenu] = useState(false);
+  const [showLyricOffsetTip, setShowLyricOffsetTip] = useState(false);
   const [showFx, setShowFx] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
@@ -1254,20 +1258,22 @@ const App: React.FC = () => {
     return `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, '0')}`;
   };
 
+  const lyricOffset = player.getLyricOffset();
   const activeLyricIdx = useMemo(() => {
+    // v3.5.0 B3: 行级时间也应用歌词偏移，让整行高亮和字级进度一致
     let idx = -1;
     for (let i = 0; i < player.lyrics.length; i++) {
-      if (player.currentTime >= player.lyrics[i].time - 0.3) idx = i; else break;
+      if (player.currentTime >= player.lyrics[i].time + lyricOffset - 0.3) idx = i; else break;
     }
     return idx;
-  }, [player.currentTime, player.lyrics]);
+  }, [player.currentTime, player.lyrics, lyricOffset]);
 
   // v3.2.7 歌词始终居中：只渲染当前行，不再滚动（过去/未来行不显示）
   const visibleLines = useMemo(() => {
-    if (player.lyrics.length === 0) return [] as { idx: number; text: string; offset: number; words?: YrcWord[] }[];
+    if (player.lyrics.length === 0) return [] as { idx: number; text: string; offset: number; words?: YrcWord[]; translation?: string }[];
     const active = activeLyricIdx < 0 ? 0 : activeLyricIdx;
     const line = player.lyrics[active];
-    return [{ idx: active, text: line.text || '', offset: 0, words: line.words }];
+    return [{ idx: active, text: line.text || '', offset: 0, words: line.words, translation: line.translation }];
   }, [activeLyricIdx, player.lyrics]);
 
   const playModeIcon = player.playMode === 'single' ? '1' : player.playMode === 'shuffle' ? '⇄' : '↻';
@@ -1376,7 +1382,9 @@ const App: React.FC = () => {
               {player.lyrics.length === 0 && !player.lyricsLoading && (
                 <div className="text-center text-white/15 text-sm">暂无歌词</div>
               )}
-              {visibleLines.map((line) => (
+              {visibleLines.map((line) => {
+                // v3.5.0 B3: 应用歌词时间偏移（正=歌词延后显示，负=提前）
+                return (
                 <div
                   key={line.idx}
                   ref={line.offset === 0 ? activeLyricRef : null}
@@ -1390,8 +1398,8 @@ const App: React.FC = () => {
                     //   顶层 .lyric-word-fill：白色封面色高亮字，用 mask-image 按 --word-progress 从左到右揭示
                     // 字内进度由 word-progress（0-1）驱动，连续无突变
                     line.words.map((w, wi) => {
-                      const wordStart = w.startMs / 1000;
-                      const wordEnd = (w.startMs + w.durationMs) / 1000;
+                      const wordStart = w.startMs / 1000 + lyricOffset;
+                      const wordEnd = (w.startMs + w.durationMs) / 1000 + lyricOffset;
                       const t = player.currentTime;
                       let state: 'past' | 'active' | 'future' = 'future';
                       if (t >= wordEnd) state = 'past';
@@ -1421,8 +1429,13 @@ const App: React.FC = () => {
                     // 无 yrc 时降级为整行渲染
                     (line.text || '♪')
                   )}
+                  {/* v3.5.0 A3: 翻译双语显示 — 在原行下方小字 */}
+                  {line.translation && (
+                    <div className="lyric-translation">{line.translation}</div>
+                  )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="text-center">
@@ -1546,6 +1559,104 @@ const App: React.FC = () => {
             <button onClick={() => setShowQueue(!showQueue)} className={`control-btn ${showQueue ? 'active' : ''}`}>
               <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>
             </button>
+            {/* v3.5.0: 工具菜单（睡眠定时器/歌词偏移/迷你模式） */}
+            <div className="relative">
+              <button
+                onClick={() => { setShowToolsMenu(!showToolsMenu); setShowSleepMenu(false); setShowLyricOffsetTip(false); }}
+                className={`control-btn ${showToolsMenu ? 'active' : ''}`}
+                title="工具"
+              >
+                <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+              </button>
+              {showToolsMenu && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => { setShowToolsMenu(false); setShowSleepMenu(false); setShowLyricOffsetTip(false); }} />
+                  <div className="absolute bottom-12 right-0 z-50 w-44 rounded-xl border border-white/[0.08] bg-black/80 backdrop-blur-2xl py-1.5 shadow-2xl">
+                    {/* 睡眠定时器 */}
+                    <div className="relative">
+                      <button
+                        onClick={() => setShowSleepMenu(!showSleepMenu)}
+                        className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                      >
+                        <span>睡眠定时器</span>
+                        <span className="text-white/40">
+                          {player.sleepTimer
+                            ? player.sleepTimer.endsAfterCurrent && player.sleepTimer.remainingMs <= 0
+                              ? '等播完'
+                              : `${Math.ceil(player.sleepTimer.remainingMs / 60000)}分钟`
+                            : '›'}
+                        </span>
+                      </button>
+                      {showSleepMenu && (
+                        <div className="absolute left-0 top-full mt-1 ml-1 w-44 rounded-xl border border-white/[0.08] bg-black/90 backdrop-blur-2xl py-1.5 shadow-2xl">
+                          {[
+                            { label: '15 分钟', value: 15 },
+                            { label: '30 分钟', value: 30 },
+                            { label: '60 分钟', value: 60 },
+                            { label: '90 分钟', value: 90 },
+                          ].map(opt => (
+                            <button
+                              key={opt.value}
+                              onClick={() => { player.setSleepTimer(opt.value, false); setShowSleepMenu(false); setShowToolsMenu(false); }}
+                              className="w-full px-4 py-2 text-left text-xs text-white/60 hover:text-white hover:bg-white/05"
+                            >{opt.label}后停止</button>
+                          ))}
+                          <button
+                            onClick={() => { player.setSleepTimer(15, true); setShowSleepMenu(false); setShowToolsMenu(false); }}
+                            className="w-full px-4 py-2 text-left text-xs text-white/60 hover:text-white hover:bg-white/05"
+                          >播完当前歌再停</button>
+                          <div className="border-t border-white/5 my-1" />
+                          <button
+                            onClick={() => { player.clearSleepTimer(); setShowSleepMenu(false); setShowToolsMenu(false); }}
+                            className="w-full px-4 py-2 text-left text-xs text-red-400/70 hover:text-red-400 hover:bg-white/05"
+                          >取消定时</button>
+                        </div>
+                      )}
+                    </div>
+                    {/* 歌词时间偏移 */}
+                    <div className="relative">
+                      <button
+                        onClick={() => setShowLyricOffsetTip(!showLyricOffsetTip)}
+                        className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                      >
+                        <span>歌词偏移</span>
+                        <span className="text-white/40">{lyricOffset > 0 ? `+${lyricOffset.toFixed(1)}s` : `${lyricOffset.toFixed(1)}s`}</span>
+                      </button>
+                      {showLyricOffsetTip && (
+                        <div className="absolute left-0 top-full mt-1 ml-1 w-44 rounded-xl border border-white/[0.08] bg-black/90 backdrop-blur-2xl py-2 shadow-2xl">
+                          <div className="px-3 py-1 text-[10px] text-white/40">歌词提前/延后</div>
+                          <div className="flex items-center justify-between px-3 py-2 gap-1">
+                            <button
+                              onClick={() => player.adjustLyricOffset(-0.1)}
+                              className="flex-1 h-7 rounded bg-white/5 hover:bg-white/10 text-white text-xs"
+                            >−0.1s</button>
+                            <button
+                              onClick={() => player.adjustLyricOffset(0.1)}
+                              className="flex-1 h-7 rounded bg-white/5 hover:bg-white/10 text-white text-xs"
+                            >+0.1s</button>
+                          </div>
+                          <div className="px-3 py-1 text-center text-xs text-white/60">
+                            当前 {lyricOffset > 0 ? '+' : ''}{lyricOffset.toFixed(1)}s
+                          </div>
+                          <button
+                            onClick={() => player.resetLyricOffset()}
+                            className="w-full px-4 py-1.5 text-center text-xs text-red-400/70 hover:text-red-400"
+                          >重置</button>
+                        </div>
+                      )}
+                    </div>
+                    {/* 迷你模式 */}
+                    <button
+                      onClick={() => { (window as any).electronAPI?.toggleMini?.(); setShowToolsMenu(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>迷你模式</span>
+                      <span className="text-white/40">▦</span>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -1623,6 +1734,37 @@ const App: React.FC = () => {
                   {playlists.length === 0 && (
                     <div className="flex flex-col items-center justify-center h-60 text-white/25">
                       <div className="text-sm">登录网易云后显示推荐歌单</div>
+                    </div>
+                  )}
+                  {/* v3.5.0 A4: 最近播放历史 */}
+                  {player.history.length > 0 && (
+                    <div>
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="text-[13px] font-bold text-white/80 tracking-[0.04em]">最近播放</div>
+                        <button
+                          onClick={() => player.clearHistory()}
+                          className="text-[10px] text-white/30 hover:text-red-400 transition-colors"
+                        >清空</button>
+                      </div>
+                      <div className="space-y-0.5">
+                        {player.history.slice(0, 20).map((song, i) => {
+                          const isCurrent = player.currentSong?.id === song.id;
+                          return (
+                            <div
+                              key={song.id + i}
+                              className={`queue-item group ${isCurrent ? 'current' : ''}`}
+                              onClick={() => { player.playSong(song); setShowOverlay(false); }}
+                            >
+                              <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
+                              <div className="flex-1 min-w-0">
+                                <div className={`text-xs truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/75'}`}>{song.title}</div>
+                                <div className="text-[10px] text-white/25 truncate">{song.artist}</div>
+                              </div>
+                              <div className="w-10 text-[10px] text-white/20 text-right">{formatTime(song.duration)}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1790,18 +1932,37 @@ const App: React.FC = () => {
         <div className="absolute z-40 top-14 right-3 bottom-28 w-[300px] rounded-2xl border border-white/[0.06] bg-black/60 backdrop-blur-2xl flex flex-col overflow-hidden" style={{ boxShadow: '0 20px 60px rgba(0,0,0,0.5)' }}>
           <div className="p-4 flex items-center justify-between border-b border-white/[0.04]">
             <div className="text-sm font-semibold">播放队列 ({player.queue.length})</div>
-            <button onClick={() => setShowQueue(false)} className="w-7 h-7 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center">×</button>
+            <div className="flex items-center gap-1">
+              {player.queue.length > 0 && (
+                <button onClick={() => player.clearQueue()} title="清空" className="w-7 h-7 rounded-lg hover:bg-red-500/10 text-white/40 hover:text-red-400 flex items-center justify-center">
+                  <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                </button>
+              )}
+              <button onClick={() => setShowQueue(false)} className="w-7 h-7 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center">×</button>
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto">
             {player.queue.map((song, i) => {
               const isCurrent = i === player.currentIndex;
               return (
-                <div key={song.id + i} className={`queue-item ${isCurrent ? 'current' : ''}`} onClick={() => player.playTrackAt(i)}>
+                <div
+                  key={song.id + i}
+                  className={`queue-item group ${isCurrent ? 'current' : ''}`}
+                  onClick={() => player.playTrackAt(i)}
+                >
                   <div className={`w-5 text-center text-xs ${isCurrent ? 'text-[#00f5d4]' : 'text-white/20'}`}>{isCurrent && player.isPlaying ? '♪' : i + 1}</div>
                   <div className="flex-1 min-w-0">
                     <div className={`text-xs truncate ${isCurrent ? 'text-[#00f5d4] font-medium' : 'text-white/75'}`}>{song.title}</div>
                     <div className="text-[10px] text-white/25 truncate">{song.artist}</div>
                   </div>
+                  {/* v3.5.0 A2: 移除按钮（hover 显示，避免误触当前歌） */}
+                  {!isCurrent && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); player.removeFromQueue(i); }}
+                      className="opacity-0 group-hover:opacity-100 w-5 h-5 rounded text-white/40 hover:text-red-400 hover:bg-white/5 flex items-center justify-center transition-opacity"
+                      title="移除"
+                    >×</button>
+                  )}
                 </div>
               );
             })}

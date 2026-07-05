@@ -5,6 +5,32 @@ import { RealtimeKickDetector } from './beatDetector';
 export type PlayMode = 'list' | 'single' | 'shuffle';
 export type AudioQuality = 'standard' | 'exhigh' | 'lossless' | 'hires';
 
+// v3.5.0 A1: 设置持久化 — 重启后恢复音量/音质/播放模式/喜欢歌单/历史/歌词偏移
+const STORAGE_KEY = 'aurorabeat:settings:v1';
+const HISTORY_MAX = 50;
+const LYRIC_OFFSET_MAX = 5; // ±5s 上限，超出视为异常
+
+interface PersistedSettings {
+  volume: number;
+  quality: AudioQuality;
+  playMode: PlayMode;
+  likedSongs: string[];
+  history: Song[];
+  lyricOffsets: Record<string, number>; // songId → 偏移秒（正=歌词延后，负=提前）
+}
+
+function loadSettings(): Partial<PersistedSettings> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch { return {}; }
+}
+
+function saveSettings(s: PersistedSettings) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch {}
+}
+
 export interface PlayerState {
   queue: Song[];
   currentIndex: number;
@@ -23,6 +49,8 @@ export interface PlayerState {
   bpm: number;            // 离线分析得出的 BPM（0 = 未分析）
   beatAnalyzing: boolean; // 离线节拍分析进行中
   isSeeking: boolean;     // v3.1.5: seek 进行中（拖拽进度条时）
+  history: Song[];        // v3.5.0 A4: 最近播放历史
+  sleepTimer: { remainingMs: number; endsAfterCurrent: boolean } | null; // v3.5.0 B2
 }
 
 type Listener = (state: PlayerState) => void;
@@ -31,6 +59,19 @@ class PlayerCore {
   private audio: HTMLAudioElement | null = null;
   private trackSwitchToken = 0;
   private serverPort = 0;
+  // v3.5.0 A1: 持久化设置（启动时加载，notify 时自动保存）
+  private persisted: PersistedSettings = {
+    volume: 0.8,
+    quality: 'exhigh',
+    playMode: 'list',
+    likedSongs: [],
+    history: [],
+    lyricOffsets: {},
+  };
+  private lyricOffset = 0; // v3.5.0 B3: 当前歌曲的歌词偏移（秒）
+  // v3.5.0 B2: 睡眠定时器
+  private sleepTimerRAF: number | null = null;
+  private sleepTimerEnd = 0; // 时间戳（ms），到点停止
   private state: PlayerState = {
     queue: [],
     currentIndex: -1,
@@ -49,6 +90,8 @@ class PlayerCore {
     bpm: 0,
     beatAnalyzing: false,
     isSeeking: false,
+    history: [],
+    sleepTimer: null,
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -72,7 +115,35 @@ class PlayerCore {
   private rtTimeBuf: Float32Array | null = null;
 
   constructor() {
+    // v3.5.0 A1: 启动时加载持久化设置
+    const loaded = loadSettings();
+    if (loaded.volume != null) {
+      this.persisted.volume = loaded.volume;
+      this.state.volume = loaded.volume;
+    }
+    if (loaded.quality) {
+      this.persisted.quality = loaded.quality;
+      this.state.quality = loaded.quality;
+    }
+    if (loaded.playMode) {
+      this.persisted.playMode = loaded.playMode;
+      this.state.playMode = loaded.playMode;
+    }
+    if (loaded.likedSongs) {
+      this.persisted.likedSongs = loaded.likedSongs;
+      this.state.likedSongs = new Set(loaded.likedSongs);
+    }
+    if (loaded.history) {
+      this.persisted.history = loaded.history;
+      this.state.history = loaded.history;
+    }
+    if (loaded.lyricOffsets) {
+      this.persisted.lyricOffsets = loaded.lyricOffsets;
+    }
+
     this.initAudio();
+    // 应用持久化的音量到 audio 元素（gainNode 还没创建）
+    if (this.audio) this.audio.volume = this.state.volume;
     // 获取服务器端口
     (window as any).electronAPI?.getServerPort?.().then((port: number) => {
       this.serverPort = port;
@@ -287,6 +358,14 @@ class PlayerCore {
   }
 
   private handleEnded() {
+    // v3.5.0 B2: 睡眠定时器"播完当前歌再停"模式
+    if (this.isSleepTimerWaitingForTrackEnd()) {
+      this.pause();
+      this.sleepTimerEnd = 0;
+      this.state.sleepTimer = null;
+      this.notify();
+      return;
+    }
     if (this.state.playMode === 'single') {
       if (this.audio) {
         this.audio.currentTime = 0;
@@ -304,6 +383,13 @@ class PlayerCore {
   }
 
   private notify() {
+    // v3.5.0 A1: 每次状态变化自动同步 persisted 并写入 localStorage
+    this.persisted.volume = this.state.volume;
+    this.persisted.quality = this.state.quality;
+    this.persisted.playMode = this.state.playMode;
+    this.persisted.likedSongs = Array.from(this.state.likedSongs);
+    this.persisted.history = this.state.history;
+    saveSettings(this.persisted);
     this.listeners.forEach((l) => l({ ...this.state }));
   }
 
@@ -375,22 +461,65 @@ class PlayerCore {
     try {
       let lrc = '';
       let yrc = '';
+      let tlyric = ''; // v3.5.0 A3: 翻译歌词
       if (song.source === 'netease' && this.serverPort) {
         const res = await fetch(`${this.apiBase}/api/lyric?id=${song.id}`);
         const data = await res.json();
         lrc = data.lyric || '';
         yrc = data.yrc || '';
+        tlyric = data.tlyric || '';
       } else if (song.source === 'local') {
         const result = await (window as any).electronAPI?.searchLyrics?.(song.title || song.name || '', song.artist);
         lrc = result?.lyric || '';
       }
       // v3.3.8: 优先用 yrc（逐字时间戳），无 yrc 时降级到 lrc（行级时间戳）
       const yrcLines = yrc ? this.parseYrc(yrc) : [];
-      if (yrcLines.length > 0) return yrcLines;
-      return this.parseLyrics(lrc);
+      if (yrcLines.length > 0) {
+        // v3.5.0 A3: yrc 行也尝试附上翻译（按时间戳匹配）
+        if (tlyric) this.mergeTranslations(yrcLines, tlyric);
+        return yrcLines;
+      }
+      const lrcLines = this.parseLyrics(lrc);
+      // v3.5.0 A3: lrc 行附上翻译
+      if (tlyric) this.mergeTranslations(lrcLines, tlyric);
+      return lrcLines;
     } catch (e) {
       console.error('[PlayerCore] fetchLyrics error:', e);
       return [];
+    }
+  }
+
+  /**
+   * v3.5.0 A3: 把翻译歌词按时间戳合并到主歌词行
+   * 翻译行时间戳与主行时间戳一致时附到 translation 字段
+   */
+  private mergeTranslations(lines: LyricsLine[], tlyric: string): void {
+    if (!tlyric || lines.length === 0) return;
+    const tMap = new Map<number, string>();
+    const timeRegex = /\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?\]/g;
+    for (const line of tlyric.split('\n')) {
+      const text = line.replace(timeRegex, '').trim();
+      if (!text) continue;
+      let match;
+      timeRegex.lastIndex = 0;
+      while ((match = timeRegex.exec(line)) !== null) {
+        const ms = match[3] ? parseInt(match[3].padEnd(3, '0')) : 0;
+        const t = parseInt(match[1]) * 60 + parseInt(match[2]) + ms / 1000;
+        tMap.set(t, text);
+      }
+    }
+    // 模糊匹配：找最接近的时间戳（容差 0.5s）
+    for (const line of lines) {
+      if (tMap.has(line.time)) {
+        line.translation = tMap.get(line.time);
+        continue;
+      }
+      let best: { dt: number; text: string } | null = null;
+      for (const [t, text] of tMap) {
+        const dt = Math.abs(t - line.time);
+        if (dt < 0.5 && (!best || dt < best.dt)) best = { dt, text };
+      }
+      if (best) line.translation = best.text;
     }
   }
 
@@ -558,6 +687,10 @@ class PlayerCore {
 
       if (token === this.trackSwitchToken) {
         this.state.isLoading = false;
+        // v3.5.0 A4: 加入播放历史（去重，最多 50）
+        this.pushHistory(song);
+        // v3.5.0 B3: 加载该歌曲的持久化歌词偏移
+        this.loadLyricOffsetForSong(song);
         this.notify();
         return true;
       }
@@ -847,6 +980,115 @@ class PlayerCore {
       console.error('[PlayerCore] fetchLikedList error:', e);
     }
     return [];
+  }
+
+  // ============================================================
+  // v3.5.0 A4: 最近播放历史
+  // ============================================================
+  /** 添加到历史（去重，最多 50 首） */
+  private pushHistory(song: Song) {
+    const filtered = this.state.history.filter(s => s.id !== song.id);
+    filtered.unshift(song);
+    if (filtered.length > HISTORY_MAX) filtered.length = HISTORY_MAX;
+    this.state.history = filtered;
+  }
+
+  clearHistory() {
+    this.state.history = [];
+    this.notify();
+  }
+
+  // ============================================================
+  // v3.5.0 B3: 歌词时间偏移微调（按歌保存）
+  // ============================================================
+  /** 获取当前歌曲的歌词偏移（秒，正=歌词延后，负=提前） */
+  getLyricOffset(): number {
+    return this.lyricOffset;
+  }
+
+  /** 调整当前歌曲的歌词偏移（delta 秒，clamp 到 ±5s） */
+  adjustLyricOffset(delta: number) {
+    this.setLyricOffset(this.lyricOffset + delta);
+  }
+
+  /** 直接设置当前歌曲的歌词偏移 */
+  setLyricOffset(offset: number) {
+    const clamped = Math.max(-LYRIC_OFFSET_MAX, Math.min(LYRIC_OFFSET_MAX, offset));
+    this.lyricOffset = clamped;
+    const song = this.state.currentSong;
+    if (song) {
+      this.persisted.lyricOffsets[song.id] = clamped;
+      this.notify();
+    }
+  }
+
+  /** 重置当前歌曲的歌词偏移为 0 */
+  resetLyricOffset() {
+    this.setLyricOffset(0);
+  }
+
+  /** 切歌时加载该歌曲的持久化偏移（无则 0） */
+  private loadLyricOffsetForSong(song: Song | null) {
+    if (!song) {
+      this.lyricOffset = 0;
+      return;
+    }
+    this.lyricOffset = this.persisted.lyricOffsets[song.id] || 0;
+  }
+
+  // ============================================================
+  // v3.5.0 B2: 睡眠定时器
+  // ============================================================
+  /** 设置睡眠定时器
+   *  @param minutes 倒计时分钟数（0 = 取消）
+   *  @param endsAfterCurrent true=播完当前歌再停；false=倒计时到点立即停
+   */
+  setSleepTimer(minutes: number, endsAfterCurrent: boolean = false) {
+    if (this.sleepTimerRAF != null) {
+      cancelAnimationFrame(this.sleepTimerRAF);
+      this.sleepTimerRAF = null;
+    }
+    if (minutes <= 0) {
+      this.sleepTimerEnd = 0;
+      this.state.sleepTimer = null;
+      this.notify();
+      return;
+    }
+    this.sleepTimerEnd = Date.now() + minutes * 60 * 1000;
+    const tick = () => {
+      const remaining = Math.max(0, this.sleepTimerEnd - Date.now());
+      this.state.sleepTimer = { remainingMs: remaining, endsAfterCurrent };
+      // 倒计时到点
+      if (remaining <= 0) {
+        if (endsAfterCurrent) {
+          // 等当前歌播完再停（标记，handleEnded 时检查）
+          this.state.sleepTimer = { remainingMs: 0, endsAfterCurrent };
+          this.notify();
+          this.sleepTimerRAF = null;
+        } else {
+          // 立即暂停
+          this.pause();
+          this.sleepTimerEnd = 0;
+          this.state.sleepTimer = null;
+          this.sleepTimerRAF = null;
+          this.notify();
+        }
+        return;
+      }
+      this.notify();
+      this.sleepTimerRAF = requestAnimationFrame(tick);
+    };
+    this.sleepTimerRAF = requestAnimationFrame(tick);
+  }
+
+  /** B2: 睡眠定时器是否在"等播完当前歌"状态 */
+  isSleepTimerWaitingForTrackEnd(): boolean {
+    return this.state.sleepTimer?.endsAfterCurrent === true && this.state.sleepTimer.remainingMs <= 0;
+  }
+
+  /** B2: 清除睡眠定时器（取消） */
+  clearSleepTimer() {
+    this.setSleepTimer(0, false);
   }
 }
 

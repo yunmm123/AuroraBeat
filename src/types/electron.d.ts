@@ -8,6 +8,11 @@ declare global {
       maximize: () => Promise<void>
       close: () => Promise<void>
 
+      // v3.5.0 B4: 迷你模式
+      toggleMini: () => Promise<{ mini: boolean }>
+      miniMinimize: () => Promise<void>
+      miniClose: () => Promise<{ ok: boolean }>
+
       // 服务器端口
       getServerPort: () => Promise<number>
 
