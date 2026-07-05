@@ -1,11 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { usePlayer } from './hooks/usePlayer';
-import type { Song, NeteaseUser } from './types';
+import type { Song, NeteaseUser, YrcWord } from './types';
 import * as THREE from 'three';
 import { gsap } from 'gsap';
 import { sampleFrequencyBands, smoothLerp } from './core/beatDetector';
 import { useSpectrum } from './hooks/useSpectrum';
-import { useLyricParticles } from './hooks/useLyricParticles';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
@@ -1080,7 +1079,6 @@ const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const lyricsRef = useRef<HTMLDivElement>(null);
   const activeLyricRef = useRef<HTMLDivElement>(null);
-  const lyricParticlesCanvasRef = useRef<HTMLCanvasElement>(null);   // v3.3.6: 歌词粒子画布
   const searchSeqRef = useRef(0);
   const electron = (window as any).electronAPI;
   const gestureHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1266,21 +1264,11 @@ const App: React.FC = () => {
 
   // v3.2.7 歌词始终居中：只渲染当前行，不再滚动（过去/未来行不显示）
   const visibleLines = useMemo(() => {
-    if (player.lyrics.length === 0) return [] as { idx: number; text: string; offset: number }[];
+    if (player.lyrics.length === 0) return [] as { idx: number; text: string; offset: number; words?: YrcWord[] }[];
     const active = activeLyricIdx < 0 ? 0 : activeLyricIdx;
-    return [{ idx: active, text: player.lyrics[active].text || '', offset: 0 }];
+    const line = player.lyrics[active];
+    return [{ idx: active, text: line.text || '', offset: 0, words: line.words }];
   }, [activeLyricIdx, player.lyrics]);
-
-  // v3.3.6: 歌词粒子解构/聚合——歌词切换时旧字散成粒子飘散、新字从粒子聚合
-  // 接入 hook，监听 activeLyricIdx 和当前文本变化触发
-  const currentLyricText = visibleLines.length > 0 ? visibleLines[0].text : '';
-  useLyricParticles(
-    lyricParticlesCanvasRef,
-    activeLyricRef,
-    activeLyricIdx,
-    currentLyricText,
-    player.isPlaying
-  );
 
   const playModeIcon = player.playMode === 'single' ? '1' : player.playMode === 'shuffle' ? '⇄' : '↻';
 
@@ -1395,7 +1383,37 @@ const App: React.FC = () => {
                   className="lyric-line"
                   data-offset={line.offset}
                 >
-                  {line.text || '♪'}
+                  {line.words && line.words.length > 0 ? (
+                    // v3.3.8: 逐字渲染——根据 currentTime 判断每个字状态
+                    // past: 已唱过（白色半透明）
+                    // active: 当前演唱（封面色高亮 + 放大）
+                    // future: 未唱（暗灰半透明）
+                    line.words.map((w, wi) => {
+                      const wordStart = w.startMs / 1000;
+                      const wordEnd = (w.startMs + w.durationMs) / 1000;
+                      const t = player.currentTime;
+                      let state: 'past' | 'active' | 'future' = 'future';
+                      if (t >= wordEnd) state = 'past';
+                      else if (t >= wordStart) state = 'active';
+                      // 演唱进度（0-1），用于实时渐变高亮
+                      const progress = state === 'active'
+                        ? Math.min(1, Math.max(0, (t - wordStart) / (wordEnd - wordStart || 1)))
+                        : state === 'past' ? 1 : 0;
+                      return (
+                        <span
+                          key={wi}
+                          className="lyric-word"
+                          data-state={state}
+                          style={{ '--word-progress': progress } as React.CSSProperties}
+                        >
+                          {w.text}
+                        </span>
+                      );
+                    })
+                  ) : (
+                    // 无 yrc 时降级为整行渲染
+                    (line.text || '♪')
+                  )}
                 </div>
               ))}
             </div>
@@ -1409,14 +1427,6 @@ const App: React.FC = () => {
             </div>
           )}
         </div>
-
-        {/* v3.3.7: 歌词粒子画布——覆盖整个视口，叠加在歌词之上作为光雾 */}
-        {/* pointer-events:none 不挡鼠标；加法混合让粒子叠加更亮 */}
-        <canvas
-          ref={lyricParticlesCanvasRef}
-          className="absolute inset-0 w-full h-full pointer-events-none"
-          style={{ zIndex: 2 }}
-        />
 
         {/* v3.1.5: 底部播放栏上方频谱可视化（居中镜像，封面色渐变） */}
         <div className="spectrum-wrap">

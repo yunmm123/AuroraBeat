@@ -374,19 +374,73 @@ class PlayerCore {
   async fetchLyrics(song: Song): Promise<LyricsLine[]> {
     try {
       let lrc = '';
+      let yrc = '';
       if (song.source === 'netease' && this.serverPort) {
         const res = await fetch(`${this.apiBase}/api/lyric?id=${song.id}`);
         const data = await res.json();
         lrc = data.lyric || '';
+        yrc = data.yrc || '';
       } else if (song.source === 'local') {
         const result = await (window as any).electronAPI?.searchLyrics?.(song.title || song.name || '', song.artist);
         lrc = result?.lyric || '';
       }
+      // v3.3.8: 优先用 yrc（逐字时间戳），无 yrc 时降级到 lrc（行级时间戳）
+      const yrcLines = yrc ? this.parseYrc(yrc) : [];
+      if (yrcLines.length > 0) return yrcLines;
       return this.parseLyrics(lrc);
     } catch (e) {
       console.error('[PlayerCore] fetchLyrics error:', e);
       return [];
     }
+  }
+
+  /**
+   * v3.3.8: 解析网易云 yrc 逐字歌词
+   * 格式示例:
+   *   [offset:0]
+   *   [320,5000](320,500,0)我(820,500,0)爱(1320,500,0)你
+   *   [行起始ms,行持续ms](字起始ms,字持续ms,0)字...
+   * 每行第一个 [a,b] 是整行时间区间，后面每个 (startMs,durMs,0)字 是一个字的时间
+   * 时间戳由网易云官方保证，与音频完全同步
+   */
+  private parseYrc(yrcString: string): LyricsLine[] {
+    if (!yrcString) return [];
+    const lines = yrcString.split('\n');
+    const result: LyricsLine[] = [];
+    // 字正则：(startMs, durMs, 任意)字
+    const wordRegex = /\((\d+),(\d+),\d+\)([^\(\)\[\]]*)/g;
+
+    for (const line of lines) {
+      // 行时间戳正则：[startMs, durMs]
+      const lineMatch = line.match(/^\[(\d+),(\d+)\]/);
+      if (!lineMatch) continue;
+      const lineStartMs = parseInt(lineMatch[1]);
+      const lineStart = lineStartMs / 1000;
+
+      // 提取所有字
+      const words: YrcWord[] = [];
+      let wordMatch;
+      wordRegex.lastIndex = 0;
+      let text = '';
+      while ((wordMatch = wordRegex.exec(line)) !== null) {
+        const startMs = parseInt(wordMatch[1]);
+        const durMs = parseInt(wordMatch[2]);
+        const wordText = wordMatch[3] || '';
+        if (wordText) {
+          words.push({
+            text: wordText,
+            startMs,
+            durationMs: durMs,
+          });
+          text += wordText;
+        }
+      }
+
+      if (text) {
+        result.push({ time: lineStart, text, words });
+      }
+    }
+    return result.sort((a, b) => a.time - b.time);
   }
 
   private parseLyrics(lrcString: string): LyricsLine[] {

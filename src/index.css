@@ -301,48 +301,70 @@ html, body {
   pointer-events: none;
 }
 
-/* 当前行：场域主角 — 超大渐变填充 + 克制节拍光晕（清晰优先，光晕不淹没字形） */
+/* 当前行：场域主角 — v3.3.8 逐字高亮（Apple Music 风） */
 .lyric-line[data-offset="0"] {
   font-size: clamp(36px, 3.4vw, 56px);
   font-weight: 800;
   line-height: 1.22;
   letter-spacing: 0.02em;
-  /* v3.3.6 D: 节拍呼吸脉动——scale 随 --beat-pulse 0→0.04 放大
-     用 CSS calc + 自定义属性，节拍来时字轻微"呼吸"放大 */
-  transform: scale(calc(1 + var(--beat-pulse, 0) * 0.04)) translateY(0) translateZ(0);
+  transform: translateY(0) translateZ(0);
   opacity: 1;
   filter: blur(0);
-  /* v3.3.6: 覆盖 transition——transform/text-shadow 改为 80ms（节拍即时响应）
-     因 --beat-pulse 每帧由主循环更新，原 1200ms transition 会让响应迟钝 */
+  /* v3.3.8: 弹簧过渡——cubic-bezier 模拟弹簧（stiffness/damping 近似） */
   transition:
-    transform 80ms linear,
+    transform 600ms cubic-bezier(0.16, 1, 0.3, 1),
     opacity 600ms cubic-bezier(0.16, 1, 0.3, 1),
     filter 600ms cubic-bezier(0.16, 1, 0.3, 1),
-    color 600ms cubic-bezier(0.16, 1, 0.3, 1),
-    letter-spacing 600ms cubic-bezier(0.16, 1, 0.3, 1),
-    text-shadow 80ms linear;
-  /* v3.3.4: 渐变明度差缩小——tint 与 white 之间用高白占比混合色，
-     避免两行歌词时首行取 tint 末行取 white 色差集中显得突兀。
-     顶部 tint 混 70% 白（明亮、保留色相）→ 末段 tint 混 90% 白（接近白），
-     明度差控制在 20% 以内，相邻行色差柔和不可察 */
-  background: linear-gradient(180deg,
-    color-mix(in srgb, var(--cover-tint, #00f5d4) 30%, #ffffff 70%) 0%,
-    color-mix(in srgb, var(--cover-tint, #00f5d4) 10%, #ffffff 90%) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-  /* v3.3.6 E: 封面色辉光环绕——三层叠加
-     内层 midLight 色近距高强（节拍来时扩大）
-     中层 accent 色中距中强（封面主调呼应）
-     外层 tint 色远距低强（场域融合）
-     节拍来时三层半径同步扩大（用 --beat-pulse 驱动）
-     --beat-pulse 0-1，节拍包络值（App.tsx 主渲染循环设置）
-     透明度用 color-mix(in srgb, 色 X%, transparent) 实现（var 无法直接拼 alpha） */
+    letter-spacing 600ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* 移除整行渐变填充，改为每个字单独着色（见 .lyric-word） */
+  color: #ffffff;
+  /* v3.3.6 E: 封面色辉光环绕——三层叠加（节拍来时扩大） */
   text-shadow:
     0 0 calc(8px + var(--beat-pulse, 0) * 10px) color-mix(in srgb, var(--cover-midlight, #d8b890) 80%, transparent),
     0 0 calc(16px + var(--beat-pulse, 0) * 18px) color-mix(in srgb, var(--cover-accent, #c8a87a) 60%, transparent),
     0 0 calc(28px + var(--beat-pulse, 0) * 28px) color-mix(in srgb, var(--cover-tint, #00f5d4) 35%, transparent);
+}
+
+/* v3.3.8: 逐字状态——past 已唱 / active 演唱中 / future 未唱 */
+.lyric-word {
+  display: inline-block;
+  /* 弹簧过渡：颜色、透明度、缩放都用弹簧曲线 */
+  transition:
+    color 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    text-shadow 200ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* 让字之间的过渡有轻微错落感 */
+  will-change: color, opacity, transform;
+}
+
+/* 未唱字：暗灰半透明 */
+.lyric-word[data-state="future"] {
+  color: rgba(255, 255, 255, 0.32);
+  opacity: 0.7;
+  transform: translateY(0) scale(1);
+  text-shadow: none;
+}
+
+/* 当前演唱字：封面色高亮 + 轻微放大 + 封面色辉光 */
+.lyric-word[data-state="active"] {
+  /* 用 --word-progress（0-1）做实时渐变：未唱部分白透明 → 唱过部分封面色高亮 */
+  color: var(--cover-tint, #00f5d4);
+  opacity: 1;
+  /* 当前字轻微放大（弹簧感） */
+  transform: translateY(-2px) scale(1.08);
+  text-shadow:
+    0 0 12px color-mix(in srgb, var(--cover-midlight, #d8b890) 90%, transparent),
+    0 0 24px color-mix(in srgb, var(--cover-accent, #c8a87a) 70%, transparent);
+}
+
+/* 已唱字：白色实心（保留痕迹感） */
+.lyric-word[data-state="past"] {
+  color: rgba(255, 255, 255, 0.92);
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  text-shadow:
+    0 0 8px color-mix(in srgb, var(--cover-tint, #00f5d4) 50%, transparent);
 }
 
 /* 减少动效偏好：过渡收窄 */
