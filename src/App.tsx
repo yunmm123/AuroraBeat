@@ -1384,10 +1384,11 @@ const App: React.FC = () => {
                   data-offset={line.offset}
                 >
                   {line.words && line.words.length > 0 ? (
-                    // v3.3.8: 逐字渲染——根据 currentTime 判断每个字状态
-                    // past: 已唱过（白色半透明）
-                    // active: 当前演唱（封面色高亮 + 放大）
-                    // future: 未唱（暗灰半透明）
+                    // v3.3.9: AMLL 风字内进度揭示（KTV 式）
+                    // 每个字双层渲染：
+                    //   底层 .lyric-word-base：暗灰未唱字
+                    //   顶层 .lyric-word-fill：白色封面色高亮字，用 mask-image 按 --word-progress 从左到右揭示
+                    // 字内进度由 word-progress（0-1）驱动，连续无突变
                     line.words.map((w, wi) => {
                       const wordStart = w.startMs / 1000;
                       const wordEnd = (w.startMs + w.durationMs) / 1000;
@@ -1395,7 +1396,7 @@ const App: React.FC = () => {
                       let state: 'past' | 'active' | 'future' = 'future';
                       if (t >= wordEnd) state = 'past';
                       else if (t >= wordStart) state = 'active';
-                      // 演唱进度（0-1），用于实时渐变高亮
+                      // 字内进度（0-1）：active 时按时间线性推进，past 为 1，future 为 0
                       const progress = state === 'active'
                         ? Math.min(1, Math.max(0, (t - wordStart) / (wordEnd - wordStart || 1)))
                         : state === 'past' ? 1 : 0;
@@ -1406,7 +1407,13 @@ const App: React.FC = () => {
                           data-state={state}
                           style={{ '--word-progress': progress } as React.CSSProperties}
                         >
-                          {w.text}
+                          <span className="lyric-word-base">{w.text}</span>
+                          <span
+                            className="lyric-word-fill"
+                            style={{ '--word-progress': progress } as React.CSSProperties}
+                          >
+                            {w.text}
+                          </span>
                         </span>
                       );
                     })

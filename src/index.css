@@ -325,50 +325,86 @@ html, body {
     0 0 calc(28px + var(--beat-pulse, 0) * 28px) color-mix(in srgb, var(--cover-tint, #00f5d4) 35%, transparent);
 }
 
-/* v3.3.8: 逐字状态——past 已唱 / active 演唱中 / future 未唱 */
+/* v3.3.9: 逐字状态——past 已唱 / active 演唱中 / future 未唱 */
 .lyric-word {
   display: inline-block;
+  position: relative;
   /* 弹簧过渡：颜色、透明度、缩放都用弹簧曲线 */
   transition:
-    color 200ms cubic-bezier(0.16, 1, 0.3, 1),
-    opacity 200ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 200ms cubic-bezier(0.16, 1, 0.3, 1),
-    text-shadow 200ms cubic-bezier(0.16, 1, 0.3, 1);
-  /* 让字之间的过渡有轻微错落感 */
-  will-change: color, opacity, transform;
+    transform 280ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    filter 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  will-change: transform, filter;
 }
 
-/* 未唱字：暗灰半透明 */
-.lyric-word[data-state="future"] {
+/* 底层：未唱字（暗灰半透明） */
+.lyric-word-base {
   color: rgba(255, 255, 255, 0.32);
-  opacity: 0.7;
-  transform: translateY(0) scale(1);
-  text-shadow: none;
+  /* v3.3.9 E: mix-blend-mode: plus-lighter 让叠加辉光更通透 */
+  mix-blend-mode: normal;
 }
 
-/* 当前演唱字：封面色高亮 + 轻微放大 + 封面色辉光 */
-.lyric-word[data-state="active"] {
-  /* 用 --word-progress（0-1）做实时渐变：未唱部分白透明 → 唱过部分封面色高亮 */
-  color: var(--cover-tint, #00f5d4);
-  opacity: 1;
-  /* 当前字轻微放大（弹簧感） */
-  transform: translateY(-2px) scale(1.08);
+/* 顶层：高亮字（白色 + 封面色辉光） */
+.lyric-word-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  color: #ffffff;
+  /* v3.3.9 E: mix-blend-mode: plus-lighter 辉光叠加更通透 */
+  mix-blend-mode: plus-lighter;
   text-shadow:
     0 0 12px color-mix(in srgb, var(--cover-midlight, #d8b890) 90%, transparent),
-    0 0 24px color-mix(in srgb, var(--cover-accent, #c8a87a) 70%, transparent);
+    0 0 24px color-mix(in srgb, var(--cover-accent, #c8a87a) 70%, transparent),
+    0 0 40px color-mix(in srgb, var(--cover-tint, #00f5d4) 50%, transparent);
+  /* v3.3.9: 字内进度揭示——mask-image 从左到右按 --word-progress 揭示
+     进度 0 = 完全遮罩（顶层不可见，显示底层暗灰）
+     进度 1 = 完全揭示（顶层覆盖底层，显示白色）
+     渐变过渡区让揭示有柔和边缘，不是硬边突变 */
+  -webkit-mask-image: linear-gradient(
+    to right,
+    #000 0%,
+    #000 calc(var(--word-progress, 0) * 100% - 8%),
+    rgba(0, 0, 0, 0.3) calc(var(--word-progress, 0) * 100%),
+    transparent calc(var(--word-progress, 0) * 100% + 8%),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    #000 0%,
+    #000 calc(var(--word-progress, 0) * 100% - 8%),
+    rgba(0, 0, 0, 0.3) calc(var(--word-progress, 0) * 100%),
+    transparent calc(var(--word-progress, 0) * 100% + 8%),
+    transparent 100%
+  );
+  /* 软边缘过渡（让揭示边缘不是硬边，更自然） */
+  -webkit-mask-mode: alpha;
+  mask-mode: alpha;
+  pointer-events: none;
+  user-select: none;
 }
 
-/* 已唱字：白色实心（保留痕迹感） */
+/* 当前演唱字：轻微上浮 + scale 弹簧放大 */
+.lyric-word[data-state="active"] {
+  transform: translateY(-2px) scale(1.06);
+  filter: brightness(1.15);
+}
+
+/* 已唱字：保持位置 */
 .lyric-word[data-state="past"] {
-  color: rgba(255, 255, 255, 0.92);
-  opacity: 1;
   transform: translateY(0) scale(1);
-  text-shadow:
-    0 0 8px color-mix(in srgb, var(--cover-tint, #00f5d4) 50%, transparent);
+  filter: brightness(1);
+}
+
+/* 未唱字 */
+.lyric-word[data-state="future"] {
+  transform: translateY(0) scale(1);
+  filter: brightness(0.85);
 }
 
 /* 减少动效偏好：过渡收窄 */
 @media (prefers-reduced-motion: reduce) {
+  .lyric-word { transition-duration: 80ms; }
   .lyric-line { transition-duration: 600ms; }
 }
 
