@@ -182,12 +182,8 @@ function createMainWindow() {
 
   mainWindow.on('ready-to-show', () => mainWindow?.show())
 
-  // 无边框窗口最大化时覆盖整个屏幕（含任务栏区域），避免底部任务栏露出
-  mainWindow.on('maximize', () => {
-    if (!mainWindow) return
-    const display = screen.getDisplayMatching(mainWindow.getBounds())
-    mainWindow.setBounds(display.bounds)
-  })
+  // v3.3.5: "最大化"按钮改用 fullscreen 模式（见 IPC window:maximize）
+  // 不再监听 maximize 事件,因为 IPC 直接调用 setFullScreen,不会触发 maximize
 
   if (process.env.NODE_ENV === 'development' || process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173')
@@ -210,8 +206,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-server-port', () => serverPort)
   ipcMain.handle('window:minimize', () => mainWindow?.minimize())
   ipcMain.handle('window:maximize', () => {
-    if (mainWindow?.isMaximized()) mainWindow.unmaximize()
-    else mainWindow?.maximize()
+    // v3.3.5: 直接用 fullscreen 切换,不走 maximize
+    // 这样窗口 z-order 高于 Windows 任务栏,真正覆盖整个屏幕
+    if (mainWindow?.isFullScreen()) mainWindow.setFullScreen(false)
+    else mainWindow?.setFullScreen(true)
   })
   ipcMain.handle('window:close', () => { mainWindow?.close() })
 
