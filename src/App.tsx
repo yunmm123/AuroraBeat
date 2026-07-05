@@ -1056,9 +1056,8 @@ const App: React.FC = () => {
   const player = usePlayer();
   const [panel, setPanel] = useState<Panel>('home');
   const [showQueue, setShowQueue] = useState(false);
-  // v3.5.0 B2/B3/B4: 工具栏面板状态
+  // v3.5.0 B3: 工具栏面板状态（歌词偏移）
   const [showToolsMenu, setShowToolsMenu] = useState(false);
-  const [showSleepMenu, setShowSleepMenu] = useState(false);
   const [showLyricOffsetTip, setShowLyricOffsetTip] = useState(false);
   const [showFx, setShowFx] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
@@ -1559,10 +1558,10 @@ const App: React.FC = () => {
             <button onClick={() => setShowQueue(!showQueue)} className={`control-btn ${showQueue ? 'active' : ''}`}>
               <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>
             </button>
-            {/* v3.5.0: 工具菜单（睡眠定时器/歌词偏移/迷你模式） */}
+            {/* v3.5.0 B3: 工具菜单（歌词偏移） */}
             <div className="relative">
               <button
-                onClick={() => { setShowToolsMenu(!showToolsMenu); setShowSleepMenu(false); setShowLyricOffsetTip(false); }}
+                onClick={() => { setShowToolsMenu(!showToolsMenu); setShowLyricOffsetTip(false); }}
                 className={`control-btn ${showToolsMenu ? 'active' : ''}`}
                 title="工具"
               >
@@ -1570,49 +1569,8 @@ const App: React.FC = () => {
               </button>
               {showToolsMenu && (
                 <>
-                  <div className="fixed inset-0 z-40" onClick={() => { setShowToolsMenu(false); setShowSleepMenu(false); setShowLyricOffsetTip(false); }} />
+                  <div className="fixed inset-0 z-40" onClick={() => { setShowToolsMenu(false); setShowLyricOffsetTip(false); }} />
                   <div className="absolute bottom-12 right-0 z-50 w-44 rounded-xl border border-white/[0.08] bg-black/80 backdrop-blur-2xl py-1.5 shadow-2xl">
-                    {/* 睡眠定时器 */}
-                    <div className="relative">
-                      <button
-                        onClick={() => setShowSleepMenu(!showSleepMenu)}
-                        className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
-                      >
-                        <span>睡眠定时器</span>
-                        <span className="text-white/40">
-                          {player.sleepTimer
-                            ? player.sleepTimer.endsAfterCurrent && player.sleepTimer.remainingMs <= 0
-                              ? '等播完'
-                              : `${Math.ceil(player.sleepTimer.remainingMs / 60000)}分钟`
-                            : '›'}
-                        </span>
-                      </button>
-                      {showSleepMenu && (
-                        <div className="absolute left-0 top-full mt-1 ml-1 w-44 rounded-xl border border-white/[0.08] bg-black/90 backdrop-blur-2xl py-1.5 shadow-2xl">
-                          {[
-                            { label: '15 分钟', value: 15 },
-                            { label: '30 分钟', value: 30 },
-                            { label: '60 分钟', value: 60 },
-                            { label: '90 分钟', value: 90 },
-                          ].map(opt => (
-                            <button
-                              key={opt.value}
-                              onClick={() => { player.setSleepTimer(opt.value, false); setShowSleepMenu(false); setShowToolsMenu(false); }}
-                              className="w-full px-4 py-2 text-left text-xs text-white/60 hover:text-white hover:bg-white/05"
-                            >{opt.label}后停止</button>
-                          ))}
-                          <button
-                            onClick={() => { player.setSleepTimer(15, true); setShowSleepMenu(false); setShowToolsMenu(false); }}
-                            className="w-full px-4 py-2 text-left text-xs text-white/60 hover:text-white hover:bg-white/05"
-                          >播完当前歌再停</button>
-                          <div className="border-t border-white/5 my-1" />
-                          <button
-                            onClick={() => { player.clearSleepTimer(); setShowSleepMenu(false); setShowToolsMenu(false); }}
-                            className="w-full px-4 py-2 text-left text-xs text-red-400/70 hover:text-red-400 hover:bg-white/05"
-                          >取消定时</button>
-                        </div>
-                      )}
-                    </div>
                     {/* 歌词时间偏移 */}
                     <div className="relative">
                       <button
@@ -1645,14 +1603,6 @@ const App: React.FC = () => {
                         </div>
                       )}
                     </div>
-                    {/* 迷你模式 */}
-                    <button
-                      onClick={() => { (window as any).electronAPI?.toggleMini?.(); setShowToolsMenu(false); }}
-                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
-                    >
-                      <span>迷你模式</span>
-                      <span className="text-white/40">▦</span>
-                    </button>
                   </div>
                 </>
               )}

@@ -112,11 +112,6 @@ export function usePlayer() {
   const adjustLyricOffset = useCallback((delta: number) => playerCore.adjustLyricOffset(delta), []);
   const resetLyricOffset = useCallback(() => playerCore.resetLyricOffset(), []);
 
-  // v3.5.0 B2: 睡眠定时器
-  const setSleepTimer = useCallback((minutes: number, endsAfterCurrent: boolean) =>
-    playerCore.setSleepTimer(minutes, endsAfterCurrent), []);
-  const clearSleepTimer = useCallback(() => playerCore.clearSleepTimer(), []);
-
   return {
     ...state,
     playSong,
@@ -151,7 +146,5 @@ export function usePlayer() {
     getLyricOffset,
     adjustLyricOffset,
     resetLyricOffset,
-    setSleepTimer,
-    clearSleepTimer,
   };
 }

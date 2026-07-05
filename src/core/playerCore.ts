@@ -50,7 +50,6 @@ export interface PlayerState {
   beatAnalyzing: boolean; // 离线节拍分析进行中
   isSeeking: boolean;     // v3.1.5: seek 进行中（拖拽进度条时）
   history: Song[];        // v3.5.0 A4: 最近播放历史
-  sleepTimer: { remainingMs: number; endsAfterCurrent: boolean } | null; // v3.5.0 B2
 }
 
 type Listener = (state: PlayerState) => void;
@@ -69,9 +68,6 @@ class PlayerCore {
     lyricOffsets: {},
   };
   private lyricOffset = 0; // v3.5.0 B3: 当前歌曲的歌词偏移（秒）
-  // v3.5.0 B2: 睡眠定时器
-  private sleepTimerRAF: number | null = null;
-  private sleepTimerEnd = 0; // 时间戳（ms），到点停止
   private state: PlayerState = {
     queue: [],
     currentIndex: -1,
@@ -91,7 +87,6 @@ class PlayerCore {
     beatAnalyzing: false,
     isSeeking: false,
     history: [],
-    sleepTimer: null,
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -358,14 +353,6 @@ class PlayerCore {
   }
 
   private handleEnded() {
-    // v3.5.0 B2: 睡眠定时器"播完当前歌再停"模式
-    if (this.isSleepTimerWaitingForTrackEnd()) {
-      this.pause();
-      this.sleepTimerEnd = 0;
-      this.state.sleepTimer = null;
-      this.notify();
-      return;
-    }
     if (this.state.playMode === 'single') {
       if (this.audio) {
         this.audio.currentTime = 0;
@@ -1034,61 +1021,6 @@ class PlayerCore {
       return;
     }
     this.lyricOffset = this.persisted.lyricOffsets[song.id] || 0;
-  }
-
-  // ============================================================
-  // v3.5.0 B2: 睡眠定时器
-  // ============================================================
-  /** 设置睡眠定时器
-   *  @param minutes 倒计时分钟数（0 = 取消）
-   *  @param endsAfterCurrent true=播完当前歌再停；false=倒计时到点立即停
-   */
-  setSleepTimer(minutes: number, endsAfterCurrent: boolean = false) {
-    if (this.sleepTimerRAF != null) {
-      cancelAnimationFrame(this.sleepTimerRAF);
-      this.sleepTimerRAF = null;
-    }
-    if (minutes <= 0) {
-      this.sleepTimerEnd = 0;
-      this.state.sleepTimer = null;
-      this.notify();
-      return;
-    }
-    this.sleepTimerEnd = Date.now() + minutes * 60 * 1000;
-    const tick = () => {
-      const remaining = Math.max(0, this.sleepTimerEnd - Date.now());
-      this.state.sleepTimer = { remainingMs: remaining, endsAfterCurrent };
-      // 倒计时到点
-      if (remaining <= 0) {
-        if (endsAfterCurrent) {
-          // 等当前歌播完再停（标记，handleEnded 时检查）
-          this.state.sleepTimer = { remainingMs: 0, endsAfterCurrent };
-          this.notify();
-          this.sleepTimerRAF = null;
-        } else {
-          // 立即暂停
-          this.pause();
-          this.sleepTimerEnd = 0;
-          this.state.sleepTimer = null;
-          this.sleepTimerRAF = null;
-          this.notify();
-        }
-        return;
-      }
-      this.notify();
-      this.sleepTimerRAF = requestAnimationFrame(tick);
-    };
-    this.sleepTimerRAF = requestAnimationFrame(tick);
-  }
-
-  /** B2: 睡眠定时器是否在"等播完当前歌"状态 */
-  isSleepTimerWaitingForTrackEnd(): boolean {
-    return this.state.sleepTimer?.endsAfterCurrent === true && this.state.sleepTimer.remainingMs <= 0;
-  }
-
-  /** B2: 清除睡眠定时器（取消） */
-  clearSleepTimer() {
-    this.setSleepTimer(0, false);
   }
 }
 

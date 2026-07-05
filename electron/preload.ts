@@ -6,11 +6,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximize: () => ipcRenderer.invoke('window:maximize'),
   close: () => ipcRenderer.invoke('window:close'),
 
-  // v3.5.0 B4: 迷你模式
-  toggleMini: () => ipcRenderer.invoke('window:toggleMini'),
-  miniMinimize: () => ipcRenderer.invoke('mini:minimize'),
-  miniClose: () => ipcRenderer.invoke('mini:close'),
-
   // 服务器端口
   getServerPort: () => ipcRenderer.invoke('get-server-port'),
 
