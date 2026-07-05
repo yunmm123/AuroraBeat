@@ -1378,15 +1378,8 @@ const App: React.FC = () => {
 
       {/* 主内容：沉浸式歌词舞台（行级隧道式，克制高级） */}
       <div className="absolute inset-0 z-30 flex flex-col pt-11 pointer-events-none">
-        {/* v3.3.6: 歌词粒子画布——覆盖整个视口，pointer-events:none 不挡鼠标 */}
-        {/* 放在最底层，歌词字渲染在它之上；粒子用加法混合，从字背后透出来 */}
-        <canvas
-          ref={lyricParticlesCanvasRef}
-          className="absolute inset-0 w-full h-full pointer-events-none"
-          style={{ zIndex: 1 }}
-        />
         {/* 舞台歌词（沉浸式主界面） */}
-        <div className="flex-1 flex items-center justify-center relative overflow-hidden" style={{ zIndex: 2 }}>
+        <div className="flex-1 flex items-center justify-center relative overflow-hidden" style={{ zIndex: 1 }}>
           {player.currentSong && player.showLyrics ? (
             <div className="lyrics-field" ref={lyricsRef}>
               {player.lyricsLoading && player.lyrics.length === 0 && (
@@ -1416,6 +1409,14 @@ const App: React.FC = () => {
             </div>
           )}
         </div>
+
+        {/* v3.3.7: 歌词粒子画布——覆盖整个视口，叠加在歌词之上作为光雾 */}
+        {/* pointer-events:none 不挡鼠标；加法混合让粒子叠加更亮 */}
+        <canvas
+          ref={lyricParticlesCanvasRef}
+          className="absolute inset-0 w-full h-full pointer-events-none"
+          style={{ zIndex: 2 }}
+        />
 
         {/* v3.1.5: 底部播放栏上方频谱可视化（居中镜像，封面色渐变） */}
         <div className="spectrum-wrap">
