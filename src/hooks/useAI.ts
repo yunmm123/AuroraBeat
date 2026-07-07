@@ -127,19 +127,24 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     const msg: MultimodalMessage[] = [
       {
         role: 'system',
-        content: '你看图识别其中的歌曲/专辑信息。可能是专辑封面、海报、截图、歌词图。只输出"歌名 - 歌手"格式（用横杠分隔，不要引号不要标点）。如果识别不出来只输出"未知"。不要解释，不要其他文字。',
+        content: '你看图识别其中的歌曲/专辑信息。可能是专辑封面、海报、截图、歌词图。严格按"歌名 - 歌手"格式输出（中间是空格-横杠-空格），不要引号、不要句号、不要解释、不要前缀。如果图里没有歌曲信息，只输出"未知"两个汉字，不要其他任何文字。',
       },
       {
         role: 'user',
         content: [
-          { type: 'text', text: '请识别这张图中的歌曲信息，输出"歌名 - 歌手"格式' },
+          { type: 'text', text: '识别图中歌曲，输出格式：歌名 - 歌手' },
           { type: 'image_url', image_url: { url: imageDataUrl } },
         ],
       },
     ];
-    return chat(msg, { maxTokens: 80, temperature: 0.3 }).then(s =>
-      s.trim().replace(/^["'"']+|["'"']+$/g, '').trim()
-    );
+    return chat(msg, { maxTokens: 80, temperature: 0.2 }).then(s => {
+      let cleaned = s.trim().replace(/^["'"']+|["'"']+$/g, '').trim();
+      // 去掉常见前缀（"歌名："、"识别结果：" 等）
+      cleaned = cleaned.replace(/^(歌名|识别结果|结果|歌曲)\s*[:：]\s*/i, '');
+      // 去掉句末标点
+      cleaned = cleaned.replace(/[。.！!？?，,]+$/g, '').trim();
+      return cleaned;
+    });
   }, [chat]);
 
   // C2 封面意境解读：看封面图 + 歌曲信息 → 视觉+音乐融合解读（150 字以内）

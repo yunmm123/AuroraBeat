@@ -1552,12 +1552,14 @@ const App: React.FC = () => {
     setImageRecognizeRunning(true);
     try {
       const recognized = await ai.recognizeImage(result.path);
+      // 关掉识别弹窗，让用户看到播放界面
+      setShowImageRecognizePanel(false);
       if (!recognized || recognized === '未知') {
-        showGestureHint('AI 没识别出来');
+        showGestureHint('AI 没识别出图中的歌曲信息');
         return;
       }
-      showGestureHint(`AI 识别：${recognized}`);
-      // 直接搜索
+      showGestureHint(`AI 识别：${recognized}，正在搜索…`);
+      // 直接搜索（用识别出的"歌名 - 歌手"作为关键词）
       const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(recognized)}&limit=10`);
       const data = await res.json();
       const songs: Song[] = (data.songs || []).map((s: any) => ({
@@ -1567,11 +1569,12 @@ const App: React.FC = () => {
       }));
       if (songs.length) {
         player.playSong(songs[0], songs);
-        showGestureHint(`播放：${songs[0].title}`);
+        showGestureHint(`正在播放：${songs[0].title} - ${songs[0].artist}`);
       } else {
-        showGestureHint('网易云没找到这首歌');
+        showGestureHint(`网易云没找到《${recognized}》`);
       }
     } catch (e: any) {
+      setShowImageRecognizePanel(false);
       showGestureHint(`识别失败：${e?.message || e}`);
     } finally {
       setImageRecognizeRunning(false);
