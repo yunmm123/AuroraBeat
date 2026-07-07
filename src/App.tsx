@@ -1097,12 +1097,11 @@ const App: React.FC = () => {
   const [aiChatMessages, setAiChatMessages] = useState<AIMessage[]>([]);
   const [aiChatInput, setAiChatInput] = useState('');
   const aiChatScrollRef = useRef<HTMLDivElement>(null);
-  // v3.8.0 多模态：C2 封面意境 / C3 照片心情电台 / C5 语音聊天
+  // v3.8.0 多模态：C2 封面意境 / C3 照片心情电台
   const [aiCoverReview, setAiCoverReview] = useState<string | null>(null); // C2 封面意境内容
   const [aiCoverReviewLoading, setAiCoverReviewLoading] = useState(false);
   const [aiPhotoMoodData, setAiPhotoMoodData] = useState<string>('');       // C3 上传的照片
   const [aiPhotoMoodRunning, setAiPhotoMoodRunning] = useState(false);
-  const [aiVoiceRecording, setAiVoiceRecording] = useState(false);          // C5 语音识别中
   const [showFx, setShowFx] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
@@ -1650,122 +1649,6 @@ const App: React.FC = () => {
     }
   }, [aiReady, ai, apiBase, player, showGestureHint, electron]);
 
-  // C5 语音聊天：浏览器原生 SpeechRecognition + speechSynthesis TTS
-  // 交互：点一下开始说话 → 再点一下结束识别 → 拿到文字发给 AI → AI 回复优先语音播报
-  const recognitionRef = useRef<any>(null);
-  const voiceTranscriptRef = useRef<string>('');
-
-  // C5: 用浏览器原生 TTS 语音播报 AI 回复（不可用则退化为纯文字）
-  const speakReply = useCallback((text: string) => {
-    try {
-      if (!('speechSynthesis' in window)) return;
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'zh-CN';
-      u.rate = 1.0;
-      u.pitch = 1.0;
-      const voices = window.speechSynthesis.getVoices();
-      const zh = voices.find(v => /zh|cmn/i.test(v.lang));
-      if (zh) u.voice = zh;
-      window.speechSynthesis.speak(u);
-    } catch (e) {
-      console.warn('[C5] TTS 不可用，退化为文字回复:', e);
-    }
-  }, []);
-
-  // C5: 把识别到的文字送进 AI 聊天 → 拿到回复 → 优先语音播报
-  const handleVoiceTranscript = useCallback(async (transcript: string) => {
-    if (!transcript) return;
-    setAiChatMessages(prev => [...prev, { role: 'user', content: transcript }]);
-    setAiChatMessages(prev => [...prev, { role: 'assistant', content: '' }]);
-    setShowAiChat(true);
-    try {
-      const context = player.currentSong ? `《${player.currentSong.title}》- ${player.currentSong.artist}` : undefined;
-      const reply = await ai.chatMusic(aiChatMessages, transcript, context);
-      setAiChatMessages(prev => {
-        const next = [...prev];
-        next[next.length - 1] = { role: 'assistant', content: reply };
-        return next;
-      });
-      // 优先用浏览器原生 TTS 语音播报回复，不可用则退化为纯文字
-      speakReply(reply);
-    } catch (e: any) {
-      setAiChatMessages(prev => {
-        const next = [...prev];
-        next[next.length - 1] = { role: 'assistant', content: `出错了：${e?.message || e}` };
-        return next;
-      });
-    }
-  }, [ai, aiChatMessages, player.currentSong, speakReply]);
-
-  // C5: 开始语音识别（continuous 持续模式，用户可以多说几句）
-  const startAiVoiceRecord = useCallback(async () => {
-    if (!aiReady) { openAiKeyPanel(); return; }
-    if (aiVoiceRecording) return;
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      showGestureHint('当前浏览器不支持语音识别');
-      return;
-    }
-    // 开始新的语音输入前，先停掉正在进行的 TTS 播报
-    try { window.speechSynthesis?.cancel(); } catch {}
-    try {
-      const recognition = new SpeechRecognition();
-      recognition.continuous = true;          // 持续模式：用户可以持续说
-      recognition.interimResults = false;     // 只收最终结果，便于稳定累积
-      recognition.lang = 'zh-CN';
-      voiceTranscriptRef.current = '';
-      recognitionRef.current = recognition;
-      setAiVoiceRecording(true);
-      setShowAiChat(true);
-      showGestureHint('正在听…再点一下结束');
-      recognition.onresult = (event: any) => {
-        // 累积所有最终识别结果
-        let text = '';
-        for (let i = 0; i < event.results.length; i++) {
-          const r = event.results[i];
-          if (r.isFinal) text += r[0].transcript;
-        }
-        voiceTranscriptRef.current = text.trim();
-      };
-      recognition.onerror = (event: any) => {
-        console.error('[C5] SpeechRecognition error:', event.error);
-        if (event.error === 'not-allowed') {
-          showGestureHint('麦克风权限被拒绝，请在系统设置中允许');
-        } else if (event.error !== 'aborted' && event.error !== 'no-speech') {
-          showGestureHint(`语音识别失败：${event.error}`);
-        }
-      };
-      recognition.onend = () => {
-        setAiVoiceRecording(false);
-        recognitionRef.current = null;
-        const transcript = voiceTranscriptRef.current.trim();
-        voiceTranscriptRef.current = '';
-        if (transcript) handleVoiceTranscript(transcript);
-      };
-      await recognition.start();
-    } catch (e: any) {
-      showGestureHint(`麦克风不可用：${e?.message || e}`);
-      setAiVoiceRecording(false);
-      recognitionRef.current = null;
-    }
-  }, [aiReady, aiVoiceRecording, showGestureHint, handleVoiceTranscript]);
-
-  // C5: 结束语音识别（手动点击停止 → 触发 onend → 走识别结果）
-  const stopAiVoiceRecord = useCallback(() => {
-    if (!aiVoiceRecording) return;
-    const rec = recognitionRef.current;
-    if (rec) {
-      try { rec.stop(); } catch {}
-    }
-  }, [aiVoiceRecording]);
-
-  // C5: 按钮切换（未录音→开始，录音中→结束）
-  const toggleAiVoiceRecord = useCallback(() => {
-    if (aiVoiceRecording) stopAiVoiceRecord();
-    else startAiVoiceRecord();
-  }, [aiVoiceRecording, startAiVoiceRecord, stopAiVoiceRecord]);
-
   // 切歌时清空 A1 乐评
   useEffect(() => {
     setAiReview(null);
@@ -2267,29 +2150,6 @@ const App: React.FC = () => {
               placeholder={aiReady ? '说点什么…' : '请先在设置中配置 API Key'}
               className="flex-1 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none"
             />
-            {/* v3.8.0 C5: 语音输入按钮（点一下开始说话，再点一下结束识别并回复） */}
-            {aiReady && (
-              <button
-                onClick={toggleAiVoiceRecord}
-                title={aiVoiceRecording ? '点击结束识别' : '点击说话'}
-                className={`w-9 flex items-center justify-center rounded-lg border transition-all ${
-                  aiVoiceRecording
-                    ? 'bg-red-500/20 text-red-400 border-red-400/50 animate-pulse'
-                    : 'bg-white/[0.04] text-white/50 border-white/[0.08] hover:text-white/80 hover:bg-white/[0.08]'
-                }`}
-              >
-                {aiVoiceRecording ? (
-                  <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24">
-                    <rect x="6" y="6" width="12" height="12" rx="2"/>
-                  </svg>
-                ) : (
-                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                    <rect x="9" y="2" width="6" height="12" rx="3"/>
-                    <path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v3"/>
-                  </svg>
-                )}
-              </button>
-            )}
             <button
               onClick={sendAiChat}
               disabled={ai.loading || !aiChatInput.trim()}
