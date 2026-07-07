@@ -1097,10 +1097,7 @@ const App: React.FC = () => {
   const [aiChatMessages, setAiChatMessages] = useState<AIMessage[]>([]);
   const [aiChatInput, setAiChatInput] = useState('');
   const aiChatScrollRef = useRef<HTMLDivElement>(null);
-  // v3.8.0 多模态：C1 看图识曲 / C2 封面意境 / C3 照片心情电台 / C5 语音聊天
-  const [showImageRecognizePanel, setShowImageRecognizePanel] = useState(false);
-  const [imageRecognizeData, setImageRecognizeData] = useState<string>(''); // data URL
-  const [imageRecognizeRunning, setImageRecognizeRunning] = useState(false);
+  // v3.8.0 多模态：C2 封面意境 / C3 照片心情电台 / C5 语音聊天
   const [aiCoverReview, setAiCoverReview] = useState<string | null>(null); // C2 封面意境内容
   const [aiCoverReviewLoading, setAiCoverReviewLoading] = useState(false);
   const [aiPhotoMoodData, setAiPhotoMoodData] = useState<string>('');       // C3 上传的照片
@@ -1585,46 +1582,6 @@ const App: React.FC = () => {
   // v3.8.0 多模态 AI 功能函数
   // ============================================================
 
-  // C1 看图识曲：选图 → 识别 → 搜索 → 播放第一首
-  const pickAndRecognizeImage = useCallback(async () => {
-    if (!aiReady) { openAiKeyPanel(); return; }
-    if (!electron?.selectImageFile) return;
-    const result = await electron.selectImageFile();
-    if (!result?.path) return;
-    setImageRecognizeData(result.path);
-    setShowImageRecognizePanel(true);
-    setImageRecognizeRunning(true);
-    try {
-      const recognized = await ai.recognizeImage(result.path);
-      // 关掉识别弹窗，让用户看到播放界面
-      setShowImageRecognizePanel(false);
-      if (!recognized || recognized === '未知') {
-        showGestureHint('AI 没识别出图中的歌曲信息');
-        return;
-      }
-      showGestureHint(`AI 识别：${recognized}，正在搜索…`);
-      // 直接搜索（用识别出的"歌名 - 歌手"作为关键词）
-      const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(recognized)}&limit=10`);
-      const data = await res.json();
-      const songs: Song[] = (data.songs || []).map((s: any) => ({
-        id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
-        album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
-        url: '', source: 'netease' as const,
-      }));
-      if (songs.length) {
-        player.playSong(songs[0], songs);
-        showGestureHint(`正在播放：${songs[0].title} - ${songs[0].artist}`);
-      } else {
-        showGestureHint(`网易云没找到《${recognized}》`);
-      }
-    } catch (e: any) {
-      setShowImageRecognizePanel(false);
-      showGestureHint(`识别失败：${e?.message || e}`);
-    } finally {
-      setImageRecognizeRunning(false);
-    }
-  }, [aiReady, ai, apiBase, player, showGestureHint, electron]);
-
   // C2 封面意境解读：当前歌曲封面 → 多模态解读
   const requestAiCoverReview = useCallback(async () => {
     const song = player.currentSong;
@@ -1693,70 +1650,121 @@ const App: React.FC = () => {
     }
   }, [aiReady, ai, apiBase, player, showGestureHint, electron]);
 
-  // C5 语音聊天：开始语音识别（改用浏览器原生 SpeechRecognition API，本地转文字）
+  // C5 语音聊天：浏览器原生 SpeechRecognition + speechSynthesis TTS
+  // 交互：点一下开始说话 → 再点一下结束识别 → 拿到文字发给 AI → AI 回复优先语音播报
+  const recognitionRef = useRef<any>(null);
+  const voiceTranscriptRef = useRef<string>('');
+
+  // C5: 用浏览器原生 TTS 语音播报 AI 回复（不可用则退化为纯文字）
+  const speakReply = useCallback((text: string) => {
+    try {
+      if (!('speechSynthesis' in window)) return;
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'zh-CN';
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      const voices = window.speechSynthesis.getVoices();
+      const zh = voices.find(v => /zh|cmn/i.test(v.lang));
+      if (zh) u.voice = zh;
+      window.speechSynthesis.speak(u);
+    } catch (e) {
+      console.warn('[C5] TTS 不可用，退化为文字回复:', e);
+    }
+  }, []);
+
+  // C5: 把识别到的文字送进 AI 聊天 → 拿到回复 → 优先语音播报
+  const handleVoiceTranscript = useCallback(async (transcript: string) => {
+    if (!transcript) return;
+    setAiChatMessages(prev => [...prev, { role: 'user', content: transcript }]);
+    setAiChatMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+    setShowAiChat(true);
+    try {
+      const context = player.currentSong ? `《${player.currentSong.title}》- ${player.currentSong.artist}` : undefined;
+      const reply = await ai.chatMusic(aiChatMessages, transcript, context);
+      setAiChatMessages(prev => {
+        const next = [...prev];
+        next[next.length - 1] = { role: 'assistant', content: reply };
+        return next;
+      });
+      // 优先用浏览器原生 TTS 语音播报回复，不可用则退化为纯文字
+      speakReply(reply);
+    } catch (e: any) {
+      setAiChatMessages(prev => {
+        const next = [...prev];
+        next[next.length - 1] = { role: 'assistant', content: `出错了：${e?.message || e}` };
+        return next;
+      });
+    }
+  }, [ai, aiChatMessages, player.currentSong, speakReply]);
+
+  // C5: 开始语音识别（continuous 持续模式，用户可以多说几句）
   const startAiVoiceRecord = useCallback(async () => {
     if (!aiReady) { openAiKeyPanel(); return; }
     if (aiVoiceRecording) return;
-    // 检查浏览器是否支持 SpeechRecognition
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
       showGestureHint('当前浏览器不支持语音识别');
       return;
     }
+    // 开始新的语音输入前，先停掉正在进行的 TTS 播报
+    try { window.speechSynthesis?.cancel(); } catch {}
     try {
       const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = false;
+      recognition.continuous = true;          // 持续模式：用户可以持续说
+      recognition.interimResults = false;     // 只收最终结果，便于稳定累积
       recognition.lang = 'zh-CN';
+      voiceTranscriptRef.current = '';
+      recognitionRef.current = recognition;
       setAiVoiceRecording(true);
+      setShowAiChat(true);
+      showGestureHint('正在听…再点一下结束');
       recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript.trim();
-        if (!transcript) { setAiVoiceRecording(false); return; }
-        // 语音转文字成功 → 走普通文本聊天
-        setAiChatMessages(prev => [...prev, { role: 'user', content: transcript }]);
-        setAiChatMessages(prev => [...prev, { role: 'assistant', content: '' }]);
-        const context = player.currentSong ? `《${player.currentSong.title}》- ${player.currentSong.artist}` : undefined;
-        ai.chatMusic(aiChatMessages, transcript, context).then(reply => {
-          setAiChatMessages(prev => {
-            const next = [...prev];
-            next[next.length - 1] = { role: 'assistant', content: reply };
-            return next;
-          });
-        }).catch((e: any) => {
-          setAiChatMessages(prev => {
-            const next = [...prev];
-            next[next.length - 1] = { role: 'assistant', content: `回复失败：${e?.message || e}` };
-            return next;
-          });
-        });
-        setAiVoiceRecording(false);
+        // 累积所有最终识别结果
+        let text = '';
+        for (let i = 0; i < event.results.length; i++) {
+          const r = event.results[i];
+          if (r.isFinal) text += r[0].transcript;
+        }
+        voiceTranscriptRef.current = text.trim();
       };
       recognition.onerror = (event: any) => {
-        console.error('SpeechRecognition error:', event.error);
+        console.error('[C5] SpeechRecognition error:', event.error);
         if (event.error === 'not-allowed') {
           showGestureHint('麦克风权限被拒绝，请在系统设置中允许');
-        } else {
+        } else if (event.error !== 'aborted' && event.error !== 'no-speech') {
           showGestureHint(`语音识别失败：${event.error}`);
         }
-        setAiVoiceRecording(false);
       };
       recognition.onend = () => {
-        if (aiVoiceRecording) {
-          setAiVoiceRecording(false);
-        }
+        setAiVoiceRecording(false);
+        recognitionRef.current = null;
+        const transcript = voiceTranscriptRef.current.trim();
+        voiceTranscriptRef.current = '';
+        if (transcript) handleVoiceTranscript(transcript);
       };
       await recognition.start();
     } catch (e: any) {
       showGestureHint(`麦克风不可用：${e?.message || e}`);
       setAiVoiceRecording(false);
+      recognitionRef.current = null;
     }
-  }, [aiReady, aiVoiceRecording, ai, player.currentSong, showGestureHint, aiChatMessages]);
+  }, [aiReady, aiVoiceRecording, showGestureHint, handleVoiceTranscript]);
 
-  // C5: 停止语音识别（手动结束）
+  // C5: 结束语音识别（手动点击停止 → 触发 onend → 走识别结果）
   const stopAiVoiceRecord = useCallback(() => {
-    // SpeechRecognition 自动结束，无需手动停止
-    // 这里留空保持接口一致
-  }, []);
+    if (!aiVoiceRecording) return;
+    const rec = recognitionRef.current;
+    if (rec) {
+      try { rec.stop(); } catch {}
+    }
+  }, [aiVoiceRecording]);
+
+  // C5: 按钮切换（未录音→开始，录音中→结束）
+  const toggleAiVoiceRecord = useCallback(() => {
+    if (aiVoiceRecording) stopAiVoiceRecord();
+    else startAiVoiceRecord();
+  }, [aiVoiceRecording, startAiVoiceRecord, stopAiVoiceRecord]);
 
   // 切歌时清空 A1 乐评
   useEffect(() => {
@@ -2259,22 +2267,27 @@ const App: React.FC = () => {
               placeholder={aiReady ? '说点什么…' : '请先在设置中配置 API Key'}
               className="flex-1 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none"
             />
-            {/* v3.8.0 C5: 语音输入按钮（按一下开始录音，再按一下结束发送） */}
+            {/* v3.8.0 C5: 语音输入按钮（点一下开始说话，再点一下结束识别并回复） */}
             {aiReady && (
               <button
-                onClick={startAiVoiceRecord}
-                disabled={aiVoiceRecording}
-                title={aiVoiceRecording ? '正在听…' : '点击说话'}
+                onClick={toggleAiVoiceRecord}
+                title={aiVoiceRecording ? '点击结束识别' : '点击说话'}
                 className={`w-9 flex items-center justify-center rounded-lg border transition-all ${
                   aiVoiceRecording
                     ? 'bg-red-500/20 text-red-400 border-red-400/50 animate-pulse'
                     : 'bg-white/[0.04] text-white/50 border-white/[0.08] hover:text-white/80 hover:bg-white/[0.08]'
                 }`}
               >
-                <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <rect x="9" y="2" width="6" height="12" rx="3"/>
-                  <path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v3"/>
-                </svg>
+                {aiVoiceRecording ? (
+                  <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24">
+                    <rect x="6" y="6" width="12" height="12" rx="2"/>
+                  </svg>
+                ) : (
+                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <rect x="9" y="2" width="6" height="12" rx="3"/>
+                    <path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v3"/>
+                  </svg>
+                )}
               </button>
             )}
             <button
@@ -2284,38 +2297,6 @@ const App: React.FC = () => {
             >{ai.loading ? '…' : '发送'}</button>
           </div>
         </div>
-      )}
-
-      {/* v3.8.0 C1: 看图识曲识别中弹窗（显示图片预览 + 加载状态） */}
-      {showImageRecognizePanel && imageRecognizeData && (
-        <>
-          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => !imageRecognizeRunning && setShowImageRecognizePanel(false)} />
-          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[420px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-white/[0.05]">
-              <div className="text-sm font-bold text-white/90 flex items-center gap-2">
-                <span className="text-[#00f5d4]">🖼</span> AI 看图识曲
-              </div>
-              <button
-                onClick={() => !imageRecognizeRunning && setShowImageRecognizePanel(false)}
-                disabled={imageRecognizeRunning}
-                className="w-6 h-6 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-sm disabled:opacity-30"
-              >×</button>
-            </div>
-            <div className="p-5">
-              <img src={imageRecognizeData} alt="待识别" className="w-full max-h-[280px] object-contain rounded-lg bg-black/30" />
-              <div className="mt-3 flex items-center gap-2 text-[12px] text-white/60">
-                {imageRecognizeRunning ? (
-                  <>
-                    <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin" />
-                    <span>AI 正在端详这张图…</span>
-                  </>
-                ) : (
-                  <span>识别结果见底部提示，已自动搜索并播放</span>
-                )}
-              </div>
-            </div>
-          </div>
-        </>
       )}
 
       {/* v3.8.0 C3: 照片心情电台分析中浮层（右下角小预览） */}
@@ -2662,14 +2643,6 @@ const App: React.FC = () => {
                     >
                       <span>AI 助手</span>
                       <span className={player.aiApiKey ? 'text-[#00f5d4]' : 'text-white/40'}>✦</span>
-                    </button>
-                    {/* v3.8.0 C1: 看图识曲入口 */}
-                    <button
-                      onClick={() => { pickAndRecognizeImage(); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
-                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
-                    >
-                      <span>看图识曲</span>
-                      <span className="text-white/40">🖼</span>
                     </button>
                   </div>
                 </>

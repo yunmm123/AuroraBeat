@@ -7,7 +7,7 @@ import { useState, useCallback, useRef } from 'react';
 //
 // v3.8.0 多模态扩展：
 // - chat() 接收 OpenAI 多模态 content 格式（字符串 | 数组）
-// - 新增 generateImageReview / recognizeImage / moodFromImage / transcribeAudio
+// - 新增 generateImageReview / moodFromImage
 // 兼容：纯文本 AIMessage 仍可传字符串 content（自动按原样转发）
 // ====================================================================
 
@@ -122,31 +122,6 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
 
   // ============ v3.8.0 多模态新方法 ============
 
-  // C1 看图识曲：图片 → 识别歌曲信息 → 返回"歌名 - 歌手"格式
-  const recognizeImage = useCallback(async (imageDataUrl: string) => {
-    const msg: MultimodalMessage[] = [
-      {
-        role: 'system',
-        content: '你看图识别其中的歌曲/专辑信息。可能是专辑封面、海报、截图、歌词图。严格按"歌名 - 歌手"格式输出（中间是空格-横杠-空格），不要引号、不要句号、不要解释、不要前缀。如果图里没有歌曲信息，只输出"未知"两个汉字，不要其他任何文字。',
-      },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: '识别图中歌曲，输出格式：歌名 - 歌手' },
-          { type: 'image_url', image_url: { url: imageDataUrl } },
-        ],
-      },
-    ];
-    return chat(msg, { maxTokens: 80, temperature: 0.2 }).then(s => {
-      let cleaned = s.trim().replace(/^["'"']+|["'"']+$/g, '').trim();
-      // 去掉常见前缀（"歌名："、"识别结果：" 等）
-      cleaned = cleaned.replace(/^(歌名|识别结果|结果|歌曲)\s*[:：]\s*/i, '');
-      // 去掉句末标点
-      cleaned = cleaned.replace(/[。.！!？?，,]+$/g, '').trim();
-      return cleaned;
-    });
-  }, [chat]);
-
   // C2 封面意境解读：看封面图 + 歌曲信息 → 视觉+音乐融合解读（150 字以内）
   const generateImageReview = useCallback(async (imageDataUrl: string, song: { title: string; artist: string }) => {
     const msg: MultimodalMessage[] = [
@@ -198,7 +173,6 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     generatePlaylist,
     chatMusic,
     // v3.8.0 多模态类
-    recognizeImage,
     generateImageReview,
     moodFromImage,
   };
