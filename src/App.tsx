@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { usePlayer } from './hooks/usePlayer';
+import { useAI } from './hooks/useAI';
+import type { AIMessage } from './hooks/useAI';
 import type { Song, NeteaseUser, YrcWord } from './types';
 import * as THREE from 'three';
 import { gsap } from 'gsap';
@@ -1077,6 +1079,21 @@ const App: React.FC = () => {
   // v3.6.0 B1: 快捷键设置面板 + 录制状态
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [recordingShortcut, setRecordingShortcut] = useState<string | null>(null);
+  // v3.7.0 AI: 通义千问相关状态
+  const [showAiKeyPanel, setShowAiKeyPanel] = useState(false);
+  const [aiKeyDraft, setAiKeyDraft] = useState('');
+  const [aiReview, setAiReview] = useState<string | null>(null);          // A1 乐评内容
+  const [aiReviewLoading, setAiReviewLoading] = useState(false);
+  const [aiSearchMode, setAiSearchMode] = useState(false);                 // A2 自然语言搜歌开关
+  const [aiPanel, setAiPanel] = useState<null | 'mood' | 'playlist'>(null); // A4/A5 弹窗
+  const [aiPromptInput, setAiPromptInput] = useState('');
+  const [aiPromptRunning, setAiPromptRunning] = useState(false);
+  const [aiCurated, setAiCurated] = useState<{ title: string; artist: string }[]>([]); // A5 AI 生成的歌单
+  const [aiCuratedFetching, setAiCuratedFetching] = useState<Record<number, boolean>>({}); // 每首歌搜索中
+  const [showAiChat, setShowAiChat] = useState(false);                      // A6 聊天浮窗
+  const [aiChatMessages, setAiChatMessages] = useState<AIMessage[]>([]);
+  const [aiChatInput, setAiChatInput] = useState('');
+  const aiChatScrollRef = useRef<HTMLDivElement>(null);
   const [showFx, setShowFx] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
@@ -1126,6 +1143,10 @@ const App: React.FC = () => {
   }, []);
 
   const apiBase = `http://127.0.0.1:${serverPort}`;
+
+  // v3.7.0 AI: 通义千问 Qwen-Turbo 调用封装
+  const ai = useAI(apiBase, player.aiApiKey);
+  const aiReady = !!player.aiApiKey && !!serverPort;
 
   // 媒体键
   useEffect(() => {
@@ -1297,6 +1318,196 @@ const App: React.FC = () => {
   const handleLike = async (song: Song) => {
     await player.toggleLike(song);
   };
+
+  // ============================================================
+  // v3.7.0 AI 功能函数
+  // ============================================================
+
+  // 打开 API Key 设置弹窗（同步当前 key 到 draft）
+  const openAiKeyPanel = () => {
+    setAiKeyDraft(player.aiApiKey || '');
+    setShowAiKeyPanel(true);
+  };
+  const saveAiKey = () => {
+    player.setAiApiKey(aiKeyDraft);
+    setShowAiKeyPanel(false);
+    showGestureHint(player.aiApiKey ? 'AI 已启用' : 'AI 已停用');
+  };
+
+  // A1 AI 乐评
+  const requestAiReview = async () => {
+    const song = player.currentSong;
+    if (!song || !aiReady) {
+      if (!aiReady) { openAiKeyPanel(); return; }
+      return;
+    }
+    setAiReviewLoading(true);
+    setAiReview(null);
+    try {
+      const text = await ai.generateReview({ title: song.title, artist: song.artist, album: song.album });
+      setAiReview(text);
+    } catch (e: any) {
+      setAiReview(`生成失败：${e?.message || e}`);
+    } finally {
+      setAiReviewLoading(false);
+    }
+  };
+
+  // A2 自然语言搜歌：AI 把描述转关键词 → 调 searchWith
+  const aiNaturalSearch = useCallback(async (query: string) => {
+    if (!query.trim() || !serverPort) return;
+    if (!aiReady) { openAiKeyPanel(); return; }
+    const seq = ++searchSeqRef.current;
+    setSearching(true);
+    try {
+      const keyword = await ai.extractSearchKeyword(query);
+      if (!keyword || seq !== searchSeqRef.current) return;
+      player.pushSearchHistory(query.trim());
+      // AI 转出的关键词用于实际搜索，但搜索历史记用户的原话
+      const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(keyword)}&limit=30`);
+      if (seq !== searchSeqRef.current) return;
+      const data = await res.json();
+      const songs: Song[] = (data.songs || []).map((s: any) => ({
+        id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
+        album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
+        url: '', source: 'netease' as const,
+      }));
+      setSearchResults(songs);
+      showGestureHint(`AI 理解为：${keyword}`);
+    } catch (e: any) {
+      if (seq === searchSeqRef.current) {
+        setSearchResults([]);
+        showGestureHint(`AI 搜索失败：${e?.message || e}`);
+      }
+    } finally {
+      if (seq === searchSeqRef.current) setSearching(false);
+    }
+  }, [serverPort, aiReady, ai, player, apiBase, showGestureHint]);
+
+  // A4 AI 心情电台：心情 → 关键词 → 搜索 → 播放第一首
+  const runAiMood = useCallback(async (moodText: string) => {
+    if (!moodText.trim() || !aiReady) return;
+    setAiPromptRunning(true);
+    try {
+      const keyword = await ai.moodToKeywords(moodText);
+      if (!keyword) return;
+      const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(keyword)}&limit=30`);
+      const data = await res.json();
+      const songs: Song[] = (data.songs || []).map((s: any) => ({
+        id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
+        album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
+        url: '', source: 'netease' as const,
+      }));
+      if (songs.length > 0) {
+        player.playSong(songs[0], songs);
+        setShowOverlay(false);
+        showGestureHint(`为你播放：${keyword}`);
+      } else {
+        showGestureHint('没找到相关歌曲');
+      }
+      setAiPanel(null);
+      setAiPromptInput('');
+    } catch (e: any) {
+      showGestureHint(`生成失败：${e?.message || e}`);
+    } finally {
+      setAiPromptRunning(false);
+    }
+  }, [aiReady, ai, apiBase, player, showGestureHint]);
+
+  // A5 AI 歌单生成：主题 → 20 首歌名 → 列表展示 → 逐首搜索播放
+  const runAiPlaylist = useCallback(async (theme: string) => {
+    if (!theme.trim() || !aiReady) return;
+    setAiPromptRunning(true);
+    setAiCurated([]);
+    try {
+      const text = await ai.generatePlaylist(theme);
+      // 解析 "歌名 - 歌手" 列表
+      const items: { title: string; artist: string }[] = text.split('\n')
+        .map((l: string) => l.replace(/^\d+[\.\)、\s]+/, '').trim())
+        .filter(Boolean)
+        .map((l: string) => {
+          const m = l.split(/\s*[-—–]\s*/);
+          return { title: (m[0] || l).replace(/^["'"']+|["'"']+$/g, '').trim(), artist: (m[1] || '').replace(/^["'"']+|["'"']+$/g, '').trim() };
+        })
+        .filter((it: { title: string; artist: string }) => it.title);
+      setAiCurated(items);
+    } catch (e: any) {
+      showGestureHint(`生成失败：${e?.message || e}`);
+    } finally {
+      setAiPromptRunning(false);
+    }
+  }, [aiReady, ai, showGestureHint]);
+
+  // A5: 搜索 AI 生成的某首歌并播放
+  const searchAndPlayCurated = useCallback(async (idx: number, item: { title: string; artist: string }) => {
+    if (!serverPort) return;
+    setAiCuratedFetching(prev => ({ ...prev, [idx]: true }));
+    try {
+      const kw = item.artist ? `${item.title} ${item.artist}` : item.title;
+      const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(kw)}&limit=5`);
+      const data = await res.json();
+      const songs: Song[] = (data.songs || []).map((s: any) => ({
+        id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
+        album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
+        url: '', source: 'netease' as const,
+      }));
+      if (songs.length > 0) {
+        // 加入队列并播放
+        player.addSongsToQueue(songs);
+        player.playSong(songs[0], [...player.queue, ...songs]);
+        setShowOverlay(false);
+        showGestureHint(`播放：${songs[0].title}`);
+      } else {
+        showGestureHint(`未找到：${item.title}`);
+      }
+    } catch (e: any) {
+      showGestureHint(`搜索失败：${e?.message || e}`);
+    } finally {
+      setAiCuratedFetching(prev => { const n = { ...prev }; delete n[idx]; return n; });
+    }
+  }, [serverPort, apiBase, player, showGestureHint]);
+
+  // A6 AI 音乐问答陪伴：发送消息
+  const sendAiChat = useCallback(async () => {
+    const text = aiChatInput.trim();
+    if (!text || !aiReady) {
+      if (!aiReady) openAiKeyPanel();
+      return;
+    }
+    const userMsg: AIMessage = { role: 'user', content: text };
+    setAiChatMessages(prev => [...prev, userMsg]);
+    setAiChatInput('');
+    // 占位 assistant 消息
+    setAiChatMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+    try {
+      const context = player.currentSong ? `《${player.currentSong.title}》- ${player.currentSong.artist}` : undefined;
+      const reply = await ai.chatMusic(aiChatMessages, text, context);
+      setAiChatMessages(prev => {
+        const next = [...prev];
+        next[next.length - 1] = { role: 'assistant', content: reply };
+        return next;
+      });
+    } catch (e: any) {
+      setAiChatMessages(prev => {
+        const next = [...prev];
+        next[next.length - 1] = { role: 'assistant', content: `出错了：${e?.message || e}` };
+        return next;
+      });
+    }
+  }, [aiChatInput, aiReady, ai, aiChatMessages, player.currentSong, showGestureHint]);
+
+  // A6: 聊天框滚动到底
+  useEffect(() => {
+    if (showAiChat && aiChatScrollRef.current) {
+      aiChatScrollRef.current.scrollTop = aiChatScrollRef.current.scrollHeight;
+    }
+  }, [aiChatMessages, showAiChat]);
+
+  // 切歌时清空 A1 乐评
+  useEffect(() => {
+    setAiReview(null);
+    setAiReviewLoading(false);
+  }, [player.currentSong?.id]);
 
   // 键盘快捷键（沉浸式控制）— v3.6.0 B1: 支持自定义快捷键
   useEffect(() => {
@@ -1487,6 +1698,235 @@ const App: React.FC = () => {
         </>
       )}
 
+      {/* v3.7.0 AI: API Key 设置弹窗 */}
+      {showAiKeyPanel && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => setShowAiKeyPanel(false)} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[460px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.05]">
+              <div className="text-sm font-bold text-white/90 flex items-center gap-2">
+                <span className="text-[#00f5d4]">✦</span> AI 助手设置
+              </div>
+              <button
+                onClick={() => setShowAiKeyPanel(false)}
+                className="w-6 h-6 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-sm"
+              >×</button>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <div className="text-[11px] text-white/55 leading-relaxed">
+                接入 <span className="text-[#00f5d4]">通义千问 Qwen-Turbo</span>（阿里云百炼），每天免费 100 万 tokens，新用户再送 7000 万。
+              </div>
+              <div>
+                <div className="text-[11px] text-white/50 mb-1.5">API Key</div>
+                <input
+                  type="password"
+                  value={aiKeyDraft}
+                  onChange={(e) => setAiKeyDraft(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && saveAiKey()}
+                  placeholder="sk-xxxxxxxxxxxx"
+                  className="w-full px-3 py-2.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none font-mono"
+                />
+              </div>
+              <div className="text-[10px] text-white/40 leading-relaxed">
+                1. 访问 <span className="text-[#00f5d4] underline cursor-pointer" onClick={() => electron?.openExternal?.('https://bailian.console.aliyun.com/')}>bailian.console.aliyun.com</span> 注册并开通百炼服务<br/>
+                2. 在「API-KEY 管理」创建 Key，复制到此处<br/>
+                3. Key 仅保存在本地，不会上传
+              </div>
+            </div>
+            <div className="px-5 py-3 flex items-center justify-between border-t border-white/[0.05]">
+              <div className="text-[10px] text-white/30">
+                {player.aiApiKey ? '已配置' : '未配置'}
+              </div>
+              <div className="flex gap-2">
+                {player.aiApiKey && (
+                  <button
+                    onClick={() => { player.setAiApiKey(''); setAiKeyDraft(''); setShowAiKeyPanel(false); showGestureHint('AI 已停用'); }}
+                    className="px-3 py-1.5 rounded-lg text-[11px] text-red-400/70 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                  >清除</button>
+                )}
+                <button
+                  onClick={saveAiKey}
+                  disabled={!aiKeyDraft.trim()}
+                  className="px-5 py-1.5 rounded-lg text-[11px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all"
+                >保存</button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* v3.7.0 AI: A4/A5 心情电台 & 歌单生成弹窗 */}
+      {aiPanel && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => { setAiPanel(null); setAiPromptInput(''); setAiCurated([]); }} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[480px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.05]">
+              <div className="text-sm font-bold text-white/90 flex items-center gap-2">
+                <span className="text-[#00f5d4]">✦</span>
+                {aiPanel === 'mood' ? 'AI 心情电台' : 'AI 歌单生成'}
+              </div>
+              <button
+                onClick={() => { setAiPanel(null); setAiPromptInput(''); setAiCurated([]); }}
+                className="w-6 h-6 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-sm"
+              >×</button>
+            </div>
+            <div className="px-5 py-4">
+              {aiPanel === 'mood' ? (
+                <>
+                  <div className="text-[11px] text-white/55 mb-2">描述你现在的心情，AI 为你挑歌并播放</div>
+                  <div className="flex gap-2">
+                    <input
+                      value={aiPromptInput}
+                      onChange={(e) => setAiPromptInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && !aiPromptRunning && runAiMood(aiPromptInput)}
+                      placeholder="比如：下班路上有点累想放松"
+                      autoFocus
+                      className="flex-1 px-3 py-2.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => runAiMood(aiPromptInput)}
+                      disabled={aiPromptRunning || !aiPromptInput.trim()}
+                      className="px-4 py-2.5 rounded-lg text-[12px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all"
+                    >{aiPromptRunning ? '生成中…' : '播放'}</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="text-[11px] text-white/55 mb-2">输入主题，AI 生成 20 首歌单</div>
+                  <div className="flex gap-2 mb-3">
+                    <input
+                      value={aiPromptInput}
+                      onChange={(e) => setAiPromptInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && !aiPromptRunning && runAiPlaylist(aiPromptInput)}
+                      placeholder="比如：适合独自夜跑的歌曲"
+                      autoFocus
+                      className="flex-1 px-3 py-2.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none"
+                    />
+                    <button
+                      onClick={() => runAiPlaylist(aiPromptInput)}
+                      disabled={aiPromptRunning || !aiPromptInput.trim()}
+                      className="px-4 py-2.5 rounded-lg text-[12px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all"
+                    >{aiPromptRunning ? '生成中…' : '生成'}</button>
+                  </div>
+                  {aiCurated.length > 0 && (
+                    <div className="max-h-[300px] overflow-y-auto -mx-1">
+                      {aiCurated.map((it, i) => (
+                        <div key={i} className="flex items-center gap-2 px-2 py-2 hover:bg-white/[0.03] rounded-lg group">
+                          <span className="w-5 text-center text-[11px] text-white/30">{i + 1}</span>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[12px] text-white/85 truncate">{it.title}</div>
+                            {it.artist && <div className="text-[10px] text-white/35 truncate">{it.artist}</div>}
+                          </div>
+                          <button
+                            onClick={() => searchAndPlayCurated(i, it)}
+                            disabled={aiCuratedFetching[i]}
+                            className="px-2.5 py-1 rounded-md text-[10px] text-[#00f5d4]/80 bg-[#00f5d4]/10 hover:bg-[#00f5d4]/20 disabled:opacity-40 transition-all flex-shrink-0"
+                          >
+                            {aiCuratedFetching[i] ? '搜索中' : '播放'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* v3.7.0 AI: A1 乐评浮层 */}
+      {(aiReview || aiReviewLoading) && (
+        <div className="absolute left-1/2 -translate-x-1/2 z-[55] pointer-events-auto" style={{ bottom: '110px', maxWidth: '460px', width: 'calc(100% - 32px)' }}>
+          <div className="rounded-2xl border border-[#00f5d4]/20 bg-black/80 backdrop-blur-2xl shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/[0.05]">
+              <div className="flex items-center gap-1.5 text-[11px] text-[#00f5d4] font-medium">
+                <span>✦</span> AI 乐评
+              </div>
+              <button
+                onClick={() => { setAiReview(null); setAiReviewLoading(false); }}
+                className="w-5 h-5 rounded hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-xs"
+              >×</button>
+            </div>
+            <div className="px-4 py-3 text-[12px] text-white/80 leading-relaxed">
+              {aiReviewLoading ? (
+                <div className="flex items-center gap-2 text-white/50">
+                  <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin" />
+                  正在聆听与构思…
+                </div>
+              ) : aiReview}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* v3.7.0 AI: A6 右下角聊天浮窗 */}
+      {showAiChat && (
+        <div className="fixed right-5 bottom-28 z-[68] w-[340px] h-[440px] flex flex-col rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl pointer-events-auto">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.05]">
+            <div className="flex items-center gap-2">
+              <span className="text-[#00f5d4]">✦</span>
+              <div className="text-[12px] font-bold text-white/90">音乐陪伴</div>
+              {player.currentSong && (
+                <div className="text-[10px] text-white/35 truncate max-w-[140px]">· {player.currentSong.title}</div>
+              )}
+            </div>
+            <button
+              onClick={() => setShowAiChat(false)}
+              className="w-6 h-6 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-sm"
+            >×</button>
+          </div>
+          <div ref={aiChatScrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+            {aiChatMessages.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-full text-center">
+                <div className="text-[#00f5d4] text-2xl mb-2">✦</div>
+                <div className="text-[12px] text-white/60 mb-1">你好，我是你的音乐陪伴</div>
+                <div className="text-[11px] text-white/35">聊聊音乐、求推荐、解读歌词都行</div>
+              </div>
+            )}
+            {aiChatMessages.map((m, i) => (
+              <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-[80%] px-3 py-2 rounded-2xl text-[12px] leading-relaxed ${
+                  m.role === 'user'
+                    ? 'bg-[#00f5d4]/20 text-white/90 rounded-br-md'
+                    : 'bg-white/[0.05] text-white/85 rounded-bl-md'
+                }`}>
+                  {m.content || (m.role === 'assistant' ? <span className="inline-block w-2 h-3 bg-white/40 animate-pulse" /> : '')}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="px-3 py-2.5 border-t border-white/[0.05] flex gap-2">
+            <input
+              value={aiChatInput}
+              onChange={(e) => setAiChatInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && !ai.loading && sendAiChat()}
+              placeholder={aiReady ? '说点什么…' : '请先在设置中配置 API Key'}
+              className="flex-1 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none"
+            />
+            <button
+              onClick={sendAiChat}
+              disabled={ai.loading || !aiChatInput.trim()}
+              className="px-3 py-2 rounded-lg text-[12px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all"
+            >{ai.loading ? '…' : '发送'}</button>
+          </div>
+        </div>
+      )}
+
+      {/* v3.7.0 AI: A6 聊天入口按钮（右下角，未打开时显示） */}
+      {!showAiChat && (
+        <button
+          onClick={() => { if (!aiReady) { openAiKeyPanel(); return; } setShowAiChat(true); }}
+          className="fixed right-5 bottom-28 z-[65] w-12 h-12 rounded-full bg-[#00f5d4]/15 border border-[#00f5d4]/30 backdrop-blur-xl flex items-center justify-center text-[#00f5d4] hover:bg-[#00f5d4]/25 hover:scale-105 transition-all shadow-2xl"
+          title="AI 音乐陪伴"
+          style={{ boxShadow: '0 0 24px rgba(0,245,212,0.25)' }}
+        >
+          <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+            <path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/>
+          </svg>
+        </button>
+      )}
+
       {/* 手势提示气泡 */}
       {gestureHint && (
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[60] pointer-events-none">
@@ -1621,6 +2061,19 @@ const App: React.FC = () => {
             {player.currentSong && (
               <button onClick={() => handleLike(player.currentSong!)} className={`w-9 h-9 flex items-center justify-center transition-all ${isCurrentLiked ? 'text-[#ff5e8a]' : 'text-white/30 hover:text-white/60'}`}>
                 <svg width="16" height="16" fill={isCurrentLiked ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
+              </button>
+            )}
+            {/* v3.7.0 A1: AI 乐评按钮 */}
+            {player.currentSong && (
+              <button
+                onClick={requestAiReview}
+                disabled={aiReviewLoading}
+                className={`w-9 h-9 flex items-center justify-center transition-all ${aiReview ? 'text-[#00f5d4]' : 'text-white/30 hover:text-white/60'}`}
+                title="AI 乐评"
+              >
+                <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+                  <path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/>
+                </svg>
               </button>
             )}
           </div>
@@ -1765,6 +2218,14 @@ const App: React.FC = () => {
                       <span>快捷键设置</span>
                       <span className="text-white/40">⌨</span>
                     </button>
+                    {/* v3.7.0 AI: AI 助手设置入口 */}
+                    <button
+                      onClick={() => { openAiKeyPanel(); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>AI 助手</span>
+                      <span className={player.aiApiKey ? 'text-[#00f5d4]' : 'text-white/40'}>✦</span>
+                    </button>
                   </div>
                 </>
               )}
@@ -1829,6 +2290,31 @@ const App: React.FC = () => {
               {/* 首页 */}
               {panel === 'home' && (
                 <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                  {/* v3.7.0 AI: 心情电台 + 歌单生成入口（不拥挤，两张窄卡片） */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      onClick={() => aiReady ? setAiPanel('mood') : openAiKeyPanel()}
+                      className="relative overflow-hidden rounded-2xl p-4 text-left border border-[#00f5d4]/20 transition-all hover:border-[#00f5d4]/40 group"
+                      style={{ background: 'linear-gradient(135deg, rgba(0,245,212,0.12), rgba(36,66,255,0.08))' }}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-[#00f5d4] text-base">✦</span>
+                        <div className="text-[12px] font-bold text-white/90">AI 心情电台</div>
+                      </div>
+                      <div className="text-[10px] text-white/50">描述心情，AI 为你挑歌</div>
+                    </button>
+                    <button
+                      onClick={() => aiReady ? setAiPanel('playlist') : openAiKeyPanel()}
+                      className="relative overflow-hidden rounded-2xl p-4 text-left border border-[#ff8fab]/20 transition-all hover:border-[#ff8fab]/40 group"
+                      style={{ background: 'linear-gradient(135deg, rgba(255,143,171,0.12), rgba(157,78,221,0.08))' }}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-[#ff8fab] text-base">♪</span>
+                        <div className="text-[12px] font-bold text-white/90">AI 歌单生成</div>
+                      </div>
+                      <div className="text-[10px] text-white/50">输入主题，生成 20 首歌单</div>
+                    </button>
+                  </div>
                   {playlists.length > 0 && (
                     <div>
                       <div className="text-[13px] font-bold text-white/80 tracking-[0.04em] mb-4">推荐歌单</div>
@@ -1930,11 +2416,21 @@ const App: React.FC = () => {
                         className="search-input"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+                        onKeyDown={(e) => e.key === 'Enter' && (aiSearchMode ? aiNaturalSearch(searchQuery) : handleSearch())}
                         onFocus={() => { setSearchFocused(true); fetchHotSearch(); }}
                         onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
-                        placeholder="搜索歌曲、歌手..."
+                        placeholder={aiSearchMode ? '描述你想听什么，例如：适合下雨天听的歌…' : '搜索歌曲、歌手...'}
                       />
+                      {/* v3.7.0 A2: AI 自然语言搜歌切换 */}
+                      <button
+                        onClick={() => setAiSearchMode(v => !v)}
+                        className={`absolute right-3 top-1/2 -translate-y-1/2 w-7 h-7 rounded-md flex items-center justify-center transition-all ${aiSearchMode ? 'bg-[#00f5d4]/20 text-[#00f5d4]' : 'text-white/30 hover:text-white/60 hover:bg-white/5'}`}
+                        title={aiSearchMode ? 'AI 自然语言搜索（已开启）' : '开启 AI 自然语言搜索'}
+                      >
+                        <svg width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+                          <path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/>
+                        </svg>
+                      </button>
                       {/* v3.6.0 A2: 聚焦浮层（最近搜索 + 热搜榜） */}
                       {searchFocused && (player.searchHistory.length > 0 || hotSearch.length > 0) && (
                         <div className="absolute top-full left-0 right-0 mt-2 rounded-xl border border-white/[0.06] bg-black/85 backdrop-blur-2xl py-2 shadow-2xl z-30 max-h-[420px] overflow-y-auto">
@@ -1982,7 +2478,7 @@ const App: React.FC = () => {
                         </div>
                       )}
                     </div>
-                    <button onClick={handleSearch} disabled={searching || !searchQuery.trim()} className="px-6 py-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all">{searching ? '搜索中' : '搜索'}</button>
+                    <button onClick={() => aiSearchMode ? aiNaturalSearch(searchQuery) : handleSearch()} disabled={searching || !searchQuery.trim()} className="px-6 py-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all">{searching ? '搜索中' : (aiSearchMode ? 'AI 搜歌' : '搜索')}</button>
                   </div>
                   <div className="flex-1 overflow-y-auto">
                     {searchResults.length === 0 && !searching && (

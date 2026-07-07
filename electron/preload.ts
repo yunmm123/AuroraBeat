@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   selectVideoFile: () => ipcRenderer.invoke('dialog:selectVideoFile'),
   readLocalFile: (filePath: string) => ipcRenderer.invoke('file:readAsBlob', filePath),
   searchLyrics: (title: string, artist: string) => ipcRenderer.invoke('lyrics:search', title, artist),
+  // v3.7.0: 在系统浏览器打开外部链接
+  openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
 
   // 媒体键
   onPlaybackToggle: (cb: () => void) => {

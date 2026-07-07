@@ -636,6 +636,58 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // ========== v3.7.0 AI 代理（通义千问 Qwen-Turbo，兼容 OpenAI 格式）==========
+    // 前端通过 body.apiKey 传 API Key，server 转发到阿里云百炼
+    // 每天免费 100 万 tokens（Qwen-Turbo），新用户送 7000 万 tokens（180 天）
+    if (pn === '/api/ai/chat') {
+      const body = await readRequestBody(req);
+      const apiKey = (body.apiKey || '').trim();
+      if (!apiKey) {
+        sendJSON(res, { error: 'NO_API_KEY', message: '请先在设置中配置 AI API Key' }, 401);
+        return;
+      }
+      const messages = Array.isArray(body.messages) ? body.messages : [];
+      if (!messages.length) {
+        sendJSON(res, { error: 'EMPTY_MESSAGES' }, 400);
+        return;
+      }
+      const model = body.model || 'qwen-turbo';
+      const temperature = typeof body.temperature === 'number' ? body.temperature : 0.7;
+      const maxTokens = body.maxTokens || 1024;
+      try {
+        const aiRes = await fetch('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature,
+            max_tokens: maxTokens,
+            stream: false,
+          }),
+        });
+        const aiData = await aiRes.json();
+        if (!aiRes.ok) {
+          console.warn('[AI] upstream error:', aiRes.status, JSON.stringify(aiData));
+          sendJSON(res, {
+            error: 'AI_REQUEST_FAILED',
+            message: aiData.error?.message || aiData.message || `上游 HTTP ${aiRes.status}`,
+            status: aiRes.status,
+          }, 502);
+          return;
+        }
+        const content = aiData.choices?.[0]?.message?.content || '';
+        sendJSON(res, { content, usage: aiData.usage, model: aiData.model });
+      } catch (e) {
+        console.error('[AI] chat proxy error:', e.message);
+        sendJSON(res, { error: 'AI_PROXY_ERROR', message: e.message }, 500);
+      }
+      return;
+    }
+
     // ========== 健康检查 ==========
     if (pn === '/api/health') {
       sendJSON(res, { ok: true, hasCookie: !!userCookie });

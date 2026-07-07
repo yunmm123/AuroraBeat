@@ -332,6 +332,13 @@ app.whenReady().then(async () => {
     }
   })
 
+  // v3.7.0: 在系统浏览器打开外部链接（AI 助手设置中的注册链接）
+  ipcMain.handle('shell:openExternal', async (_e, url: string) => {
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      await shell.openExternal(url)
+    }
+  })
+
   // 全局快捷键
   const togglePlay = () => mainWindow?.webContents.send('playback:toggle')
   const nextTrack = () => mainWindow?.webContents.send('playback:next')

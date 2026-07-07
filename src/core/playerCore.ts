@@ -7,6 +7,7 @@ export type AudioQuality = 'standard' | 'exhigh' | 'lossless' | 'hires';
 
 // v3.5.0 A1: 设置持久化 — 重启后恢复音量/音质/播放模式/喜欢歌单/历史/歌词偏移
 // v3.6.0 A2/B1: 增加搜索历史 + 快捷键配置持久化
+// v3.7.0 AI: 增加 aiApiKey 持久化（通义千问 Qwen-Turbo）
 const STORAGE_KEY = 'aurorabeat:settings:v1';
 const HISTORY_MAX = 50;
 const LYRIC_OFFSET_MAX = 5; // ±5s 上限，超出视为异常
@@ -34,6 +35,7 @@ interface PersistedSettings {
   lyricOffsets: Record<string, number>;
   searchHistory: string[];        // v3.6.0 A2: 搜索词历史
   shortcuts: Record<string, string>; // v3.6.0 B1: 自定义快捷键
+  aiApiKey: string;              // v3.7.0 AI: 通义千问 API Key
 }
 
 function loadSettings(): Partial<PersistedSettings> {
@@ -69,6 +71,7 @@ export interface PlayerState {
   history: Song[];        // v3.5.0 A4: 最近播放历史
   searchHistory: string[];   // v3.6.0 A2: 搜索词历史
   shortcuts: Record<string, string>; // v3.6.0 B1: 自定义快捷键
+  aiApiKey: string;          // v3.7.0 AI: 通义千问 API Key
 }
 
 type Listener = (state: PlayerState) => void;
@@ -87,6 +90,7 @@ class PlayerCore {
     lyricOffsets: {},
     searchHistory: [],
     shortcuts: { ...DEFAULT_SHORTCUTS },
+    aiApiKey: '',
   };
   private lyricOffset = 0; // v3.5.0 B3: 当前歌曲的歌词偏移（秒）
   private state: PlayerState = {
@@ -110,6 +114,7 @@ class PlayerCore {
     history: [],
     searchHistory: [],
     shortcuts: { ...DEFAULT_SHORTCUTS },
+    aiApiKey: '',
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -167,6 +172,11 @@ class PlayerCore {
     if (loaded.shortcuts) {
       this.persisted.shortcuts = { ...DEFAULT_SHORTCUTS, ...loaded.shortcuts };
       this.state.shortcuts = { ...DEFAULT_SHORTCUTS, ...loaded.shortcuts };
+    }
+    // v3.7.0 AI: 加载通义千问 API Key
+    if (typeof loaded.aiApiKey === 'string') {
+      this.persisted.aiApiKey = loaded.aiApiKey;
+      this.state.aiApiKey = loaded.aiApiKey;
     }
 
     this.initAudio();
@@ -411,6 +421,7 @@ class PlayerCore {
     this.persisted.history = this.state.history;
     this.persisted.searchHistory = this.state.searchHistory;
     this.persisted.shortcuts = this.state.shortcuts;
+    this.persisted.aiApiKey = this.state.aiApiKey;
     saveSettings(this.persisted);
     this.listeners.forEach((l) => l({ ...this.state }));
   }
@@ -1089,6 +1100,15 @@ class PlayerCore {
   /** 重置快捷键为默认 */
   resetShortcuts() {
     this.state.shortcuts = { ...DEFAULT_SHORTCUTS };
+    this.notify();
+  }
+
+  // ============================================================
+  // v3.7.0 AI: 通义千问 API Key
+  // ============================================================
+  /** 设置 AI API Key（通义千问，用于 A1/A2/A4/A5/A6 功能） */
+  setAiApiKey(key: string) {
+    this.state.aiApiKey = key.trim();
     this.notify();
   }
 }

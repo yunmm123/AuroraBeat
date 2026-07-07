@@ -120,6 +120,9 @@ export function usePlayer() {
   const setShortcut = useCallback((actionId: string, code: string) => playerCore.setShortcut(actionId, code), []);
   const resetShortcuts = useCallback(() => playerCore.resetShortcuts(), []);
 
+  // v3.7.0 AI: 通义千问 API Key
+  const setAiApiKey = useCallback((key: string) => playerCore.setAiApiKey(key), []);
+
   return {
     ...state,
     playSong,
@@ -158,5 +161,6 @@ export function usePlayer() {
     clearSearchHistory,
     setShortcut,
     resetShortcuts,
+    setAiApiKey,
   };
 }
