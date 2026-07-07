@@ -1613,7 +1613,7 @@ const App: React.FC = () => {
     } finally {
       setAiCoverReviewLoading(false);
     }
-  }, [song, aiReady, ai, apiBase, player, showGestureHint]);
+  }, [player.currentSong, aiReady, ai, apiBase, player, showGestureHint]);
 
   // C3 照片心情电台：选照片 → AI 分析氛围 → 搜索 → 播放
   const pickPhotoAndPlay = useCallback(async () => {
