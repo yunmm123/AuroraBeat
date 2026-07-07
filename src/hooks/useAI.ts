@@ -180,23 +180,8 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     );
   }, [chat]);
 
-  // C5 语音聊天：音频 base64 → 转文字 + AI 回复（直接走多模态 messages，让 Omni 理解音频）
-  const transcribeAudio = useCallback(async (audioBase64Wav: string) => {
-    const msg: MultimodalMessage[] = [
-      {
-        role: 'system',
-        content: '你听用户的语音消息并理解内容，正常回复对话。回复风格温柔简短（2-4句）。不要重复用户的话，直接给出回应。不要用 markdown，像聊天一样自然。',
-      },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: '（用户发来一条语音消息）' },
-          { type: 'input_audio', input_audio: { data: audioBase64Wav, format: 'wav' } },
-        ],
-      },
-    ];
-    return chat(msg, { maxTokens: 300, temperature: 0.8 });
-  }, [chat]);
+  // C5 语音聊天：前端用 SpeechRecognition 本地转文字后，直接走文本聊天
+  // 不再把音频发给 AI（阿里云百炼不支持 input_audio 类型）
 
   return {
     loading,
