@@ -201,6 +201,5 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     recognizeImage,
     generateImageReview,
     moodFromImage,
-    transcribeAudio,
   };
 }
