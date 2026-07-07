@@ -921,6 +921,30 @@ class PlayerCore {
     this.notify();
   }
 
+  // v3.8.1: 插入到当前播放歌曲之后并立即播放（用于 AI 歌单"插队播放"语义）
+  // 插入位置 = currentIndex + 1，原队列后续歌曲顺延，立即切到这首歌
+  insertNext(song: Song) {
+    if (this.state.currentIndex < 0 || this.state.currentIndex >= this.state.queue.length) {
+      // 没有当前歌曲，直接加到末尾并播放
+      this.state.queue = [...this.state.queue, song];
+      this.playTrackAt(this.state.queue.length - 1, this.state.queue);
+      return;
+    }
+    const insertIdx = this.state.currentIndex + 1;
+    const newQueue = [...this.state.queue];
+    newQueue.splice(insertIdx, 0, song);
+    this.state.queue = newQueue;
+    // 立即切到插入的歌曲播放
+    this.playTrackAt(insertIdx, newQueue);
+  }
+
+  // v3.8.1: 替换整个队列并播放指定歌曲（用于 AI 歌单"全部播放"语义）
+  replaceQueueAndPlay(songs: Song[], startIndex = 0) {
+    if (!songs.length) return;
+    this.state.queue = songs;
+    this.playTrackAt(startIndex, songs);
+  }
+
   removeFromQueue(index: number) {
     if (index < 0 || index >= this.state.queue.length) return;
     const newQueue = [...this.state.queue];

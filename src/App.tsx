@@ -1472,7 +1472,8 @@ const App: React.FC = () => {
     }
   }, [aiReady, ai, showGestureHint]);
 
-  // A5: 搜索 AI 生成的某首歌并播放
+  // A5: 搜索 AI 生成的某首歌并插队播放（双击触发）
+  // 语义：插入到当前歌曲之后立即播放，原队列后续顺延，这首歌播完继续原歌单
   const searchAndPlayCurated = useCallback(async (idx: number, item: { title: string; artist: string }) => {
     if (!serverPort) return;
     setAiCuratedFetching(prev => ({ ...prev, [idx]: true }));
@@ -1486,11 +1487,11 @@ const App: React.FC = () => {
         url: '', source: 'netease' as const,
       }));
       if (songs.length > 0) {
-        // 加入队列并播放
-        player.addSongsToQueue(songs);
-        player.playSong(songs[0], [...player.queue, ...songs]);
+        // 插队播放：插入到当前歌曲之后并立即播放
+        player.insertNext(songs[0]);
         setShowOverlay(false);
-        showGestureHint(`播放：${songs[0].title}`);
+        setAiPanel(null);
+        showGestureHint(`插队播放：${songs[0].title}`);
       } else {
         showGestureHint(`未找到：${item.title}`);
       }
@@ -1500,6 +1501,49 @@ const App: React.FC = () => {
       setAiCuratedFetching(prev => { const n = { ...prev }; delete n[idx]; return n; });
     }
   }, [serverPort, apiBase, player, showGestureHint]);
+
+  // v3.8.1 A5: 全部播放 — 逐首搜索 → 清空原队列 → 替换为搜索到的歌单 → 播放第一首
+  const [aiPlayAllRunning, setAiPlayAllRunning] = useState(false);
+  const playAllCurated = useCallback(async () => {
+    if (!aiCurated.length || !serverPort) return;
+    setAiPlayAllRunning(true);
+    try {
+      // 并发搜索所有歌（限制并发数 5）
+      const results: Song[] = [];
+      const concurrency = 5;
+      for (let i = 0; i < aiCurated.length; i += concurrency) {
+        const batch = aiCurated.slice(i, i + concurrency);
+        const found = await Promise.all(batch.map(async (it) => {
+          try {
+            const kw = it.artist ? `${it.title} ${it.artist}` : it.title;
+            const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(kw)}&limit=1`);
+            const data = await res.json();
+            const s = data.songs?.[0];
+            if (!s) return null;
+            return {
+              id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
+              album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
+              url: '', source: 'netease' as const,
+            } as Song;
+          } catch { return null; }
+        }));
+        found.forEach((s) => { if (s) results.push(s); });
+      }
+      if (results.length === 0) {
+        showGestureHint('这些歌在网易云都没找到');
+        return;
+      }
+      // 清空原队列 → 替换为搜索到的歌单 → 播放第一首
+      player.replaceQueueAndPlay(results, 0);
+      setShowOverlay(false);
+      setAiPanel(null);
+      showGestureHint(`已替换队列，播放 ${results.length} 首歌`);
+    } catch (e: any) {
+      showGestureHint(`全部播放失败：${e?.message || e}`);
+    } finally {
+      setAiPlayAllRunning(false);
+    }
+  }, [aiCurated, serverPort, apiBase, player, showGestureHint]);
 
   // A6 AI 音乐问答陪伴：发送消息
   const sendAiChat = useCallback(async () => {
@@ -2069,24 +2113,50 @@ const App: React.FC = () => {
                     >{aiPromptRunning ? '生成中…' : '生成'}</button>
                   </div>
                   {aiCurated.length > 0 && (
-                    <div className="max-h-[300px] overflow-y-auto -mx-1">
-                      {aiCurated.map((it, i) => (
-                        <div key={i} className="flex items-center gap-2 px-2 py-2 hover:bg-white/[0.03] rounded-lg group">
-                          <span className="w-5 text-center text-[11px] text-white/30">{i + 1}</span>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-[12px] text-white/85 truncate">{it.title}</div>
-                            {it.artist && <div className="text-[10px] text-white/35 truncate">{it.artist}</div>}
-                          </div>
-                          <button
-                            onClick={() => searchAndPlayCurated(i, it)}
-                            disabled={aiCuratedFetching[i]}
-                            className="px-2.5 py-1 rounded-md text-[10px] text-[#00f5d4]/80 bg-[#00f5d4]/10 hover:bg-[#00f5d4]/20 disabled:opacity-40 transition-all flex-shrink-0"
+                    <>
+                      {/* v3.8.1 A5: 全部播放按钮（清空原队列替换为生成的歌单） */}
+                      <button
+                        onClick={playAllCurated}
+                        disabled={aiPlayAllRunning}
+                        className="w-full mt-2 px-3 py-2 rounded-lg text-[12px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
+                      >
+                        {aiPlayAllRunning ? (
+                          <>
+                            <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin" />
+                            搜索并加载中…
+                          </>
+                        ) : (
+                          <>▶ 全部播放（替换当前队列）</>
+                        )}
+                      </button>
+                      <div className="text-[10px] text-white/30 mt-1.5 px-1">双击列表项可插队播放单曲</div>
+                      <div className="max-h-[260px] overflow-y-auto -mx-1 mt-1">
+                        {aiCurated.map((it, i) => (
+                          <div
+                            key={i}
+                            onDoubleClick={() => searchAndPlayCurated(i, it)}
+                            className={`flex items-center gap-2 px-2 py-2 hover:bg-white/[0.04] rounded-lg group cursor-pointer transition-colors ${aiCuratedFetching[i] ? 'opacity-60' : ''}`}
+                            title="双击插队播放"
                           >
-                            {aiCuratedFetching[i] ? '搜索中' : '播放'}
-                          </button>
-                        </div>
-                      ))}
-                    </div>
+                            <span className="w-5 text-center text-[11px] text-white/30">{i + 1}</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[12px] text-white/85 truncate">{it.title}</div>
+                              {it.artist && <div className="text-[10px] text-white/35 truncate">{it.artist}</div>}
+                            </div>
+                            {aiCuratedFetching[i] && (
+                              <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin flex-shrink-0" />
+                            )}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); searchAndPlayCurated(i, it); }}
+                              disabled={aiCuratedFetching[i]}
+                              className="px-2.5 py-1 rounded-md text-[10px] text-[#00f5d4]/80 bg-[#00f5d4]/10 hover:bg-[#00f5d4]/20 disabled:opacity-40 transition-all flex-shrink-0"
+                            >
+                              插队
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </>
                   )}
                 </>
               )}

@@ -69,6 +69,10 @@ export function usePlayer() {
     playerCore.addSongsToQueue(songs);
   }, []);
 
+  // v3.8.1: AI 歌单相关 — 插队播放 + 全部播放（清空原队列）
+  const insertNext = useCallback((song: Song) => playerCore.insertNext(song), []);
+  const replaceQueueAndPlay = useCallback((songs: Song[], startIndex?: number) => playerCore.replaceQueueAndPlay(songs, startIndex), []);
+
   const removeFromQueue = useCallback((index: number) => {
     playerCore.removeFromQueue(index);
   }, []);
@@ -141,6 +145,8 @@ export function usePlayer() {
     setQueue,
     addToQueue,
     addSongsToQueue,
+    insertNext,
+    replaceQueueAndPlay,
     removeFromQueue,
     clearQueue,
     getAnalyser,
