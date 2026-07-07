@@ -120,8 +120,9 @@ export function usePlayer() {
   const setShortcut = useCallback((actionId: string, code: string) => playerCore.setShortcut(actionId, code), []);
   const resetShortcuts = useCallback(() => playerCore.resetShortcuts(), []);
 
-  // v3.7.0 AI: 通义千问 API Key
-  const setAiApiKey = useCallback((key: string) => playerCore.setAiApiKey(key), []);
+  // v3.7.1 AI: 通用 OpenAI 兼容配置（API Key + Base URL + Model）
+  const setAiConfig = useCallback((opts: { apiKey?: string; baseUrl?: string; model?: string }) => playerCore.setAiConfig(opts), []);
+  const clearAiConfig = useCallback(() => playerCore.clearAiConfig(), []);
 
   return {
     ...state,
@@ -161,6 +162,7 @@ export function usePlayer() {
     clearSearchHistory,
     setShortcut,
     resetShortcuts,
-    setAiApiKey,
+    setAiConfig,
+    clearAiConfig,
   };
 }

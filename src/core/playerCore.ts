@@ -8,6 +8,7 @@ export type AudioQuality = 'standard' | 'exhigh' | 'lossless' | 'hires';
 // v3.5.0 A1: 设置持久化 — 重启后恢复音量/音质/播放模式/喜欢歌单/历史/歌词偏移
 // v3.6.0 A2/B1: 增加搜索历史 + 快捷键配置持久化
 // v3.7.0 AI: 增加 aiApiKey 持久化（通义千问 Qwen-Turbo）
+// v3.7.1 AI: 改为通用 OpenAI 兼容协议，新增 aiBaseUrl + aiModel，可自由切换模型
 const STORAGE_KEY = 'aurorabeat:settings:v1';
 const HISTORY_MAX = 50;
 const LYRIC_OFFSET_MAX = 5; // ±5s 上限，超出视为异常
@@ -26,6 +27,11 @@ export const DEFAULT_SHORTCUTS: Record<string, string> = {
   'toggle-queue': 'KeyQ',
 };
 
+// v3.7.1 AI: 默认配置（通义千问 Qwen-Turbo，每天免费 100 万 tokens）
+// 用户可在设置中切换为任意 OpenAI 兼容服务（DeepSeek / OpenAI / Moonshot / 智谱 GLM 等）
+export const DEFAULT_AI_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+export const DEFAULT_AI_MODEL = 'qwen-turbo';
+
 interface PersistedSettings {
   volume: number;
   quality: AudioQuality;
@@ -35,7 +41,9 @@ interface PersistedSettings {
   lyricOffsets: Record<string, number>;
   searchHistory: string[];        // v3.6.0 A2: 搜索词历史
   shortcuts: Record<string, string>; // v3.6.0 B1: 自定义快捷键
-  aiApiKey: string;              // v3.7.0 AI: 通义千问 API Key
+  aiApiKey: string;              // v3.7.0 AI: API Key
+  aiBaseUrl: string;             // v3.7.1 AI: OpenAI 兼容服务 Base URL
+  aiModel: string;               // v3.7.1 AI: 模型名
 }
 
 function loadSettings(): Partial<PersistedSettings> {
@@ -71,7 +79,9 @@ export interface PlayerState {
   history: Song[];        // v3.5.0 A4: 最近播放历史
   searchHistory: string[];   // v3.6.0 A2: 搜索词历史
   shortcuts: Record<string, string>; // v3.6.0 B1: 自定义快捷键
-  aiApiKey: string;          // v3.7.0 AI: 通义千问 API Key
+  aiApiKey: string;          // v3.7.0 AI: API Key
+  aiBaseUrl: string;         // v3.7.1 AI: OpenAI 兼容服务 Base URL
+  aiModel: string;           // v3.7.1 AI: 模型名
 }
 
 type Listener = (state: PlayerState) => void;
@@ -91,6 +101,8 @@ class PlayerCore {
     searchHistory: [],
     shortcuts: { ...DEFAULT_SHORTCUTS },
     aiApiKey: '',
+    aiBaseUrl: DEFAULT_AI_BASE_URL,
+    aiModel: DEFAULT_AI_MODEL,
   };
   private lyricOffset = 0; // v3.5.0 B3: 当前歌曲的歌词偏移（秒）
   private state: PlayerState = {
@@ -115,6 +127,8 @@ class PlayerCore {
     searchHistory: [],
     shortcuts: { ...DEFAULT_SHORTCUTS },
     aiApiKey: '',
+    aiBaseUrl: DEFAULT_AI_BASE_URL,
+    aiModel: DEFAULT_AI_MODEL,
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -177,6 +191,15 @@ class PlayerCore {
     if (typeof loaded.aiApiKey === 'string') {
       this.persisted.aiApiKey = loaded.aiApiKey;
       this.state.aiApiKey = loaded.aiApiKey;
+    }
+    // v3.7.1 AI: 加载 Base URL + Model（缺省用默认值，兼容 v3.7.0 老数据）
+    if (typeof loaded.aiBaseUrl === 'string' && loaded.aiBaseUrl) {
+      this.persisted.aiBaseUrl = loaded.aiBaseUrl;
+      this.state.aiBaseUrl = loaded.aiBaseUrl;
+    }
+    if (typeof loaded.aiModel === 'string' && loaded.aiModel) {
+      this.persisted.aiModel = loaded.aiModel;
+      this.state.aiModel = loaded.aiModel;
     }
 
     this.initAudio();
@@ -422,6 +445,8 @@ class PlayerCore {
     this.persisted.searchHistory = this.state.searchHistory;
     this.persisted.shortcuts = this.state.shortcuts;
     this.persisted.aiApiKey = this.state.aiApiKey;
+    this.persisted.aiBaseUrl = this.state.aiBaseUrl;
+    this.persisted.aiModel = this.state.aiModel;
     saveSettings(this.persisted);
     this.listeners.forEach((l) => l({ ...this.state }));
   }
@@ -1104,11 +1129,20 @@ class PlayerCore {
   }
 
   // ============================================================
-  // v3.7.0 AI: 通义千问 API Key
+  // v3.7.1 AI: 通用 OpenAI 兼容配置（API Key + Base URL + Model）
+  // 兼容通义千问 / DeepSeek / OpenAI / Moonshot / 智谱 GLM 等
   // ============================================================
-  /** 设置 AI API Key（通义千问，用于 A1/A2/A4/A5/A6 功能） */
-  setAiApiKey(key: string) {
-    this.state.aiApiKey = key.trim();
+  /** 设置 AI 配置（任一字段可省略，省略的字段保持不变） */
+  setAiConfig(opts: { apiKey?: string; baseUrl?: string; model?: string }) {
+    if (typeof opts.apiKey === 'string') this.state.aiApiKey = opts.apiKey.trim();
+    if (typeof opts.baseUrl === 'string') this.state.aiBaseUrl = opts.baseUrl.trim();
+    if (typeof opts.model === 'string') this.state.aiModel = opts.model.trim();
+    this.notify();
+  }
+
+  /** 清空 AI 配置（保留 baseUrl/model 默认值） */
+  clearAiConfig() {
+    this.state.aiApiKey = '';
     this.notify();
   }
 }

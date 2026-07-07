@@ -1080,8 +1080,11 @@ const App: React.FC = () => {
   const [showShortcutsPanel, setShowShortcutsPanel] = useState(false);
   const [recordingShortcut, setRecordingShortcut] = useState<string | null>(null);
   // v3.7.0 AI: 通义千问相关状态
+  // v3.7.1 AI: 改为通用 OpenAI 兼容协议，增加 baseUrl + model 输入
   const [showAiKeyPanel, setShowAiKeyPanel] = useState(false);
   const [aiKeyDraft, setAiKeyDraft] = useState('');
+  const [aiBaseUrlDraft, setAiBaseUrlDraft] = useState('');
+  const [aiModelDraft, setAiModelDraft] = useState('');
   const [aiReview, setAiReview] = useState<string | null>(null);          // A1 乐评内容
   const [aiReviewLoading, setAiReviewLoading] = useState(false);
   const [aiSearchMode, setAiSearchMode] = useState(false);                 // A2 自然语言搜歌开关
@@ -1145,8 +1148,9 @@ const App: React.FC = () => {
   const apiBase = `http://127.0.0.1:${serverPort}`;
 
   // v3.7.0 AI: 通义千问 Qwen-Turbo 调用封装
-  const ai = useAI(apiBase, player.aiApiKey);
-  const aiReady = !!player.aiApiKey && !!serverPort;
+  // v3.7.1 AI: 改为通用 OpenAI 兼容协议，支持任意 baseUrl + model
+  const ai = useAI(apiBase, player.aiApiKey, player.aiBaseUrl, player.aiModel);
+  const aiReady = !!player.aiApiKey && !!player.aiBaseUrl && !!player.aiModel && !!serverPort;
 
   // 媒体键
   useEffect(() => {
@@ -1321,17 +1325,38 @@ const App: React.FC = () => {
 
   // ============================================================
   // v3.7.0 AI 功能函数
+  // v3.7.1 AI: 改为通用 OpenAI 兼容协议
   // ============================================================
 
-  // 打开 API Key 设置弹窗（同步当前 key 到 draft）
+  // v3.7.1: 预设模型（点击即填入 baseUrl + model，方便切换）
+  const AI_PRESETS = [
+    { name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-turbo', hint: '阿里云百炼 · 每天免费 100 万 tokens' },
+    { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', hint: '国产性价比之王' },
+    { name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', hint: 'GLM-4-Flash 免费版' },
+    { name: 'Moonshot', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k', hint: 'Kimi 同源' },
+    { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', hint: '官方原版' },
+  ];
+
+  // 打开 AI 设置弹窗（同步当前配置到 draft）
   const openAiKeyPanel = () => {
     setAiKeyDraft(player.aiApiKey || '');
+    setAiBaseUrlDraft(player.aiBaseUrl || '');
+    setAiModelDraft(player.aiModel || '');
     setShowAiKeyPanel(true);
   };
   const saveAiKey = () => {
-    player.setAiApiKey(aiKeyDraft);
+    player.setAiConfig({
+      apiKey: aiKeyDraft,
+      baseUrl: aiBaseUrlDraft,
+      model: aiModelDraft,
+    });
     setShowAiKeyPanel(false);
     showGestureHint(player.aiApiKey ? 'AI 已启用' : 'AI 已停用');
+  };
+  // v3.7.1: 应用预设（一键切换 baseUrl + model，不动 apiKey）
+  const applyAiPreset = (p: { baseUrl: string; model: string }) => {
+    setAiBaseUrlDraft(p.baseUrl);
+    setAiModelDraft(p.model);
   };
 
   // A1 AI 乐评
@@ -1699,10 +1724,11 @@ const App: React.FC = () => {
       )}
 
       {/* v3.7.0 AI: API Key 设置弹窗 */}
+      {/* v3.7.1 AI: 改为通用 OpenAI 兼容协议，支持 Base URL + Model + 预设 */}
       {showAiKeyPanel && (
         <>
           <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => setShowAiKeyPanel(false)} />
-          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[460px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl">
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[520px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl">
             <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.05]">
               <div className="text-sm font-bold text-white/90 flex items-center gap-2">
                 <span className="text-[#00f5d4]">✦</span> AI 助手设置
@@ -1712,10 +1738,32 @@ const App: React.FC = () => {
                 className="w-6 h-6 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-sm"
               >×</button>
             </div>
-            <div className="px-5 py-4 space-y-3">
+            <div className="px-5 py-4 space-y-3 max-h-[70vh] overflow-y-auto">
               <div className="text-[11px] text-white/55 leading-relaxed">
-                接入 <span className="text-[#00f5d4]">通义千问 Qwen-Turbo</span>（阿里云百炼），每天免费 100 万 tokens，新用户再送 7000 万。
+                通用 OpenAI 兼容协议，支持任意服务商。点击下方预设快速切换，只需填入对应平台的 API Key。
               </div>
+              {/* v3.7.1: 预设按钮 */}
+              <div>
+                <div className="text-[11px] text-white/50 mb-1.5">预设</div>
+                <div className="grid grid-cols-5 gap-1.5">
+                  {AI_PRESETS.map((p) => {
+                    const active = aiBaseUrlDraft === p.baseUrl && aiModelDraft === p.model;
+                    return (
+                      <button
+                        key={p.name}
+                        onClick={() => applyAiPreset(p)}
+                        title={p.hint}
+                        className={`px-2 py-1.5 rounded-md text-[11px] transition-all ${
+                          active
+                            ? 'bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40'
+                            : 'bg-white/[0.04] text-white/60 border border-white/[0.08] hover:bg-white/[0.08] hover:text-white/80'
+                        }`}
+                      >{p.name}</button>
+                    );
+                  })}
+                </div>
+              </div>
+              {/* API Key */}
               <div>
                 <div className="text-[11px] text-white/50 mb-1.5">API Key</div>
                 <input
@@ -1727,10 +1775,33 @@ const App: React.FC = () => {
                   className="w-full px-3 py-2.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none font-mono"
                 />
               </div>
+              {/* Base URL */}
+              <div>
+                <div className="text-[11px] text-white/50 mb-1.5">Base URL（OpenAI 兼容）</div>
+                <input
+                  type="text"
+                  value={aiBaseUrlDraft}
+                  onChange={(e) => setAiBaseUrlDraft(e.target.value)}
+                  placeholder="https://api.example.com/v1"
+                  className="w-full px-3 py-2.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none font-mono"
+                />
+              </div>
+              {/* Model */}
+              <div>
+                <div className="text-[11px] text-white/50 mb-1.5">Model</div>
+                <input
+                  type="text"
+                  value={aiModelDraft}
+                  onChange={(e) => setAiModelDraft(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && saveAiKey()}
+                  placeholder="qwen-turbo / deepseek-chat / gpt-4o-mini …"
+                  className="w-full px-3 py-2.5 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none font-mono"
+                />
+              </div>
               <div className="text-[10px] text-white/40 leading-relaxed">
-                1. 访问 <span className="text-[#00f5d4] underline cursor-pointer" onClick={() => electron?.openExternal?.('https://bailian.console.aliyun.com/')}>bailian.console.aliyun.com</span> 注册并开通百炼服务<br/>
-                2. 在「API-KEY 管理」创建 Key，复制到此处<br/>
-                3. Key 仅保存在本地，不会上传
+                · 默认通义千问 Qwen-Turbo（阿里云百炼，每天免费 100 万 tokens）<br/>
+                · 切换其他平台只需点上方预设 + 换对应 API Key<br/>
+                · Key 仅保存在本地，不会上传
               </div>
             </div>
             <div className="px-5 py-3 flex items-center justify-between border-t border-white/[0.05]">
@@ -1740,13 +1811,13 @@ const App: React.FC = () => {
               <div className="flex gap-2">
                 {player.aiApiKey && (
                   <button
-                    onClick={() => { player.setAiApiKey(''); setAiKeyDraft(''); setShowAiKeyPanel(false); showGestureHint('AI 已停用'); }}
+                    onClick={() => { player.clearAiConfig(); setAiKeyDraft(''); setShowAiKeyPanel(false); showGestureHint('AI 已停用'); }}
                     className="px-3 py-1.5 rounded-lg text-[11px] text-red-400/70 hover:text-red-400 hover:bg-red-500/10 transition-all"
                   >清除</button>
                 )}
                 <button
                   onClick={saveAiKey}
-                  disabled={!aiKeyDraft.trim()}
+                  disabled={!aiKeyDraft.trim() || !aiBaseUrlDraft.trim() || !aiModelDraft.trim()}
                   className="px-5 py-1.5 rounded-lg text-[11px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all"
                 >保存</button>
               </div>

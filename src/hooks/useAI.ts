@@ -1,9 +1,9 @@
 import { useState, useCallback, useRef } from 'react';
 
 // ====================================================================
-// v3.7.0 AI Hook — 通义千问 Qwen-Turbo 调用封装
-// 每天免费 100 万 tokens，兼容 OpenAI 格式，server.js /api/ai/chat 代理
-// 服务 5 个功能：A1 乐评 / A2 自然语言搜歌 / A4 心情电台 / A5 歌单生成 / A6 音乐问答
+// v3.7.1 AI Hook — 通用 OpenAI 兼容协议调用封装
+// 任意 OpenAI 兼容服务都可接入：通义千问 / DeepSeek / OpenAI / Moonshot / 智谱 GLM 等
+// 切换模型只需换 Base URL + Model + API Key，无需改代码
 // ====================================================================
 
 export interface AIMessage {
@@ -11,7 +11,7 @@ export interface AIMessage {
   content: string;
 }
 
-export function useAI(apiBase: string, apiKey: string) {
+export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiModel: string) {
   const [loading, setLoading] = useState(false);
   // 防并发：同一时间只允许一个 AI 请求（避免额度浪费 + UI 混乱）
   const lockRef = useRef(false);
@@ -19,6 +19,8 @@ export function useAI(apiBase: string, apiKey: string) {
   const chat = useCallback(async (messages: AIMessage[], opts?: { maxTokens?: number; temperature?: number }) => {
     if (!apiKey) throw new Error('NO_API_KEY');
     if (!apiBase) throw new Error('NO_SERVER');
+    if (!aiBaseUrl) throw new Error('NO_BASE_URL');
+    if (!aiModel) throw new Error('NO_MODEL');
     if (lockRef.current) throw new Error('BUSY');
     lockRef.current = true;
     setLoading(true);
@@ -28,6 +30,8 @@ export function useAI(apiBase: string, apiKey: string) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           apiKey,
+          baseUrl: aiBaseUrl,
+          model: aiModel,
           messages,
           maxTokens: opts?.maxTokens ?? 1024,
           temperature: opts?.temperature ?? 0.7,
@@ -40,7 +44,7 @@ export function useAI(apiBase: string, apiKey: string) {
       lockRef.current = false;
       setLoading(false);
     }
-  }, [apiBase, apiKey]);
+  }, [apiBase, apiKey, aiBaseUrl, aiModel]);
 
   // A1 AI 乐评：生成沉浸式短乐评（150 字以内，像朋友分享听后感）
   const generateReview = useCallback(async (song: { title: string; artist: string; album?: string }) => {

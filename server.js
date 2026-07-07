@@ -636,9 +636,10 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // ========== v3.7.0 AI 代理（通义千问 Qwen-Turbo，兼容 OpenAI 格式）==========
-    // 前端通过 body.apiKey 传 API Key，server 转发到阿里云百炼
-    // 每天免费 100 万 tokens（Qwen-Turbo），新用户送 7000 万 tokens（180 天）
+    // ========== v3.7.1 AI 代理（通用 OpenAI 兼容协议）==========
+    // 前端通过 body 传 apiKey + baseUrl + model + messages
+    // server 转发到任意 OpenAI 兼容服务（通义千问 / DeepSeek / OpenAI / Moonshot / 智谱 GLM 等）
+    // 默认值兜底：未传 baseUrl/model 时用通义千问 Qwen-Turbo（每天免费 100 万 tokens）
     if (pn === '/api/ai/chat') {
       const body = await readRequestBody(req);
       const apiKey = (body.apiKey || '').trim();
@@ -651,11 +652,17 @@ const server = http.createServer(async (req, res) => {
         sendJSON(res, { error: 'EMPTY_MESSAGES' }, 400);
         return;
       }
-      const model = body.model || 'qwen-turbo';
+      // v3.7.1: baseUrl + model 由前端传入，默认兜底通义千问
+      const baseUrl = (body.baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1').trim().replace(/\/+$/, '');
+      const model = (body.model || 'qwen-turbo').trim();
       const temperature = typeof body.temperature === 'number' ? body.temperature : 0.7;
       const maxTokens = body.maxTokens || 1024;
+      // 拼接上游 chat/completions 端点（用户填的 baseUrl 可能带 /v1 也可能不带）
+      const upstreamUrl = baseUrl.endsWith('/chat/completions')
+        ? baseUrl
+        : `${baseUrl}/chat/completions`;
       try {
-        const aiRes = await fetch('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', {
+        const aiRes = await fetch(upstreamUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
