@@ -28,9 +28,10 @@ export const DEFAULT_SHORTCUTS: Record<string, string> = {
 };
 
 // v3.7.1 AI: 默认配置（通义千问 Qwen-Turbo，每天免费 100 万 tokens）
+// v3.8.0 AI: 默认模型升级为 qwen3.5-omni-plus-2026-03-15（全模态，支持文本/图像/音频/视频输入）
 // 用户可在设置中切换为任意 OpenAI 兼容服务（DeepSeek / OpenAI / Moonshot / 智谱 GLM 等）
 export const DEFAULT_AI_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-export const DEFAULT_AI_MODEL = 'qwen-turbo';
+export const DEFAULT_AI_MODEL = 'qwen3.5-omni-plus-2026-03-15';
 
 interface PersistedSettings {
   volume: number;

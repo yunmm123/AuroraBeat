@@ -1097,6 +1097,18 @@ const App: React.FC = () => {
   const [aiChatMessages, setAiChatMessages] = useState<AIMessage[]>([]);
   const [aiChatInput, setAiChatInput] = useState('');
   const aiChatScrollRef = useRef<HTMLDivElement>(null);
+  // v3.8.0 多模态：C1 看图识曲 / C2 封面意境 / C3 照片心情电台 / C5 语音聊天
+  const [showImageRecognizePanel, setShowImageRecognizePanel] = useState(false);
+  const [imageRecognizeData, setImageRecognizeData] = useState<string>(''); // data URL
+  const [imageRecognizeRunning, setImageRecognizeRunning] = useState(false);
+  const [aiCoverReview, setAiCoverReview] = useState<string | null>(null); // C2 封面意境内容
+  const [aiCoverReviewLoading, setAiCoverReviewLoading] = useState(false);
+  const [aiPhotoMoodData, setAiPhotoMoodData] = useState<string>('');       // C3 上传的照片
+  const [aiPhotoMoodRunning, setAiPhotoMoodRunning] = useState(false);
+  const [aiVoiceRecording, setAiVoiceRecording] = useState(false);          // C5 录音中
+  const [aiVoiceProcessing, setAiVoiceProcessing] = useState(false);         // C5 语音识别中
+  const aiVoiceRecorderRef = useRef<MediaRecorder | null>(null);
+  const aiVoiceChunksRef = useRef<Blob[]>([]);
   const [showFx, setShowFx] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
@@ -1330,7 +1342,7 @@ const App: React.FC = () => {
 
   // v3.7.1: 预设模型（点击即填入 baseUrl + model，方便切换）
   const AI_PRESETS = [
-    { name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-turbo', hint: '阿里云百炼 · 每天免费 100 万 tokens' },
+    { name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen3.5-omni-plus-2026-03-15', hint: '阿里云百炼 · 全模态（文本/图像/音频/视频）' },
     { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', hint: '国产性价比之王' },
     { name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', hint: 'GLM-4-Flash 免费版' },
     { name: 'Moonshot', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k', hint: 'Kimi 同源' },
@@ -1528,10 +1540,187 @@ const App: React.FC = () => {
     }
   }, [aiChatMessages, showAiChat]);
 
+  // ============================================================
+  // v3.8.0 多模态 AI 功能函数
+  // ============================================================
+
+  // C1 看图识曲：选图 → 识别 → 搜索 → 播放第一首
+  const pickAndRecognizeImage = useCallback(async () => {
+    if (!aiReady) { openAiKeyPanel(); return; }
+    if (!electron?.selectImageFile) return;
+    const result = await electron.selectImageFile();
+    if (!result?.path) return;
+    setImageRecognizeData(result.path);
+    setShowImageRecognizePanel(true);
+    setImageRecognizeRunning(true);
+    try {
+      const recognized = await ai.recognizeImage(result.path);
+      if (!recognized || recognized === '未知') {
+        showGestureHint('AI 没识别出来');
+        return;
+      }
+      showGestureHint(`AI 识别：${recognized}`);
+      // 直接搜索
+      const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(recognized)}&limit=10`);
+      const data = await res.json();
+      const songs: Song[] = (data.songs || []).map((s: any) => ({
+        id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
+        album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
+        url: '', source: 'netease' as const,
+      }));
+      if (songs.length) {
+        player.playSong(songs[0], songs);
+        showGestureHint(`播放：${songs[0].title}`);
+      } else {
+        showGestureHint('网易云没找到这首歌');
+      }
+    } catch (e: any) {
+      showGestureHint(`识别失败：${e?.message || e}`);
+    } finally {
+      setImageRecognizeRunning(false);
+    }
+  }, [aiReady, ai, apiBase, player, showGestureHint, electron]);
+
+  // C2 封面意境解读：当前歌曲封面 → 多模态解读
+  const requestAiCoverReview = useCallback(async () => {
+    const song = player.currentSong;
+    if (!song || !aiReady) {
+      if (!aiReady) { openAiKeyPanel(); return; }
+      return;
+    }
+    // 封面 URL 转为可直接 fetch 的代理 URL（避免跨域）
+    const coverUrl = song.cover ? `${apiBase}/api/cover?url=${encodeURIComponent(song.cover)}` : '';
+    if (!coverUrl) {
+      showGestureHint('这首歌没有封面图');
+      return;
+    }
+    setAiCoverReviewLoading(true);
+    setAiCoverReview(null);
+    try {
+      // 把封面图转成 data URL（fetch + blob + FileReader）
+      const imgRes = await fetch(coverUrl);
+      const blob = await imgRes.blob();
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result as string);
+        r.onerror = reject;
+        r.readAsDataURL(blob);
+      });
+      const text = await ai.generateImageReview(dataUrl, { title: song.title, artist: song.artist });
+      setAiCoverReview(text);
+    } catch (e: any) {
+      setAiCoverReview(`生成失败：${e?.message || e}`);
+    } finally {
+      setAiCoverReviewLoading(false);
+    }
+  }, [song, aiReady, ai, apiBase, player, showGestureHint]);
+
+  // C3 照片心情电台：选照片 → AI 分析氛围 → 搜索 → 播放
+  const pickPhotoAndPlay = useCallback(async () => {
+    if (!aiReady) { openAiKeyPanel(); return; }
+    if (!electron?.selectImageFile) return;
+    const result = await electron.selectImageFile();
+    if (!result?.path) return;
+    setAiPhotoMoodData(result.path);
+    setAiPhotoMoodRunning(true);
+    try {
+      const keyword = await ai.moodFromImage(result.path);
+      if (!keyword) { showGestureHint('AI 没分析出氛围'); return; }
+      showGestureHint(`AI 看图理解为：${keyword}`);
+      const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(keyword)}&limit=30`);
+      const data = await res.json();
+      const songs: Song[] = (data.songs || []).map((s: any) => ({
+        id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
+        album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
+        url: '', source: 'netease' as const,
+      }));
+      if (songs.length) {
+        player.playSong(songs[0], songs);
+        showGestureHint(`播放：${songs[0].title}`);
+      } else {
+        showGestureHint('没找到匹配的歌');
+      }
+    } catch (e: any) {
+      showGestureHint(`分析失败：${e?.message || e}`);
+    } finally {
+      setAiPhotoMoodRunning(false);
+      // 延迟清掉照片预览
+      setTimeout(() => setAiPhotoMoodData(''), 1500);
+    }
+  }, [aiReady, ai, apiBase, player, showGestureHint, electron]);
+
+  // C5 语音聊天：开始录音
+  const startAiVoiceRecord = useCallback(async () => {
+    if (!aiReady) { openAiKeyPanel(); return; }
+    if (aiVoiceRecording) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      aiVoiceChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) aiVoiceChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        // 录音结束 → 转 base64 → 发给 AI
+        const blob = new Blob(aiVoiceChunksRef.current, { type: 'audio/wav' });
+        stream.getTracks().forEach(t => t.stop());
+        if (blob.size < 500) { setAiVoiceProcessing(false); return; } // 太短
+        setAiVoiceProcessing(true);
+        // 占位用户消息
+        setAiChatMessages(prev => [...prev, { role: 'user', content: '🎤 语音消息' }]);
+        setAiChatMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+        try {
+          const base64: string = await new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => {
+              const s = r.result as string;
+              // data:audio/wav;base64,XXX → 只要 XXX
+              const idx = s.indexOf(',');
+              resolve(idx >= 0 ? s.substring(idx + 1) : s);
+            };
+            r.onerror = reject;
+            r.readAsDataURL(blob);
+          });
+          const context = player.currentSong ? `《${player.currentSong.title}》- ${player.currentSong.artist}` : undefined;
+          const reply = await ai.transcribeAudio(base64);
+          setAiChatMessages(prev => {
+            const next = [...prev];
+            next[next.length - 1] = { role: 'assistant', content: reply };
+            return next;
+          });
+        } catch (e: any) {
+          setAiChatMessages(prev => {
+            const next = [...prev];
+            next[next.length - 1] = { role: 'assistant', content: `语音识别失败：${e?.message || e}` };
+            return next;
+          });
+        } finally {
+          setAiVoiceProcessing(false);
+        }
+      };
+      recorder.start();
+      aiVoiceRecorderRef.current = recorder;
+      setAiVoiceRecording(true);
+    } catch (e: any) {
+      showGestureHint(`麦克风不可用：${e?.message || e}`);
+    }
+  }, [aiReady, aiVoiceRecording, ai, player.currentSong, showGestureHint]);
+
+  // C5: 停止录音（触发 onstop）
+  const stopAiVoiceRecord = useCallback(() => {
+    if (aiVoiceRecorderRef.current && aiVoiceRecording) {
+      aiVoiceRecorderRef.current.stop();
+      setAiVoiceRecording(false);
+    }
+  }, [aiVoiceRecording]);
+
   // 切歌时清空 A1 乐评
   useEffect(() => {
     setAiReview(null);
     setAiReviewLoading(false);
+    // v3.8.0: 切歌同时清空封面意境
+    setAiCoverReview(null);
+    setAiCoverReviewLoading(false);
   }, [player.currentSong?.id]);
 
   // 键盘快捷键（沉浸式控制）— v3.6.0 B1: 支持自定义快捷键
@@ -1931,6 +2120,31 @@ const App: React.FC = () => {
         </div>
       )}
 
+      {/* v3.8.0 C2: 封面意境解读浮层（与 A1 乐评并列，避免同时显示拥挤） */}
+      {(aiCoverReview || aiCoverReviewLoading) && !aiReview && (
+        <div className="absolute left-1/2 -translate-x-1/2 z-[55] pointer-events-auto" style={{ bottom: '110px', maxWidth: '460px', width: 'calc(100% - 32px)' }}>
+          <div className="rounded-2xl border border-[#ff6b9d]/30 bg-black/80 backdrop-blur-2xl shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/[0.05]">
+              <div className="flex items-center gap-1.5 text-[11px] text-[#ff6b9d] font-medium">
+                <span>🖼</span> AI 封面意境
+              </div>
+              <button
+                onClick={() => { setAiCoverReview(null); setAiCoverReviewLoading(false); }}
+                className="w-5 h-5 rounded hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-xs"
+              >×</button>
+            </div>
+            <div className="px-4 py-3 text-[12px] text-white/80 leading-relaxed">
+              {aiCoverReviewLoading ? (
+                <div className="flex items-center gap-2 text-white/50">
+                  <div className="w-3 h-3 border border-[#ff6b9d]/40 border-t-[#ff6b9d] rounded-full animate-spin" />
+                  正在端详封面…
+                </div>
+              ) : aiCoverReview}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* v3.7.0 AI: A6 右下角聊天浮窗 */}
       {showAiChat && (
         <div className="fixed right-5 bottom-28 z-[68] w-[340px] h-[440px] flex flex-col rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl pointer-events-auto">
@@ -1975,11 +2189,84 @@ const App: React.FC = () => {
               placeholder={aiReady ? '说点什么…' : '请先在设置中配置 API Key'}
               className="flex-1 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-[12px] text-white/90 focus:border-[#00f5d4]/50 focus:outline-none"
             />
+            {/* v3.8.0 C5: 语音输入按钮（按一下开始录音，再按一下结束发送） */}
+            {aiReady && (
+              <button
+                onClick={aiVoiceRecording ? stopAiVoiceRecord : startAiVoiceRecord}
+                disabled={aiVoiceProcessing}
+                title={aiVoiceRecording ? '停止录音并发送' : '按住说话'}
+                className={`w-9 flex items-center justify-center rounded-lg border transition-all ${
+                  aiVoiceRecording
+                    ? 'bg-red-500/20 text-red-400 border-red-400/50 animate-pulse'
+                    : aiVoiceProcessing
+                    ? 'bg-[#00f5d4]/10 text-[#00f5d4]/40 border-[#00f5d4]/20'
+                    : 'bg-white/[0.04] text-white/50 border-white/[0.08] hover:text-white/80 hover:bg-white/[0.08]'
+                }`}
+              >
+                {aiVoiceProcessing ? (
+                  <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin" />
+                ) : (
+                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <rect x="9" y="2" width="6" height="12" rx="3"/>
+                    <path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v3"/>
+                  </svg>
+                )}
+              </button>
+            )}
             <button
               onClick={sendAiChat}
               disabled={ai.loading || !aiChatInput.trim()}
               className="px-3 py-2 rounded-lg text-[12px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all"
             >{ai.loading ? '…' : '发送'}</button>
+          </div>
+        </div>
+      )}
+
+      {/* v3.8.0 C1: 看图识曲识别中弹窗（显示图片预览 + 加载状态） */}
+      {showImageRecognizePanel && imageRecognizeData && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => !imageRecognizeRunning && setShowImageRecognizePanel(false)} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[420px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-white/[0.05]">
+              <div className="text-sm font-bold text-white/90 flex items-center gap-2">
+                <span className="text-[#00f5d4]">🖼</span> AI 看图识曲
+              </div>
+              <button
+                onClick={() => !imageRecognizeRunning && setShowImageRecognizePanel(false)}
+                disabled={imageRecognizeRunning}
+                className="w-6 h-6 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-sm disabled:opacity-30"
+              >×</button>
+            </div>
+            <div className="p-5">
+              <img src={imageRecognizeData} alt="待识别" className="w-full max-h-[280px] object-contain rounded-lg bg-black/30" />
+              <div className="mt-3 flex items-center gap-2 text-[12px] text-white/60">
+                {imageRecognizeRunning ? (
+                  <>
+                    <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin" />
+                    <span>AI 正在端详这张图…</span>
+                  </>
+                ) : (
+                  <span>识别结果见底部提示，已自动搜索并播放</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* v3.8.0 C3: 照片心情电台分析中浮层（右下角小预览） */}
+      {aiPhotoMoodData && (
+        <div className="fixed right-5 bottom-72 z-[68] w-[180px] rounded-xl border border-[#ff6b9d]/30 bg-[#0E1014]/95 backdrop-blur-xl shadow-2xl overflow-hidden">
+          <img src={aiPhotoMoodData} alt="分析中" className="w-full h-[120px] object-cover" />
+          <div className="px-3 py-2 flex items-center gap-2 text-[11px] text-white/70">
+            {aiPhotoMoodRunning ? (
+              <>
+                <div className="w-2.5 h-2.5 border border-[#ff6b9d]/40 border-t-[#ff6b9d] rounded-full animate-spin" />
+                <span>AI 看照片中…</span>
+              </>
+            ) : (
+              <span>已找歌播放</span>
+            )}
           </div>
         </div>
       )}
@@ -2147,6 +2434,21 @@ const App: React.FC = () => {
                 </svg>
               </button>
             )}
+            {/* v3.8.0 C2: AI 封面意境解读按钮（与 A1 乐评图标区分：🖼 框图） */}
+            {player.currentSong && player.currentSong.cover && (
+              <button
+                onClick={requestAiCoverReview}
+                disabled={aiCoverReviewLoading}
+                className={`w-9 h-9 flex items-center justify-center transition-all ${aiCoverReview ? 'text-[#00f5d4]' : 'text-white/30 hover:text-white/60'}`}
+                title="AI 封面意境"
+              >
+                <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+                  <rect x="3" y="3" width="18" height="18" rx="2"/>
+                  <circle cx="9" cy="9" r="2"/>
+                  <path d="M21 15l-5-5L5 21"/>
+                </svg>
+              </button>
+            )}
           </div>
 
           <div className="flex-1 flex flex-col items-center gap-2 max-w-2xl mx-auto">
@@ -2297,6 +2599,14 @@ const App: React.FC = () => {
                       <span>AI 助手</span>
                       <span className={player.aiApiKey ? 'text-[#00f5d4]' : 'text-white/40'}>✦</span>
                     </button>
+                    {/* v3.8.0 C1: 看图识曲入口 */}
+                    <button
+                      onClick={() => { pickAndRecognizeImage(); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>看图识曲</span>
+                      <span className="text-white/40">🖼</span>
+                    </button>
                   </div>
                 </>
               )}
@@ -2361,8 +2671,8 @@ const App: React.FC = () => {
               {/* 首页 */}
               {panel === 'home' && (
                 <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                  {/* v3.7.0 AI: 心情电台 + 歌单生成入口（不拥挤，两张窄卡片） */}
-                  <div className="grid grid-cols-2 gap-3">
+                  {/* v3.7.0 AI: 心情电台 + 歌单生成入口（v3.8.0 加 C3 照片心情电台，三列） */}
+                  <div className="grid grid-cols-3 gap-3">
                     <button
                       onClick={() => aiReady ? setAiPanel('mood') : openAiKeyPanel()}
                       className="relative overflow-hidden rounded-2xl p-4 text-left border border-[#00f5d4]/20 transition-all hover:border-[#00f5d4]/40 group"
@@ -2384,6 +2694,18 @@ const App: React.FC = () => {
                         <div className="text-[12px] font-bold text-white/90">AI 歌单生成</div>
                       </div>
                       <div className="text-[10px] text-white/50">输入主题，生成 20 首歌单</div>
+                    </button>
+                    {/* v3.8.0 C3: 照片心情电台 */}
+                    <button
+                      onClick={() => aiReady ? pickPhotoAndPlay() : openAiKeyPanel()}
+                      className="relative overflow-hidden rounded-2xl p-4 text-left border border-[#ff6b9d]/20 transition-all hover:border-[#ff6b9d]/40 group"
+                      style={{ background: 'linear-gradient(135deg, rgba(255,107,157,0.12), rgba(255,179,64,0.08))' }}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-[#ff6b9d] text-base">🖼</span>
+                        <div className="text-[12px] font-bold text-white/90">照片心情电台</div>
+                      </div>
+                      <div className="text-[10px] text-white/50">上传照片，AI 看图挑歌</div>
                     </button>
                   </div>
                   {playlists.length > 0 && (
