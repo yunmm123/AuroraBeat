@@ -7,7 +7,7 @@ import { useState, useCallback, useRef } from 'react';
 //
 // v3.8.0 多模态扩展：
 // - chat() 接收 OpenAI 多模态 content 格式（字符串 | 数组）
-// - 新增 generateImageReview / moodFromImage
+// - 新增 generateImageReview / playlistFromImage
 // 兼容：纯文本 AIMessage 仍可传字符串 content（自动按原样转发）
 // ====================================================================
 
@@ -140,28 +140,24 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     return chat(msg, { maxTokens: 400, temperature: 0.85 });
   }, [chat]);
 
-  // C3 照片心情电台：看照片 → 分析氛围 → 返回搜索关键词
-  const moodFromImage = useCallback(async (imageDataUrl: string) => {
+  // C3 照片心情电台（v3.8.4 升级）：看照片深度分析氛围/场景/情绪 → 直接生成 15 首贴合的真实歌曲列表
+  // 不再走"生成单一关键词 → 搜网易云"的浅路径，歌单更丰富更贴照片情绪
+  const playlistFromImage = useCallback(async (imageDataUrl: string) => {
     const msg: MultimodalMessage[] = [
       {
         role: 'system',
-        content: '你看照片分析画面氛围和情绪，输出一个适合的网易云音乐搜索关键词（用于找匹配氛围的歌）。只输出关键词本身（可用空格分词），不要引号、不要解释、不要标点。例如夜景城市输出"深夜 城市"，阳光海滩输出"夏日 阳光"。最多12个字。',
+        content: '你是音乐策展人。看用户上传的照片，深度感受画面的氛围、场景、时间段、情绪、色调、风格，然后推荐15首真实存在、贴合照片氛围的歌曲（中文歌和英文歌都可，可跨年代跨语种）。每行一首，格式"歌名 - 歌手"。只输出列表，不要编号、不要解释、不要前后缀。这些歌必须是真实存在且知名的，方便在网易云搜索到。',
       },
       {
         role: 'user',
         content: [
-          { type: 'text', text: '请分析这张照片的氛围，输出一个音乐搜索关键词' },
+          { type: 'text', text: '请看这张照片，深度感受它的氛围和情绪，推荐15首贴合的歌曲列表。' },
           { type: 'image_url', image_url: { url: imageDataUrl } },
         ],
       },
     ];
-    return chat(msg, { maxTokens: 60, temperature: 0.5 }).then(s =>
-      s.trim().replace(/^["'"']+|["'"']+$/g, '').replace(/[。，,.!?！？]/g, '').trim()
-    );
+    return chat(msg, { maxTokens: 700, temperature: 0.85 });
   }, [chat]);
-
-  // C5 语音聊天：前端用 SpeechRecognition 本地转文字后，直接走文本聊天
-  // 不再把音频发给 AI（阿里云百炼不支持 input_audio 类型）
 
   return {
     loading,
@@ -174,6 +170,7 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     chatMusic,
     // v3.8.0 多模态类
     generateImageReview,
-    moodFromImage,
+    // v3.8.4 C3 升级：看图生成歌单
+    playlistFromImage,
   };
 }

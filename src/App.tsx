@@ -1088,7 +1088,7 @@ const App: React.FC = () => {
   const [aiReview, setAiReview] = useState<string | null>(null);          // A1 乐评内容
   const [aiReviewLoading, setAiReviewLoading] = useState(false);
   const [aiSearchMode, setAiSearchMode] = useState(false);                 // A2 自然语言搜歌开关
-  const [aiPanel, setAiPanel] = useState<null | 'mood' | 'playlist'>(null); // A4/A5 弹窗
+  const [aiPanel, setAiPanel] = useState<null | 'mood' | 'playlist' | 'photo'>(null); // A4/A5/C3 弹窗
   const [aiPromptInput, setAiPromptInput] = useState('');
   const [aiPromptRunning, setAiPromptRunning] = useState(false);
   const [aiCurated, setAiCurated] = useState<{ title: string; artist: string }[]>([]); // A5 AI 生成的歌单
@@ -1615,7 +1615,8 @@ const App: React.FC = () => {
     }
   }, [player.currentSong, aiReady, ai, apiBase, player, showGestureHint]);
 
-  // C3 照片心情电台：选照片 → AI 分析氛围 → 搜索 → 播放
+  // C3 照片心情电台（v3.8.4 升级）：选照片 → AI 看图深度分析 → 生成 15 首歌单 → 在面板里展示
+  // 复用 A5 的"全部播放 / 双击插队"UI
   const pickPhotoAndPlay = useCallback(async () => {
     if (!aiReady) { openAiKeyPanel(); return; }
     if (!electron?.selectImageFile) return;
@@ -1623,31 +1624,33 @@ const App: React.FC = () => {
     if (!result?.path) return;
     setAiPhotoMoodData(result.path);
     setAiPhotoMoodRunning(true);
+    setAiCurated([]);
+    setAiPanel('photo');
     try {
-      const keyword = await ai.moodFromImage(result.path);
-      if (!keyword) { showGestureHint('AI 没分析出氛围'); return; }
-      showGestureHint(`AI 看图理解为：${keyword}`);
-      const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(keyword)}&limit=30`);
-      const data = await res.json();
-      const songs: Song[] = (data.songs || []).map((s: any) => ({
-        id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
-        album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
-        url: '', source: 'netease' as const,
-      }));
-      if (songs.length) {
-        player.playSong(songs[0], songs);
-        showGestureHint(`播放：${songs[0].title}`);
+      const text = await ai.playlistFromImage(result.path);
+      // 复用 A5 的 "歌名 - 歌手" 解析逻辑
+      const items: { title: string; artist: string }[] = text.split('\n')
+        .map((l: string) => l.replace(/^\d+[\.\)、\s]+/, '').trim())
+        .filter(Boolean)
+        .map((l: string) => {
+          const m = l.split(/\s*[-—–]\s*/);
+          return { title: (m[0] || l).replace(/^["'"']+|["'"']+$/g, '').trim(), artist: (m[1] || '').replace(/^["'"']+|["'"']+$/g, '').trim() };
+        })
+        .filter((it: { title: string; artist: string }) => it.title);
+      if (items.length === 0) {
+        showGestureHint('AI 没分析出合适的歌单');
+        setAiPanel(null);
       } else {
-        showGestureHint('没找到匹配的歌');
+        setAiCurated(items);
       }
     } catch (e: any) {
       showGestureHint(`分析失败：${e?.message || e}`);
+      setAiPanel(null);
     } finally {
       setAiPhotoMoodRunning(false);
-      // 延迟清掉照片预览
-      setTimeout(() => setAiPhotoMoodData(''), 1500);
+      // 保留照片预览（面板里会显示），关闭面板时统一清理
     }
-  }, [aiReady, ai, apiBase, player, showGestureHint, electron]);
+  }, [aiReady, ai, showGestureHint, electron]);
 
   // 切歌时清空 A1 乐评
   useEffect(() => {
@@ -1953,20 +1956,20 @@ const App: React.FC = () => {
       {/* v3.7.0 AI: A4/A5 心情电台 & 歌单生成弹窗 */}
       {aiPanel && (
         <>
-          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => { setAiPanel(null); setAiPromptInput(''); setAiCurated([]); }} />
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => { setAiPanel(null); setAiPromptInput(''); setAiCurated([]); setAiPhotoMoodData(''); }} />
           <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[480px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl">
             <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.05]">
               <div className="text-sm font-bold text-white/90 flex items-center gap-2">
-                <span className="text-[#00f5d4]">✦</span>
-                {aiPanel === 'mood' ? 'AI 心情电台' : 'AI 歌单生成'}
+                <span className={aiPanel === 'photo' ? 'text-[#ff6b9d]' : 'text-[#00f5d4]'}>{aiPanel === 'photo' ? '🖼' : '✦'}</span>
+                {aiPanel === 'mood' ? 'AI 心情电台' : aiPanel === 'photo' ? '照片心情电台' : 'AI 歌单生成'}
               </div>
               <button
-                onClick={() => { setAiPanel(null); setAiPromptInput(''); setAiCurated([]); }}
+                onClick={() => { setAiPanel(null); setAiPromptInput(''); setAiCurated([]); setAiPhotoMoodData(''); }}
                 className="w-6 h-6 rounded-lg hover:bg-white/10 text-white/40 hover:text-white flex items-center justify-center text-sm"
               >×</button>
             </div>
             <div className="px-5 py-4">
-              {aiPanel === 'mood' ? (
+              {aiPanel === 'mood' && (
                 <>
                   <div className="text-[11px] text-white/55 mb-2">描述你现在的心情，AI 为你挑歌并播放</div>
                   <div className="flex gap-2">
@@ -1985,7 +1988,8 @@ const App: React.FC = () => {
                     >{aiPromptRunning ? '生成中…' : '播放'}</button>
                   </div>
                 </>
-              ) : (
+              )}
+              {aiPanel === 'playlist' && (
                 <>
                   <div className="text-[11px] text-white/55 mb-2">输入主题，AI 生成 20 首歌单</div>
                   <div className="flex gap-2 mb-3">
@@ -2003,52 +2007,68 @@ const App: React.FC = () => {
                       className="px-4 py-2.5 rounded-lg text-[12px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all"
                     >{aiPromptRunning ? '生成中…' : '生成'}</button>
                   </div>
-                  {aiCurated.length > 0 && (
-                    <>
-                      {/* v3.8.1 A5: 全部播放按钮（清空原队列替换为生成的歌单） */}
-                      <button
-                        onClick={playAllCurated}
-                        disabled={aiPlayAllRunning}
-                        className="w-full mt-2 px-3 py-2 rounded-lg text-[12px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
-                      >
-                        {aiPlayAllRunning ? (
-                          <>
-                            <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin" />
-                            搜索并加载中…
-                          </>
-                        ) : (
-                          <>▶ 全部播放（替换当前队列）</>
-                        )}
-                      </button>
-                      <div className="text-[10px] text-white/30 mt-1.5 px-1">双击列表项可插队播放单曲</div>
-                      <div className="max-h-[260px] overflow-y-auto -mx-1 mt-1">
-                        {aiCurated.map((it, i) => (
-                          <div
-                            key={i}
-                            onDoubleClick={() => searchAndPlayCurated(i, it)}
-                            className={`flex items-center gap-2 px-2 py-2 hover:bg-white/[0.04] rounded-lg group cursor-pointer transition-colors ${aiCuratedFetching[i] ? 'opacity-60' : ''}`}
-                            title="双击插队播放"
-                          >
-                            <span className="w-5 text-center text-[11px] text-white/30">{i + 1}</span>
-                            <div className="flex-1 min-w-0">
-                              <div className="text-[12px] text-white/85 truncate">{it.title}</div>
-                              {it.artist && <div className="text-[10px] text-white/35 truncate">{it.artist}</div>}
-                            </div>
-                            {aiCuratedFetching[i] && (
-                              <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin flex-shrink-0" />
-                            )}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); searchAndPlayCurated(i, it); }}
-                              disabled={aiCuratedFetching[i]}
-                              className="px-2.5 py-1 rounded-md text-[10px] text-[#00f5d4]/80 bg-[#00f5d4]/10 hover:bg-[#00f5d4]/20 disabled:opacity-40 transition-all flex-shrink-0"
-                            >
-                              插队
-                            </button>
-                          </div>
-                        ))}
+                </>
+              )}
+              {aiPanel === 'photo' && (
+                <>
+                  {aiPhotoMoodData ? (
+                    <div className="flex gap-3 mb-3">
+                      <img src={aiPhotoMoodData} alt="照片" className="w-20 h-20 object-cover rounded-lg flex-shrink-0 border border-white/[0.08]" />
+                      <div className="flex-1 min-w-0 flex items-center text-[11px] text-white/55 leading-relaxed">
+                        {aiPhotoMoodRunning
+                          ? 'AI 正在看图，深度感受氛围并为你挑歌…'
+                          : `已为这张照片挑选 ${aiCurated.length} 首歌`}
                       </div>
-                    </>
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-white/55 mb-3">请选择一张照片</div>
                   )}
+                </>
+              )}
+              {aiPanel !== 'mood' && aiCurated.length > 0 && (
+                <>
+                  {/* v3.8.1 A5: 全部播放按钮（清空原队列替换为生成的歌单） */}
+                  <button
+                    onClick={playAllCurated}
+                    disabled={aiPlayAllRunning}
+                    className="w-full mt-1 px-3 py-2 rounded-lg text-[12px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
+                  >
+                    {aiPlayAllRunning ? (
+                      <>
+                        <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin" />
+                        搜索并加载中…
+                      </>
+                    ) : (
+                      <>▶ 全部播放（替换当前队列）</>
+                    )}
+                  </button>
+                  <div className="text-[10px] text-white/30 mt-1.5 px-1">双击列表项可插队播放单曲</div>
+                  <div className="max-h-[260px] overflow-y-auto -mx-1 mt-1">
+                    {aiCurated.map((it, i) => (
+                      <div
+                        key={i}
+                        onDoubleClick={() => searchAndPlayCurated(i, it)}
+                        className={`flex items-center gap-2 px-2 py-2 hover:bg-white/[0.04] rounded-lg group cursor-pointer transition-colors ${aiCuratedFetching[i] ? 'opacity-60' : ''}`}
+                        title="双击插队播放"
+                      >
+                        <span className="w-5 text-center text-[11px] text-white/30">{i + 1}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[12px] text-white/85 truncate">{it.title}</div>
+                          {it.artist && <div className="text-[10px] text-white/35 truncate">{it.artist}</div>}
+                        </div>
+                        {aiCuratedFetching[i] && (
+                          <div className="w-3 h-3 border border-[#00f5d4]/40 border-t-[#00f5d4] rounded-full animate-spin flex-shrink-0" />
+                        )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); searchAndPlayCurated(i, it); }}
+                          disabled={aiCuratedFetching[i]}
+                          className="px-2.5 py-1 rounded-md text-[10px] text-[#00f5d4]/80 bg-[#00f5d4]/10 hover:bg-[#00f5d4]/20 disabled:opacity-40 transition-all flex-shrink-0"
+                        >
+                          插队
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                 </>
               )}
             </div>
@@ -2155,23 +2175,6 @@ const App: React.FC = () => {
               disabled={ai.loading || !aiChatInput.trim()}
               className="px-3 py-2 rounded-lg text-[12px] font-medium bg-[#00f5d4]/20 text-[#00f5d4] border border-[#00f5d4]/40 hover:bg-[#00f5d4]/30 disabled:opacity-40 transition-all"
             >{ai.loading ? '…' : '发送'}</button>
-          </div>
-        </div>
-      )}
-
-      {/* v3.8.0 C3: 照片心情电台分析中浮层（右下角小预览） */}
-      {aiPhotoMoodData && (
-        <div className="fixed right-5 bottom-72 z-[68] w-[180px] rounded-xl border border-[#ff6b9d]/30 bg-[#0E1014]/95 backdrop-blur-xl shadow-2xl overflow-hidden">
-          <img src={aiPhotoMoodData} alt="分析中" className="w-full h-[120px] object-cover" />
-          <div className="px-3 py-2 flex items-center gap-2 text-[11px] text-white/70">
-            {aiPhotoMoodRunning ? (
-              <>
-                <div className="w-2.5 h-2.5 border border-[#ff6b9d]/40 border-t-[#ff6b9d] rounded-full animate-spin" />
-                <span>AI 看照片中…</span>
-              </>
-            ) : (
-              <span>已找歌播放</span>
-            )}
           </div>
         </div>
       )}
@@ -2602,7 +2605,7 @@ const App: React.FC = () => {
                         <span className="text-[#ff6b9d] text-base">🖼</span>
                         <div className="text-[12px] font-bold text-white/90">照片心情电台</div>
                       </div>
-                      <div className="text-[10px] text-white/50">上传照片，AI 看图挑歌</div>
+                      <div className="text-[10px] text-white/50">看照片，AI 深度挑歌</div>
                     </button>
                   </div>
                   {playlists.length > 0 && (
