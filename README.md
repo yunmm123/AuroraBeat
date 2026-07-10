@@ -1,8 +1,8 @@
 # AuroraBeat - 沉浸式高端音乐播放器
 
-一款面向 PC 端的沉浸式音乐播放软件，基于实时音频分析的智能视觉引擎，将音乐转化为令人惊叹的视觉盛宴。基于本地 HTTP 服务器架构对接网易云音乐，支持登录同步喜欢列表、每日推荐、歌单管理。
+一款面向 PC 端的沉浸式音乐播放软件，基于实时音频分析的智能视觉引擎，将音乐转化为令人惊叹的视觉盛宴。基于本地 HTTP 服务器架构对接网易云音乐，支持登录同步喜欢列表、每日推荐、歌单管理，并内置 AI 音乐陪伴功能。
 
-当前版本：**v3.3.4**
+当前版本：**v3.8.4**
 
 ## 技术栈
 
@@ -14,6 +14,7 @@
 - **UI 框架**: Tailwind CSS
 - **状态管理**: Zustand
 - **音乐数据源**: NeteaseCloudMusicApi（本地服务器代理）
+- **AI 能力**: 通义千问 qwen3.5-omni-plus（全模态，OpenAI 兼容协议）
 
 ## 核心功能
 
@@ -52,9 +53,10 @@
 - 网易云音乐登录（独立登录窗口，Cookie 持久化）
 - 多种播放模式（顺序、随机、单曲循环）
 - 4 档音质（standard / exhigh / lossless / hires），自动降级
-- 播放队列管理
+- 播放队列管理（替换队列、追加、插队播放）
 - 本地音乐文件支持（mp3 / flac / wav / ogg / m4a / aac）
 - 红心收藏同步网易云（点红心/取消红心实时同步，乐观更新 + 延迟验证）
+- 搜索历史 + 自定义快捷键
 
 ### 📝 歌词系统
 
@@ -62,7 +64,19 @@
 - 宽度以视口短边为基准，长歌词换行也被圆环包围
 - 封面色到白色的柔和渐变填充（tint 30% → tint 10% 明度差 20% 以内）
 - 节拍辉光随 BPM 呼吸
-- 网易云歌词自动获取（含翻译、逐字 yrc）
+- 网易云歌词自动获取（含翻译、逐字 yrc + AMLL 字内进度）
+
+### 🤖 AI 音乐陪伴（v3.7.0+）
+
+接入通义千问全模态模型（兼容 OpenAI 协议，可在设置中切换任意 OpenAI 兼容服务），提供：
+
+- **A1 AI 乐评** - 为当前歌曲生成沉浸式短乐评
+- **A2 自然语言搜歌** - 用日常语言描述找歌（"下班路上有点累想放松"）
+- **A4 AI 心情电台** - 描述心情，AI 挑歌并播放
+- **A5 AI 歌单生成** - 输入主题生成 20 首歌单，支持全部播放（替换队列）+ 双击插队播放
+- **A6 AI 音乐问答陪伴** - 多轮对话聊天，懂音乐有品味
+- **C2 封面意境解读** - 看封面图 + 歌曲信息，多模态融合解读
+- **C3 照片心情电台** - 上传照片，AI 深度看图分析氛围/场景/情绪，直接生成 15 首贴合照片的歌单
 
 ### 🖥️ 沉浸式界面
 
@@ -80,20 +94,21 @@
 │   └── preload.ts        # 预加载脚本（IPC 桥接）
 ├── src/
 │   ├── core/             # 核心逻辑
-│   │   ├── playerCore.ts # 播放器核心（播放、节拍派发、红心同步）
+│   │   ├── playerCore.ts # 播放器核心（播放、节拍派发、红心同步、AI 设置持久化）
 │   │   ├── beatAnalyzer.ts # 离线节拍分析
 │   │   └── beatDetector.ts # 实时节拍检测 fallback
 │   ├── hooks/            # React Hooks
 │   │   ├── usePlayer.ts  # 播放器状态 hook
-│   │   └── useSpectrum.ts # 频谱可视化（6 色渐变）
+│   │   ├── useSpectrum.ts # 频谱可视化（6 色渐变）
+│   │   └── useAI.ts      # AI 调用封装（OpenAI 兼容 + 多模态）
 │   ├── shaders/          # GLSL Shaders（参考用，主 shader 在 App.tsx 内）
 │   ├── types/            # TypeScript 类型
 │   ├── utils/
 │   │   └── audioDB.ts    # 音频缓存
-│   ├── App.tsx           # 主界面 + 视觉引擎（6 色 uniforms + 全部 shader）
+│   ├── App.tsx           # 主界面 + 视觉引擎 + AI 功能入口
 │   ├── index.css         # 全局样式（歌词、频谱、玻璃面板）
 │   └── main.tsx          # React 入口
-├── server.js             # 本地 HTTP 服务器（网易云 API 代理）
+├── server.js             # 本地 HTTP 服务器（网易云 API 代理 + AI 代理）
 ├── package.json
 ├── vite.config.ts
 ├── tailwind.config.js
@@ -104,7 +119,7 @@
 
 ### 本地 HTTP 服务器架构
 
-对标 Mineradio 架构，所有网易云 API 调用通过本地 HTTP 服务器中转：
+对标 Mineradio 架构，所有网易云 API 调用通过本地 HTTP 服务器中转，AI 调用也经本地服务器代理转发到 OpenAI 兼容服务：
 
 ```
 渲染进程 (React)
@@ -113,13 +128,14 @@ Electron 主进程
     ↓ spawn
 server.js (独立 Node 进程)
     ↓ 调用
-NeteaseCloudMusicApi
+NeteaseCloudMusicApi / 通义千问 API
     ↓ HTTPS
-网易云音乐服务器
+网易云音乐服务器 / 阿里云百炼
 ```
 
 - **开发模式**：用系统 `node` 运行源码 server.js（重启 electron 即更新）
 - **打包模式**：用 Electron 自身以纯 Node 模式运行（`ELECTRON_RUN_AS_NODE=1`），无需用户安装 Node
+- **AI 代理**：`/api/ai/chat` 透传多模态 messages，支持 image_url，API Key 保存在本地 localStorage
 
 ### 红心同步流程
 
@@ -140,11 +156,12 @@ npm install --registry=https://registry.npmmirror.com
 > 如果 Electron 下载失败，设置国内镜像：
 > ```bash
 > # Windows
-> set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+> # set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 > npm install
-> 
+>
 > # macOS / Linux
-> ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ npm install
+> # export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+> npm install
 > ```
 
 ### 开发模式
@@ -189,8 +206,20 @@ npm run build:dir
 | ↑ / ↓ | 音量增减 |
 | M | 静音切换 |
 | L | 红心收藏 / 取消 |
+| K | 歌词显隐 |
+| Q | 队列显隐 |
 | F | FX 面板切换 |
 | MediaPlayPause / MediaNextTrack / MediaPreviousTrack | 媒体键控制 |
+
+## AI 配置
+
+在应用内设置面板填入你的 API Key 即可启用全部 AI 功能：
+
+- **默认服务**：通义千问（阿里云百炼），每天免费 100 万 tokens
+- **默认模型**：`qwen3.5-omni-plus-2026-03-15`（全模态，支持文本/图像输入）
+- **可切换**：支持任意 OpenAI 兼容服务（DeepSeek / OpenAI / Moonshot / 智谱 GLM 等），只需在设置中更换 Base URL + Model + API Key
+
+获取 API Key：访问[阿里云百炼控制台](https://bailian.console.aliyun.com/) → 模型广场 → API-KEY 管理
 
 ## 版本号规则
 
@@ -199,6 +228,30 @@ npm run build:dir
 ```
 3.1.1 → 3.1.2 → ... → 3.1.9 → 3.2.0 → 3.2.1 → ... → 3.2.9 → 3.3.0
 ```
+
+## 最近更新
+
+### v3.8.4
+- C3 照片心情电台升级：AI 看图深度分析氛围/场景/情绪，直接生成 15 首贴合照片的歌单（不再依赖单一关键词搜索）
+
+### v3.8.3
+- 删除 C5 语音聊天功能（浏览器原生 SpeechRecognition 不稳定）
+
+### v3.8.2
+- 删除 C1 看图识曲功能
+
+### v3.8.1
+- A5 歌单生成新增全部播放按钮（替换队列）+ 双击插队播放
+
+### v3.8.0
+- 升级为全模态 AI，新增 C2 封面意境解读 / C3 照片心情电台
+- 模型升级为 qwen3.5-omni-plus-2026-03-15
+
+### v3.7.1
+- AI 改为通用 OpenAI 兼容协议，支持切换任意模型
+
+### v3.7.0
+- 接入通义千问，新增 5 项 AI 功能（乐评/搜歌/心情电台/歌单生成/问答陪伴）
 
 ## 许可证
 
