@@ -1145,14 +1145,17 @@ const App: React.FC = () => {
   useVisualEngine(canvasRef, player, intensity, visualEnabled);
   useSpectrum(spectrumCanvasRef);   // v3.1.5: 底部播放栏上方频谱
 
-  // v3.8.5 旋转封面：底部播放栏的封面随节拍呼吸 + BPM 自转
-  // 设计要点：旋转速度跟随 BPM（一拍约转 30°，不眩晕），暂停时不转；
-  //          节拍触发 scale 1→1.08→1 缓动（350ms），低频 RMS 持续微呼吸
+  // v3.8.5 旋转封面：底部播放栏封面随节拍呼吸 + BPM 自转
+  // 关键：用 playerRef 保存稳定引用，effect 依赖只放 coverDiscEnabled，
+  //       否则 player 对象每次渲染都是新引用，effect 频繁重建导致 rotation 归零
   const coverArtRef = useRef<HTMLDivElement>(null);
+  const playerRef = useRef(player);
+  playerRef.current = player;
   const coverBeatPulseRef = useRef(0);
   const coverRmsRef = useRef(0);
   useEffect(() => {
     if (!coverDiscEnabled) return;
+    const p = playerRef.current;
     let raf = 0;
     let rotation = 0;
     let lastT = performance.now();
@@ -1161,7 +1164,7 @@ const App: React.FC = () => {
     let rmsBuf: Uint8Array | null = null;
     const tryGetAnalyser = () => {
       if (!analyser) {
-        const a = player.getAnalyser?.();
+        const a = p.getAnalyser?.();
         if (a) { analyser = a; rmsBuf = new Uint8Array(a.frequencyBinCount); }
       }
     };
@@ -1169,22 +1172,23 @@ const App: React.FC = () => {
     const t = setTimeout(tryGetAnalyser, 600);
 
     // 节拍回调：注入脉冲
-    const offBeat = player.onBeat(() => {
+    const offBeat = p.onBeat(() => {
       coverBeatPulseRef.current = 1;
     });
-    player.setAnalyserReadyHandler?.(tryGetAnalyser);
+    p.setAnalyserReadyHandler?.(tryGetAnalyser);
 
     const loop = () => {
       const now = performance.now();
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
-      const playing = player.isPlaying;
-      const bpm = player.getBpm?.() || 0;
+      const pp = playerRef.current;
+      const playing = pp.isPlaying;
+      const bpm = pp.getBpm?.() || 0;
 
-      // 旋转速度：BPM 适配，一拍约 30°，无 BPM 时缓慢兜底，暂停时不转
-      let rotSpeed = 0.21;
+      // 旋转速度：BPM 适配，一拍约 40°（明显但优雅），无 BPM 时兜底 0.3 rad/s
+      let rotSpeed = 0.3;
       if (bpm > 0) {
-        rotSpeed = (Math.PI / 6) / (60 / bpm);
+        rotSpeed = (Math.PI * 2 / 9) / (60 / bpm); // 一拍 40°
       }
       if (playing) rotation += rotSpeed * dt;
 
@@ -1194,26 +1198,29 @@ const App: React.FC = () => {
       if (analyser && rmsBuf && playing) {
         analyser.getByteFrequencyData(rmsBuf as any);
         let sum = 0;
-        const lowBins = Math.min(12, rmsBuf.length);
+        const lowBins = Math.min(16, rmsBuf.length);
         for (let i = 0; i < lowBins; i++) sum += rmsBuf[i];
         rms = (sum / lowBins / 255) || 0;
       }
-      coverRmsRef.current = coverRmsRef.current * 0.9 + rms * 0.1;
-      const rmsBreath = playing ? coverRmsRef.current * 0.04 : 0;
+      coverRmsRef.current = coverRmsRef.current * 0.88 + rms * 0.12;
+      const rmsBreath = playing ? coverRmsRef.current * 0.06 : 0;
 
-      // 节拍脉冲衰减（350ms 回到 1）
+      // 节拍脉冲衰减（400ms 回到 1）
       let pulse = 0;
       if (coverBeatPulseRef.current > 0) {
-        coverBeatPulseRef.current = Math.max(0, coverBeatPulseRef.current - dt / 0.35);
-        pulse = 0.08 * coverBeatPulseRef.current;
+        coverBeatPulseRef.current = Math.max(0, coverBeatPulseRef.current - dt / 0.4);
+        pulse = 0.12 * coverBeatPulseRef.current;
       }
-      // 脉冲 + RMS 呼吸融合
+      // 脉冲 + RMS 呼吸融合（取较大值）
       const finalTarget = 1 + Math.max(pulse, rmsBreath);
-      scale += (finalTarget - scale) * Math.min(1, dt * 14);
+      scale += (finalTarget - scale) * Math.min(1, dt * 10);
 
       const el = coverArtRef.current;
       if (el) {
         el.style.transform = `rotate(${rotation}rad) scale(${scale.toFixed(4)})`;
+        // 节拍时光晕增强（box-shadow 的 spread 跟随脉冲）
+        const glow = 20 + pulse * 200 + rmsBreath * 150;
+        el.style.boxShadow = `0 0 0 1px rgba(255,255,255,0.08), 0 4px 20px rgba(0,0,0,0.5), 0 0 ${glow}px rgba(255,255,255,${0.15 + pulse * 0.3})`;
       }
       raf = requestAnimationFrame(loop);
     };
@@ -1223,7 +1230,7 @@ const App: React.FC = () => {
       clearTimeout(t);
       offBeat?.();
     };
-  }, [coverDiscEnabled, player]);
+  }, [coverDiscEnabled]);
 
   useEffect(() => {
     electron?.getServerPort?.().then((port: number) => {
