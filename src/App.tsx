@@ -275,13 +275,16 @@ function useVisualEngine(
         col += uTint * shockSum * 0.35;   // v3.2.4: 0.18→0.35 增可见（冲击波用主色 tint）
 
         // === 频谱环（弱化辅助：uFreqTex 极坐标采样，低亮度，不抢戏）===
+        // v3.8.6 恢复圆形：freqAvg 不再影响半径（去掉 + freqAvg * 0.40），只影响亮度
+        //   之前闭包陷阱导致 freqAvg 恒 0，环是圆形的；修复闭包后频谱数据写入，环随角度变形成不规则形状
+        //   现在保持圆形（半径只随节拍呼吸 breath），亮度仍随频谱变化（有音频呼吸感，不死板）
         float aRot = ang + uTime * 0.15;
         float normA = fract((aRot + 3.14159) / 6.28318);
         float freq = texture2D(uFreqTex, vec2(normA, 0.5)).r;
         float freqM = texture2D(uFreqTex, vec2(1.0 - normA, 0.5)).r;
         float freqAvg = (freq + freqM) * 0.5;
         float breath = 1.0 + uEnv * 0.20 + uBass * 0.10;
-        float ringR = 0.40 * breath + freqAvg * 0.40;
+        float ringR = 0.40 * breath;
         float ringW = 0.018 + uEnergy * 0.012;
         float specRing = exp(-pow((r - ringR) / ringW, 2.0)) * (0.3 + freqAvg * 0.5);
         col += uAccent * specRing * 0.45;
