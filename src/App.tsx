@@ -82,6 +82,10 @@ function useVisualEngine(
   enabled: boolean,
 ) {
   const engineRef = useRef<any>(null);
+  // v3.8.6 修复：避免 effect 闭包里 player.isPlaying 永远是首屏值（stale closure）
+  // player 每次 render 都是新对象，但 playerRef.current 始终指向最新
+  const playerRef = useRef(player);
+  playerRef.current = player;
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -517,7 +521,7 @@ function useVisualEngine(
     let env = 0;
     let envPhase: 'idle' | 'att' | 'dec' | 'sus' | 'rel' = 'idle';
     let envT = 0;
-    const bpmInit = player.getBpm() || 120;
+    const bpmInit = playerRef.current.getBpm() || 120;
     let beatInterval = 60 / bpmInit;       // BPM 可能分析完成后才拿到，onBeat 内刷新
     const A = 0.05, D = 0.15, S = 0.55;    // ADSR attack/decay(秒) 与 sustain 电平
     let prevTime = performance.now();
@@ -556,12 +560,12 @@ function useVisualEngine(
     let shockWriteIdx = 0;   // 环形写入指针（每次写最旧的槽位）
     const shockUniforms = [uniforms.uShock0, uniforms.uShock1, uniforms.uShock2, uniforms.uShock3];
     let particleBeatPulse = 0;   // 粒子节拍亮度脉冲（0.3 秒衰减回正常）
-    const offBeat = player.onBeat((time: number) => {
+    const offBeat = playerRef.current.onBeat((time: number) => {
       const impulse = 0.7 + smoothBass * 0.3;
       energy = energy * 0.75 + impulse * 0.25;   // 注入 25%（强节拍响应）
       envPhase = 'att'; envT = 0;                 // 触发 ADSR
       beatCount++;
-      const curBpm = player.getBpm();
+      const curBpm = playerRef.current.getBpm();
       if (curBpm > 0) beatInterval = 60 / curBpm;
       // v3.1.13: 节拍冲击波 FIFO（4 槽位循环替换最旧）+ 粒子亮度脉冲
       // 中心 0.5,0.5 + 当前时间 + bass 强度作为 intensity
@@ -576,10 +580,10 @@ function useVisualEngine(
 
     // 可视化频谱仍用 AnalyserNode（v2.2 删了 crossOrigin，频谱不再静默）
     const setupAnalysers = () => {
-      const a = player.getAnalyser();
+      const a = playerRef.current.getAnalyser();
       if (a && !analyser) { analyser = a; freqData = new Uint8Array(a.frequencyBinCount); }
     };
-    player.setAnalyserReadyHandler?.(setupAnalysers);
+    playerRef.current.setAnalyserReadyHandler?.(setupAnalysers);
     setTimeout(setupAnalysers, 500);
 
     // === 鼠标事件（移动流体推动 + 点击波纹 + 拖拽探头 + 拖尾光迹） ===
@@ -637,7 +641,7 @@ function useVisualEngine(
         uniforms.uAlpha.value = Math.min(1, uniforms.uAlpha.value + dt * 0.6);
       }
 
-      if (analyser && freqData && player.isPlaying) {
+      if (analyser && freqData && playerRef.current.isPlaying) {
         analyser.getByteFrequencyData(freqData as any);
         const bands = sampleFrequencyBands(freqData, analyser.context.sampleRate, analyser.fftSize);
         // 音频平滑（mix 0.15 阻尼，避免闪烁）
@@ -938,7 +942,7 @@ function useVisualEngine(
       img.src = coverUrl;
     };
     (window as any).__updateCover = updateCover;
-    const coverUrl = player.currentSong?.cover;
+    const coverUrl = playerRef.current.currentSong?.cover;
     if (coverUrl) updateCover(coverUrl);
 
     engineRef.current = { uniforms, updateCover, renderer, scene };
@@ -1264,6 +1268,7 @@ const App: React.FC = () => {
 
   // 键盘快捷键主 useEffect 移到 handleLike 声明之后（依赖 handleLike）
   // v3.6.0 B1: 录制新快捷键（监听 keydown 完成录制）
+  // v3.8.6 修复：把 player 改为 playerRef.current，依赖只留 [recordingShortcut]
   useEffect(() => {
     if (!recordingShortcut) return;
     const onRecord = (e: KeyboardEvent) => {
@@ -1277,13 +1282,13 @@ const App: React.FC = () => {
       if (e.code === 'Tab' || ['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight'].includes(e.code)) {
         return;
       }
-      player.setShortcut(recordingShortcut, e.code);
+      playerRef.current.setShortcut(recordingShortcut, e.code);
       setRecordingShortcut(null);
     };
     // 用 capture 阶段抢先捕获，防止触发主快捷键逻辑
     window.addEventListener('keydown', onRecord, true);
     return () => window.removeEventListener('keydown', onRecord, true);
-  }, [recordingShortcut, player]);
+  }, [recordingShortcut]);
 
   useEffect(() => {
     if (!serverPort) return;
@@ -1929,6 +1934,7 @@ const App: React.FC = () => {
 
   // AI 歌曲鉴赏模式：切歌时自动生成解说（每首歌只调用一次）
   // v3.8.6 修复：用 ref 跟踪"调用中"状态，避免 appreciationText 闭包过期导致重复调用
+  // v3.8.6 修复：appreciateSong 已改为独立 fetch，不会抛 BUSY，删除死代码重试逻辑
   const appreciatingSongIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!appreciateMode || !aiReady || !player.currentSong) {
@@ -1951,25 +1957,15 @@ const App: React.FC = () => {
         if (!cancelled) {
           setAppreciationText(null);
           const msg = String(err?.message || err || '');
-          if (msg.includes('BUSY')) {
-            // AI 忙：清空 ref，1.5s 后重试（下次 effect 会再次调用）
-            appreciatingSongIdRef.current = null;
-            setAppreciating(false);
-            setTimeout(() => {
-              if (!cancelled && appreciateMode) {
-                // 触发重试：通过 state 变化让 effect 重跑
-                setAppreciating(true);
-              }
-            }, 1500);
-          } else {
-            setAppreciating(false);
-            showGestureHint('陪听失败：' + (msg || '未知错误'));
-          }
+          setAppreciating(false);
+          // 失败时清空 ref，让用户手动切歌/重启鉴赏时能重试
+          appreciatingSongIdRef.current = null;
+          showGestureHint('陪听失败：' + (msg || '未知错误'));
         }
       })
       .finally(() => { if (!cancelled) setAppreciating(false); });
     return () => { cancelled = true; };
-  }, [appreciateMode, aiReady, ai, player.currentSong]);
+  }, [appreciateMode, aiReady, ai, player.currentSong, showGestureHint]);
 
   // 高潮段落识别：综合频谱能量 + BPM 判断
   // v3.8.6 修复：原实现 BPM>100 就持续累积，整首歌都判定为高潮
@@ -2606,7 +2602,7 @@ const App: React.FC = () => {
 
       {/* v3.7.0 AI: A6 右下角聊天浮窗 */}
       {showAiChat && (
-        <div className="fixed right-5 bottom-28 z-[68] w-[340px] h-[440px] flex flex-col rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl pointer-events-auto">
+        <div className={`fixed right-5 bottom-28 z-[68] w-[340px] h-[440px] flex flex-col rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl pointer-events-auto transition-opacity duration-500 ${immersiveMode && !immersiveHover ? 'opacity-0 pointer-events-none' : ''}`}>
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.05]">
             <div className="flex items-center gap-2">
               <span className="text-[#00f5d4]">✦</span>
@@ -2893,9 +2889,11 @@ const App: React.FC = () => {
         </>
       )}
 
-      {/* AI 歌曲鉴赏面板（沉浸式陪听，非模态，右下角浮窗） */}
-      {appreciateMode && player.currentSong && (appreciationText || appreciating) && (
-        <div className="fixed right-5 bottom-28 z-[75] w-[340px] max-h-[260px] rounded-2xl border border-[#00f5d4]/15 bg-[#0E1014]/92 backdrop-blur-2xl shadow-2xl p-4 flex flex-col">
+      {/* AI 歌曲鉴赏面板（沉浸式陪听，非模态，右下角浮窗）
+          v3.8.6 修复 z-index：从 z-[75] 降到 z-[55]，避免遮挡聊天浮窗 z-[68] 和模态面板 z-[71]
+          v3.8.6 修复：任意模态打开时隐藏鉴赏面板，避免遮挡模态按钮 */}
+      {appreciateMode && player.currentSong && (appreciationText || appreciating) && !showToolsMenu && !showFx && !showEqPanel && !showStatsPanel && !showSimilarPanel && !showMoodDiary && !showShareCard && !showShortcutsPanel && !showAiKeyPanel && !showAiChat && (
+        <div className={`fixed right-5 bottom-28 z-[55] w-[340px] max-h-[260px] rounded-2xl border border-[#00f5d4]/15 bg-[#0E1014]/92 backdrop-blur-2xl shadow-2xl p-4 flex flex-col transition-opacity duration-500 ${immersiveMode && !immersiveHover ? 'opacity-0 pointer-events-none' : ''}`}>
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-semibold text-[#00f5d4]">🎵 歌曲鉴赏</span>
             <button
