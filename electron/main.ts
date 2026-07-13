@@ -204,7 +204,7 @@ function createMainWindow() {
   // v3.8.6 修复：关闭按钮改为最小化到托盘，而非真正退出，让音乐继续播放
   // 真正退出只能通过托盘菜单"退出"
   mainWindow.on('close', (e) => {
-    if (!app.isQuitting) {
+    if (!(app as any).isQuitting) {
       e.preventDefault()
       mainWindow?.hide()
     }
@@ -228,7 +228,7 @@ app.whenReady().then(async () => {
     { label: '下一首', click: () => mainWindow?.webContents.send('playback:next') },
     { label: '显示主窗口', click: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show() } },
     { type: 'separator' },
-    { label: '退出', click: () => { app.isQuitting = true; app.quit() } },
+    { label: '退出', click: () => { (app as any).isQuitting = true; app.quit() } },
   ])
   tray.setContextMenu(trayMenu)
   tray.on('click', () => {
