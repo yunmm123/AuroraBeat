@@ -73,26 +73,12 @@ html, body {
 
 /* === v3.8.5 旋转封面（底部播放栏，节拍呼吸 + BPM 自转） === */
 /* JS 通过 RAF 直接写 el.style.transform 和 boxShadow 驱动动画；
-   CSS 只负责圆形 + 中心轴，不写 transform/boxShadow 避免覆盖 JS 控制 */
+   CSS 只负责圆形，不写 transform/boxShadow 避免覆盖 JS 控制 */
 .cover-art-spinning {
   border-radius: 50%;
-  position: relative;
   transform-origin: center center;
   /* 初始 box-shadow，JS 接管后会动态覆盖 */
   box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 4px 20px rgba(0,0,0,0.5);
-}
-/* 中心轴：模拟黑胶中心孔（不跟随主体旋转，因为 ::after 是伪元素，
-   会随父元素 transform 一起转，这里用径向渐变让它看起来像孔，转不转无所谓） */
-.cover-art-spinning::after {
-  content: '';
-  position: absolute;
-  left: 50%; top: 50%;
-  width: 18%; height: 18%;
-  transform: translate(-50%, -50%);
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.6) 60%, rgba(0,0,0,0) 100%);
-  pointer-events: none;
-  z-index: 2;
 }
 
 /* === 玻璃面板 === */
