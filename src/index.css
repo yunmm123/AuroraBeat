@@ -71,38 +71,29 @@ html, body {
 }
 .album-bg.visible { opacity: 1; }
 
-/* === v3.8.5 旋转封面圆盘（节拍呼吸） === */
-/* 居中悬浮的封面圆盘，缓慢自转 + 节拍触发 scale 脉冲，自然不生硬 */
-.cover-disc {
-  position: fixed;
-  left: 50%; top: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 15;
+/* === v3.8.5 旋转封面（底部播放栏，节拍呼吸 + BPM 自转） === */
+/* JS 通过 RAF 直接写 el.style.transform 驱动旋转+缩放；
+   这里只负责圆形、中心轴、阴影，不写 transform，避免覆盖 JS 控制 */
+.cover-art-spinning {
   border-radius: 50%;
-  background-size: cover;
-  background-position: center;
-  /* 多层阴影模拟黑胶厚度 + 中心轴光晕 */
   box-shadow:
-    0 0 0 1px rgba(255,255,255,0.05),
-    0 0 40px rgba(0,0,0,0.6),
-    0 0 120px rgba(0,0,0,0.4),
-    inset 0 0 40px rgba(0,0,0,0.35);
-  opacity: 0;
-  transition: opacity 0.8s ease, background-image 0.6s ease;
-  pointer-events: none;
-  will-change: transform;
+    0 0 0 1px rgba(255,255,255,0.06),
+    0 4px 20px rgba(0,0,0,0.5),
+    0 0 40px rgba(0,0,0,0.3),
+    inset 0 0 12px rgba(0,0,0,0.25);
+  position: relative;
+  transform-origin: center center;
 }
-.cover-disc.visible { opacity: 0.92; }
-/* 中心轴：模拟黑胶中心孔，节拍时微微发光 */
-.cover-disc::after {
+/* 中心轴：模拟黑胶中心孔 */
+.cover-art-spinning::after {
   content: '';
   position: absolute;
   left: 50%; top: 50%;
-  width: 14%; height: 14%;
+  width: 18%; height: 18%;
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.6) 60%, rgba(0,0,0,0) 100%);
-  box-shadow: 0 0 8px rgba(0,0,0,0.5);
+  background: radial-gradient(circle, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.6) 60%, rgba(0,0,0,0) 100%);
+  pointer-events: none;
 }
 
 /* === 玻璃面板 === */

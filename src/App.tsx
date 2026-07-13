@@ -1145,10 +1145,10 @@ const App: React.FC = () => {
   useVisualEngine(canvasRef, player, intensity, visualEnabled);
   useSpectrum(spectrumCanvasRef);   // v3.1.5: 底部播放栏上方频谱
 
-  // v3.8.5 旋转封面圆盘：RAF 累积旋转 + onBeat 节拍呼吸
-  // 设计要点：旋转速度跟随 BPM（一拍约转 30°，自然不眩晕），暂停时不转；
-  //          节拍触发 scale 1→1.06→1 缓动（300ms），低频 RMS 持续微呼吸（1.0-1.025）
-  const coverDiscRef = useRef<HTMLDivElement>(null);
+  // v3.8.5 旋转封面：底部播放栏的封面随节拍呼吸 + BPM 自转
+  // 设计要点：旋转速度跟随 BPM（一拍约转 30°，不眩晕），暂停时不转；
+  //          节拍触发 scale 1→1.08→1 缓动（350ms），低频 RMS 持续微呼吸
+  const coverArtRef = useRef<HTMLDivElement>(null);
   const coverBeatPulseRef = useRef(0);
   const coverRmsRef = useRef(0);
   useEffect(() => {
@@ -1157,7 +1157,6 @@ const App: React.FC = () => {
     let rotation = 0;
     let lastT = performance.now();
     let scale = 1;
-    let scaleTarget = 1;
     let analyser: AnalyserNode | null = null;
     let rmsBuf: Uint8Array | null = null;
     const tryGetAnalyser = () => {
@@ -1169,10 +1168,9 @@ const App: React.FC = () => {
     tryGetAnalyser();
     const t = setTimeout(tryGetAnalyser, 600);
 
-    // 节拍回调：注入脉冲（scale 缓动到 1.06 再回 1）
+    // 节拍回调：注入脉冲
     const offBeat = player.onBeat(() => {
       coverBeatPulseRef.current = 1;
-      scaleTarget = 1.06;
     });
     player.setAnalyserReadyHandler?.(tryGetAnalyser);
 
@@ -1183,16 +1181,14 @@ const App: React.FC = () => {
       const playing = player.isPlaying;
       const bpm = player.getBpm?.() || 0;
 
-      // 旋转速度：BPM 适配，一拍转约 25-30°（避免眩晕），暂停时不转
-      // 默认无 BPM 时用 12°/s 缓慢兜底
-      let rotSpeed = 0.21; // rad/s ≈ 12°/s
+      // 旋转速度：BPM 适配，一拍约 30°，无 BPM 时缓慢兜底，暂停时不转
+      let rotSpeed = 0.21;
       if (bpm > 0) {
-        const beatInterval = 60 / bpm;
-        rotSpeed = (Math.PI / 6) / beatInterval; // 一拍 30°
+        rotSpeed = (Math.PI / 6) / (60 / bpm);
       }
       if (playing) rotation += rotSpeed * dt;
 
-      // scale 缓动：节拍脉冲 + 低频 RMS 持续微呼吸
+      // 低频 RMS 持续微呼吸
       tryGetAnalyser();
       let rms = 0;
       if (analyser && rmsBuf && playing) {
@@ -1203,20 +1199,21 @@ const App: React.FC = () => {
         rms = (sum / lowBins / 255) || 0;
       }
       coverRmsRef.current = coverRmsRef.current * 0.9 + rms * 0.1;
-      const rmsBreath = playing ? coverRmsRef.current * 0.025 : 0;
+      const rmsBreath = playing ? coverRmsRef.current * 0.04 : 0;
 
-      // 脉冲衰减（300ms 回到 1）
+      // 节拍脉冲衰减（350ms 回到 1）
+      let pulse = 0;
       if (coverBeatPulseRef.current > 0) {
-        coverBeatPulseRef.current = Math.max(0, coverBeatPulseRef.current - dt / 0.3);
-        if (coverBeatPulseRef.current <= 0) scaleTarget = 1;
+        coverBeatPulseRef.current = Math.max(0, coverBeatPulseRef.current - dt / 0.35);
+        pulse = 0.08 * coverBeatPulseRef.current;
       }
-      // 双目标融合：脉冲峰值 + RMS 呼吸
-      const finalTarget = 1 + Math.max((scaleTarget - 1) * coverBeatPulseRef.current, rmsBreath);
-      scale += (finalTarget - scale) * Math.min(1, dt * 12);
+      // 脉冲 + RMS 呼吸融合
+      const finalTarget = 1 + Math.max(pulse, rmsBreath);
+      scale += (finalTarget - scale) * Math.min(1, dt * 14);
 
-      const el = coverDiscRef.current;
+      const el = coverArtRef.current;
       if (el) {
-        el.style.transform = `translate(-50%, -50%) rotate(${rotation}rad) scale(${scale.toFixed(4)})`;
+        el.style.transform = `rotate(${rotation}rad) scale(${scale.toFixed(4)})`;
       }
       raf = requestAnimationFrame(loop);
     };
@@ -1872,14 +1869,6 @@ const App: React.FC = () => {
       {player.currentSong?.cover && !customBg && !customVideo && (
         <div className={`album-bg visible`} style={{ backgroundImage: `url(${player.currentSong.cover})` }} />
       )}
-      {/* v3.8.5 旋转封面圆盘：居中悬浮，缓慢自转 + 节拍呼吸（FX 面板可开关） */}
-      {coverDiscEnabled && player.currentSong?.cover && !customBg && !customVideo && (
-        <div
-          ref={coverDiscRef}
-          className={`cover-disc visible ${player.isPlaying ? '' : 'paused'}`}
-          style={{ backgroundImage: `url(${player.currentSong.cover})`, width: 'min(42vh, 42vw)', height: 'min(42vh, 42vw)' }}
-        />
-      )}
       {/* Three.js 视觉画布（接收鼠标交互：拖拽轨道 + 点击涟漪；UI 层 z-30+ 拦截控件） */}
       <canvas ref={canvasRef} className="absolute inset-0 z-10" />
       {/* 节拍调试显示（按需，默认关闭） */}
@@ -2409,7 +2398,11 @@ const App: React.FC = () => {
         <div className="h-24 px-6 bottom-bar flex items-center gap-6 pointer-events-auto">
           <div className="flex items-center gap-4 w-[260px] flex-shrink-0">
             {player.currentSong?.cover ? (
-              <div className="w-14 h-14 rounded-xl bg-cover bg-center flex-shrink-0 shadow-lg" style={{ backgroundImage: `url(${player.currentSong.cover})` }} />
+              <div
+                ref={coverArtRef}
+                className={`w-14 h-14 bg-cover bg-center flex-shrink-0 shadow-lg ${coverDiscEnabled ? 'rounded-full cover-art-spinning' : 'rounded-xl'}`}
+                style={{ backgroundImage: `url(${player.currentSong.cover})` }}
+              />
             ) : (
               <div className="w-14 h-14 rounded-xl bg-white/[0.04] flex items-center justify-center text-2xl flex-shrink-0">🎵</div>
             )}
