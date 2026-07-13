@@ -1445,7 +1445,8 @@ const App: React.FC = () => {
       model: aiModelDraft,
     });
     setShowAiKeyPanel(false);
-    showGestureHint(player.aiApiKey ? 'AI 已启用' : 'AI 已停用');
+    // 用 draft 判断：setAiConfig 是异步更新 state，同步读 player.aiApiKey 还是旧值
+    showGestureHint(aiKeyDraft.trim() ? 'AI 已启用' : 'AI 已停用');
   };
   // v3.7.1: 应用预设（一键切换 baseUrl + model，不动 apiKey）
   const applyAiPreset = (p: { baseUrl: string; model: string }) => {
