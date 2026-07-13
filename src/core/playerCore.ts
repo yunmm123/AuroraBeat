@@ -45,6 +45,7 @@ interface PersistedSettings {
   aiApiKey: string;              // v3.7.0 AI: API Key
   aiBaseUrl: string;             // v3.7.1 AI: OpenAI 兼容服务 Base URL
   aiModel: string;               // v3.7.1 AI: 模型名
+  playStats: Record<string, number>; // 听歌统计：key=songId, value=播放秒数累积
 }
 
 function loadSettings(): Partial<PersistedSettings> {
@@ -83,6 +84,7 @@ export interface PlayerState {
   aiApiKey: string;          // v3.7.0 AI: API Key
   aiBaseUrl: string;         // v3.7.1 AI: OpenAI 兼容服务 Base URL
   aiModel: string;           // v3.7.1 AI: 模型名
+  playStats: Record<string, number>; // 听歌统计：key=songId, value=播放秒数累积
 }
 
 type Listener = (state: PlayerState) => void;
@@ -104,6 +106,7 @@ class PlayerCore {
     aiApiKey: '',
     aiBaseUrl: DEFAULT_AI_BASE_URL,
     aiModel: DEFAULT_AI_MODEL,
+    playStats: {},
   };
   private lyricOffset = 0; // v3.5.0 B3: 当前歌曲的歌词偏移（秒）
   private state: PlayerState = {
@@ -130,6 +133,7 @@ class PlayerCore {
     aiApiKey: '',
     aiBaseUrl: DEFAULT_AI_BASE_URL,
     aiModel: DEFAULT_AI_MODEL,
+    playStats: {},
   };
   private listeners: Set<Listener> = new Set();
   private audioContext: AudioContext | null = null;
@@ -138,9 +142,15 @@ class PlayerCore {
   private beatLowpass: BiquadFilterNode | null = null;
   private gainNode: GainNode | null = null;
   private source: MediaElementAudioSourceNode | null = null;
+  // v3.8.6: EQ 均衡器（5 段 peaking filter，默认 gain=0 即不影响声音）
+  private eqFilters: BiquadFilterNode[] = [];
+  // v3.8.6: 空间音效（StereoPanner，默认 0 = 居中）
+  private spatialPanner: StereoPannerNode | null = null;
   private progressRaf: number | null = null;
   private onTimeUpdate: ((time: number) => void) | null = null;
   private onAnalyserReady: ((analyser: AnalyserNode) => void) | null = null;
+  // 听歌统计去抖：记录上次保存时间（毫秒），每 10 秒存一次
+  private lastSaveTime = 0;
   // 当前音频 URL（用于离线节拍分析）
   private currentAudioUrl: string | null = null;
   // === v2.2 节拍系统：离线预分析为主，realtime 为 fallback ===
@@ -201,6 +211,11 @@ class PlayerCore {
     if (typeof loaded.aiModel === 'string' && loaded.aiModel) {
       this.persisted.aiModel = loaded.aiModel;
       this.state.aiModel = loaded.aiModel;
+    }
+    // 加载听歌统计（key=songId, value=播放秒数累积）
+    if (loaded.playStats) {
+      this.persisted.playStats = loaded.playStats;
+      this.state.playStats = loaded.playStats;
     }
 
     this.initAudio();
@@ -314,10 +329,27 @@ class PlayerCore {
       this.rtTimeBuf = new Float32Array(this.beatAnalyser.fftSize);
       this.gainNode = this.audioContext.createGain();
       this.gainNode.gain.value = this.state.volume;
-      // 可视化支路（进 destination 出声）：source → analyser → gainNode → destination
+      // v3.8.6: EQ 均衡器（5 段 peaking filter，默认 gain=0 即不影响声音）
+      const eqFreqs = [60, 250, 1000, 4000, 12000];
+      this.eqFilters = eqFreqs.map(freq => {
+        const f = this.audioContext!.createBiquadFilter();
+        f.type = 'peaking';
+        f.frequency.value = freq;
+        f.Q.value = 1.0;
+        f.gain.value = 0;  // 默认 0dB，不改变声音
+        return f;
+      });
+      // v3.8.6: 空间音效（StereoPanner，默认 0 = 居中）
+      this.spatialPanner = this.audioContext.createStereoPanner();
+      this.spatialPanner.pan.value = 0;
+      // 可视化支路（进 destination 出声）：
+      // source → analyser → eq[0..4] → gainNode → spatialPanner → destination
       this.source.connect(this.analyser);
-      this.analyser.connect(this.gainNode);
-      this.gainNode.connect(this.audioContext.destination);
+      let prevNode: AudioNode = this.analyser;
+      this.eqFilters.forEach(f => { prevNode.connect(f); prevNode = f; });
+      prevNode.connect(this.gainNode);
+      this.gainNode.connect(this.spatialPanner);
+      this.spatialPanner.connect(this.audioContext.destination);
       // 节拍分析支路（不进 destination，避免双重发声）：source → lowpass → beatAnalyser
       this.source.connect(this.beatLowpass);
       this.beatLowpass.connect(this.beatAnalyser);
@@ -473,6 +505,25 @@ class PlayerCore {
 
   getAnalyser(): AnalyserNode | null {
     return this.analyser;
+  }
+
+  // v3.8.6: EQ 均衡器（5 段 BiquadFilter）
+  getEqFilters(): BiquadFilterNode[] {
+    return this.eqFilters;
+  }
+
+  // v3.8.6: 空间音效控制
+  setSpatialAudio(enabled: boolean) {
+    if (!this.spatialPanner || !this.audioContext) return;
+    // 开启时应用轻微的左右声道摆动（模拟空间感）
+    // 简单实现：开启时 pan 在 -0.3 到 0.3 之间缓慢摆动；关闭时 pan=0
+    if (enabled) {
+      // 用 LFO 模拟空间感：通过 setValueCurveAtTime 或简单的定时器摆动
+      // 最简实现：开启时设为 0.25（偏右一点模拟现场感），实际空间感由后续 LFO 增强
+      this.spatialPanner.pan.setTargetAtTime(0.25, this.audioContext.currentTime, 0.1);
+    } else {
+      this.spatialPanner.pan.setTargetAtTime(0, this.audioContext.currentTime, 0.1);
+    }
   }
 
   /** 订阅节拍事件，返回取消订阅函数。节拍来源：离线预分析为主，realtime 为 fallback */
@@ -1168,6 +1219,40 @@ class PlayerCore {
   /** 清空 AI 配置（保留 baseUrl/model 默认值） */
   clearAiConfig() {
     this.state.aiApiKey = '';
+    this.notify();
+  }
+
+  // ============================================================
+  // 听歌统计：累计每首歌的播放秒数
+  // ============================================================
+  /** 累加播放时间到 playStats（去抖：每 10 秒 saveSettings 一次，避免频繁写 localStorage） */
+  addPlayTime(songId: string, seconds: number) {
+    if (!songId || seconds <= 0) return;
+    // 累加到 state
+    const cur = this.state.playStats[songId] || 0;
+    this.state.playStats = { ...this.state.playStats, [songId]: cur + seconds };
+    // 同步到 persisted（保证其他 notify 调用保存的值正确，引用赋值开销可忽略）
+    this.persisted.playStats = this.state.playStats;
+    // 去抖：距上次保存超过 10 秒才真正写 localStorage
+    const now = Date.now();
+    if (now - this.lastSaveTime >= 10000) {
+      saveSettings(this.persisted);
+      this.lastSaveTime = now;
+    }
+    // 通知监听器（手动派发，不调用 notify 以免每次都 saveSettings）
+    this.listeners.forEach((l) => l({ ...this.state }));
+  }
+
+  /** 获取当前听歌统计（返回副本，外部修改不影响内部状态） */
+  getPlayStats(): Record<string, number> {
+    return { ...this.state.playStats };
+  }
+
+  /** 清空听歌统计 */
+  clearPlayStats() {
+    this.state.playStats = {};
+    this.persisted.playStats = {};
+    this.lastSaveTime = 0; // 重置去抖，下次 addPlayTime 立即保存
     this.notify();
   }
 }

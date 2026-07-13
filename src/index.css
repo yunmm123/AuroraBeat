@@ -64,9 +64,9 @@ html, body {
 .album-bg {
   position: fixed; inset: 0; z-index: 0;
   background-size: cover; background-position: center;
-  filter: blur(120px) brightness(0.18) saturate(1.5);
+  filter: blur(120px) brightness(calc(0.18 + var(--audio-energy, 0) * 0.35)) saturate(calc(1.5 + var(--audio-energy, 0) * 0.6));
   transform: scale(1.4);
-  transition: background-image 1.5s ease, opacity 1.5s ease;
+  transition: background-image 1.5s ease, opacity 1.5s ease, filter 0.18s linear;
   opacity: 0;
 }
 .album-bg.visible { opacity: 1; }
@@ -320,16 +320,32 @@ html, body {
   transform: translateY(0) translateZ(0);
   opacity: 1;
   filter: blur(0);
-  /* v3.3.8: 弹簧过渡——cubic-bezier 模拟弹簧（stiffness/damping 近似） */
+  /* v3.8.6: 过渡升级——延长到 800ms 更电影感，加入 scale 让进入更柔和 */
   transition:
-    transform 600ms cubic-bezier(0.16, 1, 0.3, 1),
-    opacity 600ms cubic-bezier(0.16, 1, 0.3, 1),
-    filter 600ms cubic-bezier(0.16, 1, 0.3, 1),
-    letter-spacing 600ms cubic-bezier(0.16, 1, 0.3, 1);
+    transform 800ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 800ms cubic-bezier(0.16, 1, 0.3, 1),
+    filter 800ms cubic-bezier(0.16, 1, 0.3, 1),
+    letter-spacing 800ms cubic-bezier(0.16, 1, 0.3, 1),
+    text-shadow 1200ms ease-out;
   /* v3.4.1: 整行不再有 text-shadow，避免与字级辉光双层叠加致亮。
-     氛围辉光只在 .lyric-word-fill 上保留一层，更柔和自然。 */
+     v3.8.6: 恢复极弱辉光，配合 breath 动画营造呼吸感 */
   color: #ffffff;
-  text-shadow: none;
+  text-shadow: 0 0 18px color-mix(in srgb, var(--cover-tint, #00f5d4) 18%, transparent);
+  animation: lyric-breath 4s ease-in-out infinite;
+}
+
+/* v3.8.6: 当前行呼吸动画——text-shadow 辉光随时间缓慢脉动，增强沉浸感 */
+@keyframes lyric-breath {
+  0%, 100% {
+    text-shadow:
+      0 0 14px color-mix(in srgb, var(--cover-tint, #00f5d4) 14%, transparent),
+      0 0 28px color-mix(in srgb, var(--cover-accent, #c8a87a) 8%, transparent);
+  }
+  50% {
+    text-shadow:
+      0 0 22px color-mix(in srgb, var(--cover-tint, #00f5d4) 26%, transparent),
+      0 0 44px color-mix(in srgb, var(--cover-accent, #c8a87a) 14%, transparent);
+  }
 }
 
 /* v3.3.9: 逐字状态——past 已唱 / active 演唱中 / future 未唱 */

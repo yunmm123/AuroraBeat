@@ -1105,6 +1105,43 @@ const App: React.FC = () => {
   const [showFx, setShowFx] = useState(false);
   // v3.8.5 旋转封面圆盘：居中悬浮的封面，缓慢自转 + 节拍呼吸
   const [coverDiscEnabled, setCoverDiscEnabled] = useState(false);
+  // === v3.8.6 新增功能状态 ===
+  // 沉浸模式：隐藏所有 UI，只剩视觉
+  const [immersiveMode, setImmersiveMode] = useState(false);
+  const [immersiveHover, setImmersiveHover] = useState(false);
+  // 频谱可视化模式：spectrum(频谱环) | wave(流体波浪)
+  const [visualMode, setVisualMode] = useState<'spectrum' | 'wave'>('spectrum');
+  // 全局音频反应：背景色跟随 RMS
+  const [audioReactiveBg, setAudioReactiveBg] = useState(true);
+  // 鼠标粒子涟漪
+  const [mouseRipple, setMouseRipple] = useState(true);
+  // 高潮段落识别
+  const [climaxGlow, setClimaxGlow] = useState(0);
+  // EQ 均衡器
+  const [showEqPanel, setShowEqPanel] = useState(false);
+  const [eqBands, setEqBands] = useState([0, 0, 0, 0, 0]);
+  const [spatialAudio, setSpatialAudio] = useState(false);
+  // 听歌统计报告
+  const [showStatsPanel, setShowStatsPanel] = useState(false);
+  // 歌词搜索模式
+  const [searchMode, setSearchMode] = useState<'song' | 'lyrics'>('song');
+  // 相似歌曲推荐
+  const [similarSongs, setSimilarSongs] = useState<Song[]>([]);
+  const [showSimilarPanel, setShowSimilarPanel] = useState(false);
+  // 桌面悬浮歌词
+  const [desktopLyricsEnabled, setDesktopLyricsEnabled] = useState(false);
+  // AI 歌词解读
+  const [lyricsInterpretation, setLyricsInterpretation] = useState<string | null>(null);
+  const [interpreting, setInterpreting] = useState(false);
+  // AI 歌单续写
+  const [showContinuePlaylist, setShowContinuePlaylist] = useState(false);
+  // AI 心情日记
+  const [showMoodDiary, setShowMoodDiary] = useState(false);
+  const [moodDiary, setMoodDiary] = useState<string | null>(null);
+  // AI 歌曲鉴赏模式（自动播放解说）
+  const [appreciateMode, setAppreciateMode] = useState(false);
+  // 歌曲卡片分享
+  const [showShareCard, setShowShareCard] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -1134,6 +1171,7 @@ const App: React.FC = () => {
   const searchSeqRef = useRef(0);
   const electron = (window as any).electronAPI;
   const gestureHintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rippleHostRef = useRef<HTMLDivElement>(null);                   // v3.8.6: 鼠标粒子涟漪容器
 
   // AI情绪自动主题
   const mood = useMemo(() => detectMood(player.currentSong), [player.currentSong]);
@@ -1143,7 +1181,7 @@ const App: React.FC = () => {
   // 媒体上传时关闭全部特效
   const visualEnabled = !customBg && !customVideo;
   useVisualEngine(canvasRef, player, intensity, visualEnabled);
-  useSpectrum(spectrumCanvasRef);   // v3.1.5: 底部播放栏上方频谱
+  useSpectrum(spectrumCanvasRef, visualMode);   // v3.1.5: 底部播放栏上方频谱（v3.8.6: 支持流体波浪模式）
 
   // v3.8.5 旋转封面：底部播放栏封面随节拍呼吸 + BPM 自转
   // 关键：用 playerRef 保存稳定引用，effect 依赖只放 coverDiscEnabled，
@@ -1742,6 +1780,295 @@ const App: React.FC = () => {
     }
   }, [aiReady, ai, showGestureHint, electron]);
 
+  // ============ v3.8.6 新增功能函数 ============
+
+  // 沉浸模式：开启时隐藏所有 UI，鼠标移动临时浮出
+  useEffect(() => {
+    if (!immersiveMode) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onMove = () => {
+      setImmersiveHover(true);
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => setImmersiveHover(false), 2500);
+    };
+    window.addEventListener('mousemove', onMove);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      if (timer) clearTimeout(timer);
+    };
+  }, [immersiveMode]);
+
+  // EQ 均衡器：5 段 BiquadFilter 链路（60Hz / 250Hz / 1kHz / 4kHz / 12kHz）
+  const eqFiltersRef = useRef<BiquadFilterNode[]>([]);
+  const applyEqBands = useCallback((bands: number[]) => {
+    const filters = eqFiltersRef.current;
+    if (!filters.length) return;
+    const freqs = [60, 250, 1000, 4000, 12000];
+    bands.forEach((gain, i) => {
+      if (filters[i]) filters[i].gain.value = gain;
+    });
+  }, []);
+
+  // v3.8.6: EQ 滤波器就绪后填充 ref 并应用当前 bands
+  useEffect(() => {
+    let tries = 0;
+    const tryGet = () => {
+      const filters = player.getEqFilters?.();
+      if (filters && filters.length === 5) {
+        eqFiltersRef.current = filters;
+        applyEqBands(eqBands);
+        return true;
+      }
+      if (++tries < 20) setTimeout(tryGet, 300);
+      return false;
+    };
+    if (!tryGet()) {
+      const t = setTimeout(tryGet, 600);
+      return () => clearTimeout(t);
+    }
+  }, [player, eqBands, applyEqBands]);
+
+  // v3.8.6: EQ bands 变化时实时应用
+  useEffect(() => {
+    applyEqBands(eqBands);
+  }, [eqBands, applyEqBands]);
+
+  // v3.8.6: 空间音效开关
+  useEffect(() => {
+    player.setSpatialAudio?.(spatialAudio);
+  }, [spatialAudio, player]);
+
+  // v3.8.6: 全局音频反应环境——读取 analyser 振幅写入 CSS 变量 --audio-energy
+  useEffect(() => {
+    if (!audioReactiveBg) {
+      document.documentElement.style.setProperty('--audio-energy', '0');
+      return;
+    }
+    let raf = 0;
+    const buf = new Uint8Array(256);
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const analyser = player.getAnalyser?.();
+      if (!analyser) return;
+      const n = Math.min(buf.length, analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(buf.subarray(0, n) as any);
+      let sum = 0;
+      for (let i = 0; i < n; i++) sum += buf[i];
+      const avg = sum / n / 255; // 0-1
+      // 平滑（保留 70% 上一帧）
+      const prev = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--audio-energy') || '0') || 0;
+      const next = prev * 0.7 + avg * 0.3;
+      document.documentElement.style.setProperty('--audio-energy', next.toFixed(3));
+    };
+    tick();
+    return () => {
+      cancelAnimationFrame(raf);
+      document.documentElement.style.setProperty('--audio-energy', '0');
+    };
+  }, [audioReactiveBg, player]);
+
+  // 听歌统计：每 5 秒累积一次播放时间
+  useEffect(() => {
+    if (!player.currentSong || !player.isPlaying) return;
+    const id = setInterval(() => {
+      player.addPlayTime(player.currentSong!.id, 5);
+    }, 5000);
+    return () => clearInterval(id);
+  }, [player.currentSong, player.isPlaying]);
+
+  // 歌词搜索：切换搜索模式
+  const handleLyricsSearch = useCallback(async (q: string) => {
+    if (!q.trim() || !serverPort) return;
+    setSearching(true);
+    try {
+      const res = await fetch(`${apiBase}/api/search?keywords=${encodeURIComponent(q)}&limit=30&type=1006`);
+      const data = await res.json();
+      const songs: Song[] = (data.songs || []).map((s: any) => ({
+        id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
+        album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
+        url: '', source: 'netease' as const,
+      }));
+      setSearchResults(songs);
+    } catch {
+      showGestureHint('歌词搜索失败');
+    } finally {
+      setSearching(false);
+    }
+  }, [serverPort, apiBase, showGestureHint]);
+
+  // 相似歌曲推荐
+  const fetchSimilarSongs = useCallback(async () => {
+    if (!player.currentSong || !serverPort) return;
+    try {
+      const res = await fetch(`${apiBase}/api/simi/song?id=${player.currentSong.id}&limit=10`);
+      const data = await res.json();
+      const songs: Song[] = (data.songs || []).map((s: any) => ({
+        id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
+        album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
+        url: '', source: 'netease' as const,
+      }));
+      setSimilarSongs(songs);
+      setShowSimilarPanel(true);
+    } catch {
+      showGestureHint('获取相似歌曲失败');
+    }
+  }, [player.currentSong, serverPort, apiBase, showGestureHint]);
+
+  // 桌面悬浮歌词：通过 Electron IPC 控制
+  const toggleDesktopLyrics = useCallback(() => {
+    const next = !desktopLyricsEnabled;
+    setDesktopLyricsEnabled(next);
+    electron?.toggleDesktopLyrics?.(next);
+    showGestureHint(next ? '桌面歌词已开启' : '桌面歌词已关闭');
+  }, [desktopLyricsEnabled, electron, showGestureHint]);
+
+  // AI 歌词深度解读
+  const interpretLyrics = useCallback(async () => {
+    if (!aiReady) { openAiKeyPanel(); return; }
+    if (!player.currentSong) return;
+    const lyricsText = player.lyrics.map(l => l.text).filter(Boolean).join('\n');
+    if (!lyricsText) { showGestureHint('当前歌曲没有歌词'); return; }
+    setInterpreting(true);
+    setLyricsInterpretation(null);
+    try {
+      const result = await ai.interpretLyrics(lyricsText, { title: player.currentSong.title, artist: player.currentSong.artist });
+      setLyricsInterpretation(result);
+    } catch (e: any) {
+      showGestureHint(`解读失败：${e?.message || e}`);
+    } finally {
+      setInterpreting(false);
+    }
+  }, [aiReady, ai, player.currentSong, player.lyrics, showGestureHint, openAiKeyPanel]);
+
+  // AI 歌单续写
+  const continueAiPlaylist = useCallback(async () => {
+    if (!aiReady) { openAiKeyPanel(); return; }
+    if (!aiCurated.length) { showGestureHint('请先生成歌单'); return; }
+    setShowContinuePlaylist(true);
+    try {
+      const existing = aiCurated.map(it => `${it.title} - ${it.artist}`).join('\n');
+      const result = await ai.continuePlaylist(existing);
+      const newItems = result.split('\n')
+        .map((l: string) => l.replace(/^\d+[\.\)、\s]+/, '').trim())
+        .filter(Boolean)
+        .map((l: string) => {
+          const m = l.split(/\s*[-—–]\s*/);
+          return { title: (m[0] || l).replace(/^["'"']+|["'"']+$/g, '').trim(), artist: (m[1] || '').replace(/^["'"']+|["'"']+$/g, '').trim() };
+        })
+        .filter((it: { title: string; artist: string }) => it.title);
+      setAiCurated(prev => [...prev, ...newItems]);
+      showGestureHint(`AI 续写了 ${newItems.length} 首歌`);
+    } catch (e: any) {
+      showGestureHint(`续写失败：${e?.message || e}`);
+    } finally {
+      setShowContinuePlaylist(false);
+    }
+  }, [aiReady, ai, aiCurated, showGestureHint, openAiKeyPanel]);
+
+  // AI 心情日记
+  const generateMoodDiary = useCallback(async () => {
+    if (!aiReady) { openAiKeyPanel(); return; }
+    const stats = player.getPlayStats();
+    const songIds = Object.keys(stats).sort((a, b) => stats[b] - stats[a]).slice(0, 20);
+    if (!songIds.length) { showGestureHint('还没有听歌记录'); return; }
+    setShowMoodDiary(true);
+    setMoodDiary(null);
+    try {
+      const todaySongs = songIds.map(id => {
+        const h = player.history.find(s => s.id === id);
+        return h ? `${h.title} - ${h.artist}` : id;
+      }).join('\n');
+      const result = await ai.analyzeMoodDiary(todaySongs);
+      setMoodDiary(result);
+    } catch (e: any) {
+      showGestureHint(`分析失败：${e?.message || e}`);
+    }
+  }, [aiReady, ai, player, showGestureHint, openAiKeyPanel]);
+
+  // AI 歌曲鉴赏模式：切歌时自动生成解说
+  useEffect(() => {
+    if (!appreciateMode || !aiReady || !player.currentSong) return;
+    setLyricsInterpretation(null);
+    setInterpreting(true);
+    ai.appreciateSong({ title: player.currentSong.title, artist: player.currentSong.artist, album: player.currentSong.album })
+      .then(result => setLyricsInterpretation(result))
+      .catch(() => {})
+      .finally(() => setInterpreting(false));
+  }, [appreciateMode, aiReady, ai, player.currentSong]);
+
+  // 高潮段落识别：根据节拍密度判断高潮段
+  useEffect(() => {
+    if (!player.isPlaying) { setClimaxGlow(0); return; }
+    const offBeat = player.onBeat(() => {
+      const bpm = player.getBpm() || 0;
+      // BPM > 100 且正在播放时增加高潮值，否则衰减
+      if (bpm > 100) setClimaxGlow(v => Math.min(1, v + 0.05));
+      else setClimaxGlow(v => Math.max(0, v - 0.02));
+    });
+    const decay = setInterval(() => {
+      setClimaxGlow(v => Math.max(0, v - 0.01));
+    }, 1000);
+    return () => { offBeat?.(); clearInterval(decay); };
+  }, [player.isPlaying, player]);
+
+  // v3.8.6 鼠标交互粒子涟漪：点击页面产生扩散粒子环
+  useEffect(() => {
+    if (!mouseRipple) return;
+    const host = rippleHostRef.current;
+    if (!host) return;
+
+    const onClick = (e: MouseEvent) => {
+      // 忽略输入框/按钮等可交互元素的点击
+      const target = e.target as HTMLElement;
+      if (target.closest('button, input, textarea, select, a, [role="button"], .control-btn, .play-btn, .glass-btn, .queue-item')) return;
+
+      // 从 CSS 变量读取当前封面主色作为涟漪色
+      const tintVar = getComputedStyle(document.documentElement).getPropertyValue('--cover-tint').trim();
+      const m = tintVar.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+      const tint = m ? `${m[1]},${m[2]},${m[3]}` : '0,245,212';
+
+      // 中心扩散圆环
+      const ring = document.createElement('div');
+      ring.style.cssText = `position:absolute;left:${e.clientX}px;top:${e.clientY}px;width:0;height:0;border:2px solid rgba(${tint},0.7);border-radius:50%;transform:translate(-50%,-50%);pointer-events:none;`;
+      host.appendChild(ring);
+      ring.animate(
+        [
+          { width: '0px', height: '0px', opacity: 0.85, borderWidth: '2.5px' },
+          { width: '160px', height: '160px', opacity: 0, borderWidth: '0.5px' },
+        ],
+        { duration: 700, easing: 'cubic-bezier(0.16, 1, 0.3, 1)' },
+      ).onfinish = () => ring.remove();
+
+      // 散射粒子（8 颗向四周扩散）
+      const PARTICLES = 8;
+      for (let i = 0; i < PARTICLES; i++) {
+        const angle = (i / PARTICLES) * Math.PI * 2 + Math.random() * 0.4;
+        const dist = 40 + Math.random() * 50;
+        const px = document.createElement('div');
+        const size = 3 + Math.random() * 3;
+        px.style.cssText = `position:absolute;left:${e.clientX}px;top:${e.clientY}px;width:${size}px;height:${size}px;background:rgba(${tint},${0.85 + Math.random() * 0.15});border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 8px rgba(${tint},0.7);pointer-events:none;`;
+        host.appendChild(px);
+        px.animate(
+          [
+            { transform: 'translate(-50%,-50%) scale(1)', opacity: 1 },
+            { transform: `translate(calc(-50% + ${Math.cos(angle) * dist}px), calc(-50% + ${Math.sin(angle) * dist}px)) scale(0.2)`, opacity: 0 },
+          ],
+          { duration: 600 + Math.random() * 300, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
+        ).onfinish = () => px.remove();
+      }
+    };
+
+    window.addEventListener('click', onClick, { passive: true });
+    return () => window.removeEventListener('click', onClick);
+  }, [mouseRipple]);
+
+
+  // 歌曲卡片分享：生成分享卡片图片
+  const generateShareCard = useCallback(async () => {
+    if (!player.currentSong) return;
+    setShowShareCard(true);
+  }, [player.currentSong]);
+
   // 切歌时清空 A1 乐评
   useEffect(() => {
     setAiReview(null);
@@ -1761,6 +2088,11 @@ const App: React.FC = () => {
 
       const sc = player.shortcuts;
       const code = e.code;
+      // v3.8.6: F 键沉浸模式（独立于快捷键系统）
+      if (code === 'KeyF') {
+        setImmersiveMode(v => !v);
+        return;
+      }
       // 找到对应动作
       let action: string | null = null;
       for (const [act, c] of Object.entries(sc)) {
@@ -1826,6 +2158,13 @@ const App: React.FC = () => {
     return [{ idx: active, text: line.text || '', offset: 0, words: line.words, translation: line.translation }];
   }, [activeLyricIdx, player.lyrics]);
 
+  // v3.8.6: 桌面悬浮歌词——同步当前歌词到独立窗口
+  useEffect(() => {
+    if (!desktopLyricsEnabled) return;
+    const line = visibleLines[0];
+    electron?.updateDesktopLyrics?.(line?.text || '', line?.translation || '', player.isPlaying);
+  }, [desktopLyricsEnabled, visibleLines, player.isPlaying, electron]);
+
   const playModeIcon = player.playMode === 'single' ? '1' : player.playMode === 'shuffle' ? '⇄' : '↻';
 
   // GSAP 列表入场
@@ -1883,6 +2222,20 @@ const App: React.FC = () => {
       <BeatDebugOverlay visible={showDebug} bpm={player.bpm} analyzing={player.beatAnalyzing} />
       {/* 渐变遮罩 */}
       <div className="absolute inset-0 z-20 pointer-events-none" style={{ background: `linear-gradient(180deg, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.05) 40%, rgba(0,0,0,0.45) 100%)` }} />
+
+      {/* v3.8.6 高潮段落辉光：根据 climaxGlow 强度叠加径向辉光 */}
+      {climaxGlow > 0.02 && (
+        <div
+          className="absolute inset-0 z-[22] pointer-events-none transition-opacity duration-300"
+          style={{
+            background: `radial-gradient(ellipse 80% 60% at 50% 45%, rgba(var(--fc-accent-rgb), ${climaxGlow * 0.18}) 0%, rgba(244, 210, 138, ${climaxGlow * 0.10}) 35%, transparent 75%)`,
+            mixBlendMode: 'screen',
+          }}
+        />
+      )}
+
+      {/* v3.8.6 鼠标交互粒子涟漪容器（点击产生扩散粒子） */}
+      <div ref={rippleHostRef} className="fixed inset-0 z-[60] pointer-events-none" aria-hidden />
 
       {/* v3.6.0 B1: 快捷键设置弹窗 */}
       {showShortcutsPanel && (
@@ -2132,6 +2485,14 @@ const App: React.FC = () => {
                       <>▶ 全部播放（替换当前队列）</>
                     )}
                   </button>
+                  {/* v3.8.6: AI 歌单续写按钮 */}
+                  <button
+                    onClick={continueAiPlaylist}
+                    disabled={showContinuePlaylist}
+                    className="w-full mt-1 px-3 py-1.5 rounded-lg text-[11px] bg-white/5 text-white/60 border border-white/10 hover:bg-white/10 disabled:opacity-40 transition-all"
+                  >
+                    {showContinuePlaylist ? 'AI 续写中…' : '✨ AI 续写歌单'}
+                  </button>
                   <div className="text-[10px] text-white/30 mt-1.5 px-1">双击列表项可插队播放单曲</div>
                   <div className="max-h-[260px] overflow-y-auto -mx-1 mt-1">
                     {aiCurated.map((it, i) => (
@@ -2283,6 +2644,210 @@ const App: React.FC = () => {
         </button>
       )}
 
+      {/* === v3.8.6 新增弹窗面板 === */}
+
+      {/* EQ 均衡器面板 */}
+      {showEqPanel && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => setShowEqPanel(false)} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[400px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-semibold text-white/90">EQ 均衡器</span>
+              <button onClick={() => setShowEqPanel(false)} className="text-white/40 hover:text-white text-sm">✕</button>
+            </div>
+            <div className="space-y-3">
+              {['60Hz', '250Hz', '1kHz', '4kHz', '12kHz'].map((label, i) => (
+                <div key={label} className="flex items-center gap-3">
+                  <span className="text-xs text-white/50 w-12">{label}</span>
+                  <input
+                    type="range" min="-12" max="12" step="1" value={eqBands[i]}
+                    onChange={e => {
+                      const next = [...eqBands]; next[i] = +e.target.value;
+                      setEqBands(next); applyEqBands(next);
+                    }}
+                    className="flex-1 accent-[#00f5d4]"
+                  />
+                  <span className="text-xs text-white/60 w-8 text-right">{eqBands[i] > 0 ? '+' : ''}{eqBands[i]}dB</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center justify-between mt-4 pt-3 border-t border-white/[0.06]">
+              <label className="flex items-center gap-2 text-xs text-white/60 cursor-pointer">
+                <input type="checkbox" checked={spatialAudio} onChange={e => setSpatialAudio(e.target.checked)} className="accent-[#00f5d4]" />
+                空间音效
+              </label>
+              <button
+                onClick={() => { setEqBands([0, 0, 0, 0, 0]); applyEqBands([0, 0, 0, 0, 0]); }}
+                className="text-xs text-red-400/70 hover:text-red-400"
+              >重置</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* 听歌统计面板 */}
+      {showStatsPanel && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => setShowStatsPanel(false)} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[420px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl p-5">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-semibold text-white/90">听歌统计</span>
+              <button onClick={() => setShowStatsPanel(false)} className="text-white/40 hover:text-white text-sm">✕</button>
+            </div>
+            {(() => {
+              const stats = player.getPlayStats();
+              const entries = Object.entries(stats).sort((a, b) => b[1] - a[1]).slice(0, 20);
+              const totalSec = entries.reduce((s, [, v]) => s + v, 0);
+              if (!entries.length) return <div className="text-center text-white/40 text-sm py-8">还没有听歌记录</div>;
+              return (
+                <>
+                  <div className="text-xs text-white/50 mb-3">总时长 {Math.round(totalSec / 60)} 分钟 · {entries.length} 首歌</div>
+                  <div className="space-y-1.5 max-h-[300px] overflow-y-auto">
+                    {entries.map(([id, sec], i) => {
+                      const h = player.history.find(s => s.id === id);
+                      const name = h ? `${h.title} - ${h.artist}` : `ID: ${id}`;
+                      return (
+                        <div key={id} className="flex items-center gap-2 text-xs">
+                          <span className="text-white/30 w-6">{i + 1}</span>
+                          <span className="text-white/70 flex-1 truncate">{name}</span>
+                          <span className="text-white/40">{Math.round(sec / 60)}m</span>
+                          <div className="w-20 h-1.5 rounded-full bg-white/5 overflow-hidden">
+                            <div className="h-full bg-[#00f5d4]" style={{ width: `${(sec / entries[0][1]) * 100}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <button
+                    onClick={() => { player.clearPlayStats(); setShowStatsPanel(false); showGestureHint('统计已清空'); }}
+                    className="mt-3 w-full text-xs text-red-400/70 hover:text-red-400 py-1.5"
+                  >清空统计</button>
+                </>
+              );
+            })()}
+          </div>
+        </>
+      )}
+
+      {/* 相似歌曲推荐面板 */}
+      {showSimilarPanel && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => setShowSimilarPanel(false)} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[420px] max-h-[500px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl p-5 flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-semibold text-white/90">相似歌曲</span>
+              <button onClick={() => setShowSimilarPanel(false)} className="text-white/40 hover:text-white text-sm">✕</button>
+            </div>
+            <div className="space-y-1 overflow-y-auto flex-1">
+              {similarSongs.map(song => (
+                <button
+                  key={song.id}
+                  onClick={() => { player.playSong(song, similarSongs); setShowSimilarPanel(false); }}
+                  className="w-full flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 text-left"
+                >
+                  {song.cover && <img src={song.cover} className="w-10 h-10 rounded" alt="" />}
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-white/80 truncate">{song.title}</div>
+                    <div className="text-[10px] text-white/40 truncate">{song.artist}</div>
+                  </div>
+                </button>
+              ))}
+              {!similarSongs.length && <div className="text-center text-white/40 text-sm py-8">没有找到相似歌曲</div>}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* AI 歌词解读面板 */}
+      {(lyricsInterpretation || interpreting) && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => { if (!interpreting) { setLyricsInterpretation(null); } }} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[480px] max-h-[500px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl p-5 flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-semibold text-white/90">{appreciateMode ? '🎵 歌曲鉴赏' : '📖 歌词解读'}</span>
+              {!interpreting && <button onClick={() => setLyricsInterpretation(null)} className="text-white/40 hover:text-white text-sm">✕</button>}
+            </div>
+            {interpreting ? (
+              <div className="flex items-center justify-center py-12 text-white/40 text-sm">
+                <span className="animate-pulse">AI 正在解读…</span>
+              </div>
+            ) : (
+              <div className="text-sm text-white/75 leading-relaxed overflow-y-auto flex-1 whitespace-pre-wrap">{lyricsInterpretation}</div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* AI 心情日记面板 */}
+      {showMoodDiary && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => { if (moodDiary) { setShowMoodDiary(false); } }} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[460px] max-h-[500px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl p-5 flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-sm font-semibold text-white/90">📔 今日心情日记</span>
+              {moodDiary && <button onClick={() => setShowMoodDiary(false)} className="text-white/40 hover:text-white text-sm">✕</button>}
+            </div>
+            {!moodDiary ? (
+              <div className="flex items-center justify-center py-12 text-white/40 text-sm">
+                <span className="animate-pulse">AI 正在分析…</span>
+              </div>
+            ) : (
+              <div className="text-sm text-white/75 leading-relaxed overflow-y-auto flex-1 whitespace-pre-wrap">{moodDiary}</div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* 歌曲卡片分享面板 */}
+      {showShareCard && player.currentSong && (
+        <>
+          <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => setShowShareCard(false)} />
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[360px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl overflow-hidden">
+            <div className="relative w-full aspect-square" style={{ background: `linear-gradient(135deg, ${moodColors.primary}33, ${moodColors.secondary}33)` }}>
+              {player.currentSong.cover && <img src={player.currentSong.cover} className="absolute inset-0 w-full h-full object-cover opacity-60" alt="" />}
+              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+              <div className="absolute bottom-0 left-0 right-0 p-5">
+                <div className="text-lg font-bold text-white">{player.currentSong.title}</div>
+                <div className="text-sm text-white/60">{player.currentSong.artist}</div>
+                <div className="text-[10px] text-[#00f5d4]/70 mt-2 font-mono">AuroraBeat</div>
+              </div>
+            </div>
+            <div className="p-3 flex gap-2">
+              <button
+                onClick={async () => {
+                  const canvas = document.createElement('canvas');
+                  canvas.width = 360; canvas.height = 360;
+                  const ctx = canvas.getContext('2d')!;
+                  const grad = ctx.createLinearGradient(0, 0, 360, 360);
+                  grad.addColorStop(0, moodColors.primary + '55');
+                  grad.addColorStop(1, moodColors.secondary + '55');
+                  ctx.fillStyle = grad; ctx.fillRect(0, 0, 360, 360);
+                  if (player.currentSong?.cover) {
+                    const img = new Image(); img.crossOrigin = 'anonymous';
+                    img.src = player.currentSong.cover;
+                    await new Promise(r => { img.onload = r; img.onerror = r; });
+                    ctx.globalAlpha = 0.6; ctx.drawImage(img, 0, 0, 360, 360); ctx.globalAlpha = 1;
+                  }
+                  ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(0, 240, 360, 120);
+                  ctx.fillStyle = '#fff'; ctx.font = 'bold 20px sans-serif';
+                  ctx.fillText(player.currentSong?.title || '', 20, 275);
+                  ctx.font = '14px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
+                  ctx.fillText(player.currentSong?.artist || '', 20, 300);
+                  ctx.fillStyle = '#00f5d4'; ctx.font = '10px monospace';
+                  ctx.fillText('AuroraBeat', 20, 330);
+                  const link = document.createElement('a');
+                  link.download = `${player.currentSong?.title}-share.png`;
+                  link.href = canvas.toDataURL(); link.click();
+                  showGestureHint('已保存到下载');
+                }}
+                className="flex-1 py-2 rounded-lg bg-[#00f5d4]/15 text-[#00f5d4] text-xs font-semibold hover:bg-[#00f5d4]/25"
+              >下载图片</button>
+              <button onClick={() => setShowShareCard(false)} className="flex-1 py-2 rounded-lg bg-white/5 text-white/60 text-xs hover:bg-white/10">关闭</button>
+            </div>
+          </div>
+        </>
+      )}
+
       {/* 手势提示气泡 */}
       {gestureHint && (
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[60] pointer-events-none">
@@ -2293,7 +2858,7 @@ const App: React.FC = () => {
       )}
 
       {/* 标题栏 */}
-      <div className="absolute top-0 left-0 right-0 h-11 z-50 flex items-center justify-between px-4" style={{ WebkitAppRegion: 'drag' } as any}>
+      <div className={`absolute top-0 left-0 right-0 h-11 z-50 flex items-center justify-between px-4 transition-opacity duration-500 ${immersiveMode && !immersiveHover ? 'opacity-0 pointer-events-none' : ''}`} style={{ WebkitAppRegion: 'drag' } as any}>
         <div className="flex items-center gap-2">
           <div className="w-2.5 h-2.5 rounded-full" style={{ background: `linear-gradient(135deg, ${moodColors.primary}, ${moodColors.secondary})` }} />
           <span className="text-[11px] font-semibold tracking-[0.2em] text-white/40 uppercase">AuroraBeat</span>
@@ -2403,7 +2968,7 @@ const App: React.FC = () => {
         </div>
 
         {/* 底部控制条 */}
-        <div className="h-24 px-6 bottom-bar flex items-center gap-6 pointer-events-auto">
+        <div className={`h-24 px-6 bottom-bar flex items-center gap-6 pointer-events-auto transition-opacity duration-500 ${immersiveMode && !immersiveHover ? 'opacity-0 pointer-events-none' : ''}`}>
           <div className="flex items-center gap-4 w-[260px] flex-shrink-0">
             {player.currentSong?.cover ? (
               <div
@@ -2600,6 +3165,71 @@ const App: React.FC = () => {
                     >
                       <span>AI 助手</span>
                       <span className={player.aiApiKey ? 'text-[#00f5d4]' : 'text-white/40'}>✦</span>
+                    </button>
+                    {/* === v3.8.6 新增功能入口 === */}
+                    <div className="border-t border-white/[0.06] my-1" />
+                    <button
+                      onClick={() => { setImmersiveMode(v => !v); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className={`w-full px-4 py-2 text-left text-xs flex items-center justify-between ${immersiveMode ? 'text-[#00f5d4]' : 'text-white/70'} hover:text-white hover:bg-white/05`}
+                    >
+                      <span>沉浸模式 (F)</span>
+                      <span className="text-white/40">{immersiveMode ? '开' : '关'}</span>
+                    </button>
+                    <button
+                      onClick={() => { setShowEqPanel(v => !v); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>EQ 均衡器</span>
+                      <span className="text-white/40">♫</span>
+                    </button>
+                    <button
+                      onClick={() => { setShowStatsPanel(true); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>听歌统计</span>
+                      <span className="text-white/40">📊</span>
+                    </button>
+                    <button
+                      onClick={() => { toggleDesktopLyrics(); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className={`w-full px-4 py-2 text-left text-xs flex items-center justify-between ${desktopLyricsEnabled ? 'text-[#00f5d4]' : 'text-white/70'} hover:text-white hover:bg-white/05`}
+                    >
+                      <span>桌面歌词</span>
+                      <span className="text-white/40">{desktopLyricsEnabled ? '开' : '关'}</span>
+                    </button>
+                    <button
+                      onClick={() => { fetchSimilarSongs(); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>相似歌曲</span>
+                      <span className="text-white/40">↗</span>
+                    </button>
+                    <button
+                      onClick={() => { interpretLyrics(); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>AI 歌词解读</span>
+                      <span className="text-white/40">📖</span>
+                    </button>
+                    <button
+                      onClick={() => { generateMoodDiary(); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>AI 心情日记</span>
+                      <span className="text-white/40">📔</span>
+                    </button>
+                    <button
+                      onClick={() => { setAppreciateMode(v => !v); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className={`w-full px-4 py-2 text-left text-xs flex items-center justify-between ${appreciateMode ? 'text-[#00f5d4]' : 'text-white/70'} hover:text-white hover:bg-white/05`}
+                    >
+                      <span>AI 歌曲鉴赏</span>
+                      <span className="text-white/40">{appreciateMode ? '开' : '关'}</span>
+                    </button>
+                    <button
+                      onClick={() => { generateShareCard(); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
+                      className="w-full px-4 py-2 text-left text-xs flex items-center justify-between text-white/70 hover:text-white hover:bg-white/05"
+                    >
+                      <span>分享卡片</span>
+                      <span className="text-white/40">↗</span>
                     </button>
                   </div>
                 </>
@@ -2803,11 +3433,21 @@ const App: React.FC = () => {
                         className="search-input"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && (aiSearchMode ? aiNaturalSearch(searchQuery) : handleSearch())}
+                        onKeyDown={(e) => e.key === 'Enter' && (aiSearchMode ? aiNaturalSearch(searchQuery) : (searchMode === 'lyrics' ? handleLyricsSearch(searchQuery) : handleSearch()))}
                         onFocus={() => { setSearchFocused(true); fetchHotSearch(); }}
                         onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
-                        placeholder={aiSearchMode ? '描述你想听什么，例如：适合下雨天听的歌…' : '搜索歌曲、歌手...'}
+                        placeholder={aiSearchMode ? '描述你想听什么，例如：适合下雨天听的歌…' : (searchMode === 'lyrics' ? '输入歌词片段搜索歌曲…' : '搜索歌曲、歌手...')}
                       />
+                      {/* v3.8.6: 歌词搜索模式切换（仅在非 AI 模式下显示） */}
+                      {!aiSearchMode && (
+                        <button
+                          onClick={() => setSearchMode(m => m === 'song' ? 'lyrics' : 'song')}
+                          className={`absolute right-12 top-1/2 -translate-y-1/2 px-2 h-6 rounded-md flex items-center justify-center text-[10px] font-medium transition-all ${searchMode === 'lyrics' ? 'bg-[#00f5d4]/20 text-[#00f5d4]' : 'text-white/30 hover:text-white/60 hover:bg-white/5'}`}
+                          title={searchMode === 'lyrics' ? '歌词搜索模式（已开启）' : '切换到歌词搜索'}
+                        >
+                          {searchMode === 'lyrics' ? '词' : '歌'}
+                        </button>
+                      )}
                       {/* v3.7.0 A2: AI 自然语言搜歌切换 */}
                       <button
                         onClick={() => setAiSearchMode(v => !v)}
@@ -2865,7 +3505,7 @@ const App: React.FC = () => {
                         </div>
                       )}
                     </div>
-                    <button onClick={() => aiSearchMode ? aiNaturalSearch(searchQuery) : handleSearch()} disabled={searching || !searchQuery.trim()} className="px-6 py-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all">{searching ? '搜索中' : (aiSearchMode ? 'AI 搜歌' : '搜索')}</button>
+                    <button onClick={() => aiSearchMode ? aiNaturalSearch(searchQuery) : (searchMode === 'lyrics' ? handleLyricsSearch(searchQuery) : handleSearch())} disabled={searching || !searchQuery.trim()} className="px-6 py-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all">{searching ? '搜索中' : (aiSearchMode ? 'AI 搜歌' : (searchMode === 'lyrics' ? '搜歌词' : '搜索'))}</button>
                   </div>
                   <div className="flex-1 overflow-y-auto">
                     {searchResults.length === 0 && !searching && (
@@ -2966,6 +3606,67 @@ const App: React.FC = () => {
               </span>
             </button>
             <div className="text-[10px] text-white/25 mt-1.5">封面居中悬浮，随节拍呼吸旋转</div>
+          </div>
+
+          {/* v3.8.6 频谱可视化模式切换（柱状 / 流体波浪） */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">频谱模式</div>
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => setVisualMode('spectrum')}
+                className={`flex-1 h-8 rounded-lg text-[11px] transition-all ${visualMode === 'spectrum' ? 'bg-[#00f5d4]/15 text-[#00f5d4] border border-[#00f5d4]/30' : 'bg-white/[0.02] text-white/50 border border-white/05 hover:bg-white/5'}`}
+              >柱状</button>
+              <button
+                onClick={() => setVisualMode('wave')}
+                className={`flex-1 h-8 rounded-lg text-[11px] transition-all ${visualMode === 'wave' ? 'bg-[#00f5d4]/15 text-[#00f5d4] border border-[#00f5d4]/30' : 'bg-white/[0.02] text-white/50 border border-white/05 hover:bg-white/5'}`}
+              >流体波浪</button>
+            </div>
+            <div className="text-[10px] text-white/25 mt-1.5">切换底部播放栏上方的频谱可视化样式</div>
+          </div>
+
+          {/* v3.8.6 全局音频反应环境开关 */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">全局音频反应</div>
+            <button
+              onClick={() => setAudioReactiveBg(v => !v)}
+              className={`w-full h-9 rounded-xl border text-xs transition-all flex items-center justify-between px-3 ${audioReactiveBg ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}
+            >
+              <span>{audioReactiveBg ? '已开启' : '已关闭'}</span>
+              <span className={`w-9 h-5 rounded-full relative transition-all ${audioReactiveBg ? 'bg-[#00f5d4]/40' : 'bg-white/10'}`}>
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${audioReactiveBg ? 'left-4 bg-[#00f5d4]' : 'left-0.5 bg-white/60'}`} />
+              </span>
+            </button>
+            <div className="text-[10px] text-white/25 mt-1.5">背景辉光强度随节奏律动</div>
+          </div>
+
+          {/* v3.8.6 鼠标交互粒子涟漪开关 */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">鼠标粒子涟漪</div>
+            <button
+              onClick={() => setMouseRipple(v => !v)}
+              className={`w-full h-9 rounded-xl border text-xs transition-all flex items-center justify-between px-3 ${mouseRipple ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}
+            >
+              <span>{mouseRipple ? '已开启' : '已关闭'}</span>
+              <span className={`w-9 h-5 rounded-full relative transition-all ${mouseRipple ? 'bg-[#00f5d4]/40' : 'bg-white/10'}`}>
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${mouseRipple ? 'left-4 bg-[#00f5d4]' : 'left-0.5 bg-white/60'}`} />
+              </span>
+            </button>
+            <div className="text-[10px] text-white/25 mt-1.5">点击页面任意位置产生粒子涟漪</div>
+          </div>
+
+          {/* v3.8.6 AI 歌曲鉴赏模式开关（自定义开启或关闭） */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">AI 歌曲鉴赏</div>
+            <button
+              onClick={() => setAppreciateMode(v => !v)}
+              className={`w-full h-9 rounded-xl border text-xs transition-all flex items-center justify-between px-3 ${appreciateMode ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}
+            >
+              <span>{appreciateMode ? '已开启' : '已关闭'}</span>
+              <span className={`w-9 h-5 rounded-full relative transition-all ${appreciateMode ? 'bg-[#00f5d4]/40' : 'bg-white/10'}`}>
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${appreciateMode ? 'left-4 bg-[#00f5d4]' : 'left-0.5 bg-white/60'}`} />
+              </span>
+            </button>
+            <div className="text-[10px] text-white/25 mt-1.5">切歌时自动调用 AI 生成鉴赏文案</div>
           </div>
 
           {/* AI情绪 */}

@@ -9,6 +9,12 @@ import { useState, useCallback, useRef } from 'react';
 // - chat() 接收 OpenAI 多模态 content 格式（字符串 | 数组）
 // - 新增 generateImageReview / playlistFromImage
 // 兼容：纯文本 AIMessage 仍可传字符串 content（自动按原样转发）
+//
+// v3.8.5 文本类扩展：
+// - interpretLyrics 歌词深度解读（逐段讲解含义/背景/情感）
+// - continuePlaylist 歌单续写（基于现有歌单续写 10 首相似风格）
+// - analyzeMoodDiary 心情日记（分析今日听歌记录的心情）
+// - appreciateSong 歌曲鉴赏陪听解说（像音乐老师陪听）
 // ====================================================================
 
 // 纯文本消息（v3.7.0 老接口，A1/A2/A4/A5/A6 继续用）
@@ -159,6 +165,44 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     return chat(msg, { maxTokens: 700, temperature: 0.85 });
   }, [chat]);
 
+  // ============ v3.8.5 文本类扩展方法 ============
+
+  // A7 AI 歌词深度解读：逐段解读歌词含义/创作背景/情感/隐喻（300 字以内）
+  const interpretLyrics = useCallback(async (lyrics: string, song: { title: string; artist: string }) => {
+    const msg: AIMessage[] = [
+      { role: 'system', content: '你是音乐文学专家，擅长深度解读歌词。用户会给你歌词文本和歌曲信息，请逐段解读歌词的含义、创作背景、歌手想表达的情感、有隐喻的句子要点明。像音乐老师讲解一样自然，不要用 markdown 标题，用段落分隔。300字以内。' },
+      { role: 'user', content: `歌曲《${song.title}》- ${song.artist}\n\n歌词：\n${lyrics}` },
+    ];
+    return chat(msg, { maxTokens: 600, temperature: 0.7 });
+  }, [chat]);
+
+  // A8 AI 歌单续写：基于现有歌单续写 10 首相似风格的真实歌曲
+  const continuePlaylist = useCallback(async (existingList: string) => {
+    const msg: AIMessage[] = [
+      { role: 'system', content: '你是音乐策展人。用户给你一个现有歌单，请分析其风格和氛围，续写推荐10首风格相似的真实歌曲（中文歌和英文歌都可）。每行一首，格式"歌名 - 歌手"。只输出列表，不要编号、不要解释、不要前后缀。' },
+      { role: 'user', content: `现有歌单：\n${existingList}` },
+    ];
+    return chat(msg, { maxTokens: 400, temperature: 0.8 });
+  }, [chat]);
+
+  // A9 AI 心情日记：根据今日听歌记录分析心情变化与情绪状态（150 字以内）
+  const analyzeMoodDiary = useCallback(async (todaySongs: string) => {
+    const msg: AIMessage[] = [
+      { role: 'system', content: '你是音乐心理分析师。用户给你今天听过的歌曲列表，请分析用户今天的心情变化和情绪状态。像写日记一样自然地描述，包括：整体情绪、可能的情绪起伏、音乐选择的暗示。150字以内，不要用 markdown 标题，用段落分隔。' },
+      { role: 'user', content: `今天听过的歌曲：\n${todaySongs}` },
+    ];
+    return chat(msg, { maxTokens: 300, temperature: 0.75 });
+  }, [chat]);
+
+  // A10 AI 歌曲鉴赏陪听：像音乐老师在旁陪听一样给出解说词（200 字以内）
+  const appreciateSong = useCallback(async (song: { title: string; artist: string; album?: string }) => {
+    const msg: AIMessage[] = [
+      { role: 'system', content: '你是音乐鉴赏老师，用户正在听一首歌，请像陪听一样给出解说词。包括：这首歌的风格特点、编曲亮点、歌手演绎特色、值得注意的段落。像朋友在旁边轻声解说，不要用 markdown 标题或列表符号，用段落分隔。200字以内。' },
+      { role: 'user', content: `请为歌曲《${song.title}》- ${song.artist}${song.album ? `（专辑《${song.album}》）` : ''}给出陪听解说词。` },
+    ];
+    return chat(msg, { maxTokens: 400, temperature: 0.8 });
+  }, [chat]);
+
   return {
     loading,
     chat,
@@ -172,5 +216,10 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     generateImageReview,
     // v3.8.4 C3 升级：看图生成歌单
     playlistFromImage,
+    // v3.8.5 文本类扩展
+    interpretLyrics,
+    continuePlaylist,
+    analyzeMoodDiary,
+    appreciateSong,
   };
 }

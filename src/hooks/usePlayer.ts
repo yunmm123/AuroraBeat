@@ -85,6 +85,10 @@ export function usePlayer() {
     return playerCore.getAnalyser();
   }, []);
 
+  // v3.8.6: EQ + 空间音效
+  const getEqFilters = useCallback(() => playerCore.getEqFilters(), []);
+  const setSpatialAudio = useCallback((enabled: boolean) => playerCore.setSpatialAudio(enabled), []);
+
   const getBeatAnalyser = useCallback(() => {
     return playerCore.getBeatAnalyser();
   }, []);
@@ -128,6 +132,11 @@ export function usePlayer() {
   const setAiConfig = useCallback((opts: { apiKey?: string; baseUrl?: string; model?: string }) => playerCore.setAiConfig(opts), []);
   const clearAiConfig = useCallback(() => playerCore.clearAiConfig(), []);
 
+  // v3.8.6: 听歌统计
+  const addPlayTime = useCallback((songId: string, seconds: number) => playerCore.addPlayTime(songId, seconds), []);
+  const getPlayStats = useCallback(() => playerCore.getPlayStats(), []);
+  const clearPlayStats = useCallback(() => playerCore.clearPlayStats(), []);
+
   return {
     ...state,
     playSong,
@@ -150,6 +159,8 @@ export function usePlayer() {
     removeFromQueue,
     clearQueue,
     getAnalyser,
+    getEqFilters,
+    setSpatialAudio,
     getBeatAnalyser,
     setAnalyserReadyHandler,
     getCurrentAudioUrl,
@@ -170,5 +181,8 @@ export function usePlayer() {
     resetShortcuts,
     setAiConfig,
     clearAiConfig,
+    addPlayTime,
+    getPlayStats,
+    clearPlayStats,
   };
 }
