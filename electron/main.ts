@@ -220,7 +220,27 @@ app.whenReady().then(async () => {
   createMainWindow()
 
   // v3.8.6: 系统托盘 mini 播放器（关闭主窗口时最小化到托盘，音乐继续播放）
-  tray = new Tray(nativeImage.createEmpty())
+  // v3.8.6 修复：托盘图标显示一片白，原用 nativeImage.createEmpty()，改为加载 build/icon.png
+  // 开发环境：从项目根 build/icon.png 加载
+  // 打包后：process.resourcesPath 下查找（electron-builder 默认会把 build/ 作为资源）
+  const iconCandidates = [
+    app.isPackaged ? path.join(process.resourcesPath, 'icon.png') : '',
+    path.join(__dirname, '..', 'build', 'icon.png'),
+    path.join(app.getAppPath(), 'build', 'icon.png'),
+    path.join(__dirname, '..', 'public', 'icon.png'),
+  ].filter(Boolean);
+  let trayIcon = nativeImage.createEmpty();
+  for (const p of iconCandidates) {
+    try {
+      const img = nativeImage.createFromPath(p);
+      if (!img.isEmpty()) {
+        // 托盘图标尺寸：Windows 16x16，macOS 22x22（模板），统一 resize 16 防过大
+        trayIcon = img.resize({ width: 16, height: 16 });
+        break;
+      }
+    } catch {}
+  }
+  tray = new Tray(trayIcon)
   tray.setToolTip('AuroraBeat')
   const trayMenu = Menu.buildFromTemplate([
     { label: '播放/暂停', click: () => mainWindow?.webContents.send('playback:toggle') },
