@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useMemo } from 'react';
 
 // ====================================================================
 // v3.7.1 AI Hook — 通用 OpenAI 兼容协议调用封装
@@ -250,7 +250,9 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     return (data.content || data.message || '').trim();
   }, [apiKey, apiBase, aiBaseUrl, aiModel]);
 
-  return {
+  // v3.8.6 修复：用 useMemo 稳定返回对象，避免下游 effect 依赖 ai 对象时每次 render 都重跑
+  // （之前返回普通对象，依赖 ai 的 useEffect 每次 render 都重跑，导致 cancelled=true 永远走不进 then）
+  return useMemo(() => ({
     loading,
     chat,
     // v3.7.0 文本类
@@ -270,5 +272,9 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     appreciateSong,
     // v3.8.6 分享卡片专用
     shareCardCaptionAI,
-  };
+  }), [
+    loading, chat, generateReview, extractSearchKeyword, moodToKeywords,
+    generatePlaylist, chatMusic, generateImageReview, playlistFromImage,
+    interpretLyrics, continuePlaylist, analyzeMoodDiary, appreciateSong, shareCardCaptionAI,
+  ]);
 }

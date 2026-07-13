@@ -606,8 +606,11 @@ function useVisualEngine(
       lastPointerX = e.clientX; lastPointerY = e.clientY; lastPointerT = nowMs;
       mouseUVTarget.set(newUvx, newUvy);
       // v3.1.12: 彗星拖尾——移动时每 20ms 记录一个位置（更密，长拖尾感）
+      // v3.8.6 修复：time 改用 uniforms.uTime.value（相对秒数），与 shader uTime 同基准
+      //   之前用 performance.now()（绝对毫秒），导致 shader 里 age = uTime - tr.time/1000 永远为负
+      //   age >= 0.0 && age <= 0.8 判断永远 false，拖尾永远不显示
       if (nowMs - lastTrailTime > 20 && speed > 0.05) {
-        trail.push({ uv: new THREE.Vector2(newUvx, newUvy), time: nowMs });
+        trail.push({ uv: new THREE.Vector2(newUvx, newUvy), time: uniforms.uTime.value });
         if (trail.length > TRAIL_MAX) trail.shift();
         lastTrailTime = nowMs;
       }
@@ -746,8 +749,9 @@ function useVisualEngine(
       dragDeltaY *= Math.pow(0.05, dt);
       // v3.1.12: 彗星拖尾 age 更新，超过 0.8s 移除，同步到 20 个 vec4 uniform
       // 反序映射：uTrail0 = 最新点（彗星头部，亮 accent），uTrail19 = 最旧点（尾部，暗 tint）
+      // v3.8.6 修复：trail.time 已改为相对秒数（与 uTime 同基准），这里直接相减比较
       for (let i = trail.length - 1; i >= 0; i--) {
-        if ((now - trail[i].time) / 1000 > 0.8) trail.splice(i, 1);
+        if (uniforms.uTime.value - trail[i].time > 0.8) trail.splice(i, 1);
       }
       const trailUniforms = [uniforms.uTrail0, uniforms.uTrail1, uniforms.uTrail2, uniforms.uTrail3,
         uniforms.uTrail4, uniforms.uTrail5, uniforms.uTrail6, uniforms.uTrail7, uniforms.uTrail8,
@@ -759,7 +763,7 @@ function useVisualEngine(
         const trailIdx = trail.length - 1 - i;
         if (trailIdx >= 0) {
           const tr = trail[trailIdx];
-          (trailUniforms[i].value as THREE.Vector4).set(tr.uv.x, tr.uv.y, tr.time / 1000, 1);
+          (trailUniforms[i].value as THREE.Vector4).set(tr.uv.x, tr.uv.y, tr.time, 1);
         } else {
           (trailUniforms[i].value as THREE.Vector4).set(0, 0, -10, 0);
         }
@@ -2102,8 +2106,12 @@ const App: React.FC = () => {
       const code = e.code;
       // v3.8.6: F 键沉浸模式（独立于快捷键系统）
       if (code === 'KeyF') {
-        setImmersiveMode(v => !v);
-        showGestureHint('沉浸模式已切换，再按 F 退出');
+        setImmersiveMode(v => {
+          const next = !v;
+          // v3.8.6 修复：区分开/关提示，之前不论开/关都显示"沉浸模式已切换，再按 F 退出"
+          showGestureHint(next ? '沉浸模式已开启，再按 F 退出' : '沉浸模式已关闭');
+          return next;
+        });
         return;
       }
       // 找到对应动作

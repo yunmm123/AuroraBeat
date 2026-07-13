@@ -220,9 +220,12 @@ app.whenReady().then(async () => {
   createMainWindow()
 
   // v3.8.6: 系统托盘 mini 播放器（关闭主窗口时最小化到托盘，音乐继续播放）
-  // v3.8.6 修复：托盘图标显示一片白，原用 nativeImage.createEmpty()，改为加载 build/icon.png
-  // 开发环境：从项目根 build/icon.png 加载
-  // 打包后：process.resourcesPath 下查找（electron-builder 默认会把 build/ 作为资源）
+  // v3.8.6 修复（第三轮）：托盘图标显示一片白
+  //   根因：build/ 被 .gitignore 忽略，build/icon.png 不在仓库中
+  //         extraResources 配置 from: build/icon.png 找不到源文件，打包后 process.resourcesPath 下没有 icon.png
+  //         所有候选路径都失败 → nativeImage.createEmpty() → 纯白托盘
+  //   修复：extraResources 改用 public/icon.png（已在 git 中），打包后复制到 process.resourcesPath/icon.png
+  //         候选路径 1（packaged）命中；开发环境候选路径 4（public/icon.png）命中
   const iconCandidates = [
     app.isPackaged ? path.join(process.resourcesPath, 'icon.png') : '',
     path.join(__dirname, '..', 'build', 'icon.png'),
@@ -230,16 +233,20 @@ app.whenReady().then(async () => {
     path.join(__dirname, '..', 'public', 'icon.png'),
   ].filter(Boolean);
   let trayIcon = nativeImage.createEmpty();
+  let iconLoaded = false;
   for (const p of iconCandidates) {
     try {
       const img = nativeImage.createFromPath(p);
       if (!img.isEmpty()) {
         // 托盘图标尺寸：Windows 16x16，macOS 22x22（模板），统一 resize 16 防过大
         trayIcon = img.resize({ width: 16, height: 16 });
+        iconLoaded = true;
+        console.log('[Tray] icon loaded from:', p);
         break;
       }
-    } catch {}
+    } catch (e) { console.warn('[Tray] failed to load icon from:', p, (e as Error).message); }
   }
+  if (!iconLoaded) console.warn('[Tray] WARNING: no icon found, tray will be blank');
   tray = new Tray(trayIcon)
   tray.setToolTip('AuroraBeat')
   const trayMenu = Menu.buildFromTemplate([
