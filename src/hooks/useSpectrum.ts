@@ -51,18 +51,42 @@ export function useSpectrum(
       return fallback;
     };
 
+    // v3.8.6 性能优化：颜色缓存，每 15 帧（约 250ms）才重新读 CSS 变量，避免每帧 6 次 getComputedStyle 导致布局抖动
+    let colorCache: {
+      tint: [number, number, number]; accent: [number, number, number];
+      highlight: [number, number, number]; midlight: [number, number, number];
+      middark: [number, number, number]; shadow: [number, number, number];
+    } | null = null;
+    let colorCacheFrame = 0;
+    let frameCount = 0;
+    const refreshColors = () => {
+      colorCache = {
+        tint: readCssColor('--cover-tint', [0, 245, 212]),
+        accent: readCssColor('--cover-accent', [200, 168, 122]),
+        highlight: readCssColor('--cover-highlight', [244, 232, 208]),
+        midlight: readCssColor('--cover-midlight', [216, 184, 144]),
+        middark: readCssColor('--cover-middark', [58, 66, 82]),
+        shadow: readCssColor('--cover-shadow', [10, 12, 18]),
+      };
+      colorCacheFrame = frameCount;
+    };
+
     const draw = () => {
       rafRef.current = requestAnimationFrame(draw);
+      frameCount++;
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
       ctx.clearRect(0, 0, w, h);
 
-      const [tr, tg, tb] = readCssColor('--cover-tint', [0, 245, 212]);
-      const [ar, ag, ab] = readCssColor('--cover-accent', [200, 168, 122]);
-      const [hr, hg, hb] = readCssColor('--cover-highlight', [244, 232, 208]);
-      const [mr, mg, mb] = readCssColor('--cover-midlight', [216, 184, 144]);
-      const [dr, dg, db] = readCssColor('--cover-middark', [58, 66, 82]);
-      const [sr, sg, sb] = readCssColor('--cover-shadow', [10, 12, 18]);
+      // 每 15 帧刷新一次颜色缓存
+      if (!colorCache || frameCount - colorCacheFrame >= 15) refreshColors();
+      const cc = colorCache!;
+      const [tr, tg, tb] = cc.tint;
+      const [ar, ag, ab] = cc.accent;
+      const [hr, hg, hb] = cc.highlight;
+      const [mr, mg, mb] = cc.midlight;
+      const [dr, dg, db] = cc.middark;
+      const [sr, sg, sb] = cc.shadow;
 
       const analyser = player.getAnalyser();
       if (!analyser) return;

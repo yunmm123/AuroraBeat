@@ -23,6 +23,7 @@ const {
   recommend_songs,
   lyric,
   lyric_new,
+  simi_song,
 } = require('NeteaseCloudMusicApi');
 const http = require('http');
 const fs = require('fs');
@@ -431,6 +432,22 @@ const server = http.createServer(async (req, res) => {
       const tracks = rawTracks.map(mapSongRecord).filter(t => t.id);
       if (!meta.trackCount) meta.trackCount = tracks.length;
       sendJSON(res, { playlist: meta, tracks });
+      return;
+    }
+
+    // ========== 相似歌曲推荐 ==========
+    if (pn === '/api/simi/song') {
+      const id = url.searchParams.get('id');
+      const limit = parseInt(url.searchParams.get('limit') || '10', 10);
+      if (!id) { sendJSON(res, { error: 'Missing id', songs: [] }, 400); return; }
+      try {
+        const r = await simi_song({ id, limit, cookie: userCookie, timestamp: Date.now() });
+        const songs = (r.body?.songs || []).map(mapSongRecord).filter(s => s.id);
+        sendJSON(res, { songs });
+      } catch (e) {
+        console.error('[SimiSong] error:', e.message);
+        sendJSON(res, { error: String(e?.message || e), songs: [] }, 500);
+      }
       return;
     }
 

@@ -64,12 +64,12 @@ html, body {
 .album-bg {
   position: fixed; inset: 0; z-index: 0;
   background-size: cover; background-position: center;
-  filter: blur(120px) brightness(calc(0.18 + var(--audio-energy, 0) * 0.35)) saturate(calc(1.5 + var(--audio-energy, 0) * 0.6));
-  transform: scale(1.4);
-  transition: background-image 1.5s ease, opacity 1.5s ease, filter 0.18s linear;
+  filter: blur(120px) brightness(calc(0.18 + var(--audio-energy, 0) * 0.6)) saturate(calc(1.5 + var(--audio-energy, 0) * 1.0));
+  transform: scale(calc(1.4 + var(--audio-energy, 0) * 0.06));
+  transition: background-image 1.5s ease, opacity 1.5s ease, filter 0.12s linear, transform 0.12s linear;
   opacity: 0;
 }
-.album-bg.visible { opacity: 1; }
+.album-bg.visible { opacity: calc(0.85 + var(--audio-energy, 0) * 0.15); }
 
 /* === v3.8.5 旋转封面（底部播放栏，节拍呼吸 + BPM 自转） === */
 /* JS 通过 RAF 直接写 el.style.transform 和 boxShadow 驱动动画；
@@ -327,11 +327,16 @@ html, body {
     filter 800ms cubic-bezier(0.16, 1, 0.3, 1),
     letter-spacing 800ms cubic-bezier(0.16, 1, 0.3, 1),
     text-shadow 1200ms ease-out;
-  /* v3.4.1: 整行不再有 text-shadow，避免与字级辉光双层叠加致亮。
-     v3.8.6: 恢复极弱辉光，配合 breath 动画营造呼吸感 */
   color: #ffffff;
   text-shadow: 0 0 18px color-mix(in srgb, var(--cover-tint, #00f5d4) 18%, transparent);
-  animation: lyric-breath 4s ease-in-out infinite;
+  animation: lyric-breath 4s ease-in-out infinite, lyric-enter 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* v3.8.6: 当前行入场动画——从下方淡入 + 轻微缩放，让切歌/切行有电影感过渡 */
+@keyframes lyric-enter {
+  0% { opacity: 0; transform: translateY(24px) scale(0.92); filter: blur(8px); }
+  60% { opacity: 0.9; filter: blur(1px); }
+  100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
 }
 
 /* v3.8.6: 当前行呼吸动画——text-shadow 辉光随时间缓慢脉动，增强沉浸感 */

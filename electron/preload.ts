@@ -38,20 +38,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('playback:prev', listener)
     return () => ipcRenderer.removeListener('playback:prev', listener)
   },
-
-  // v3.8.6: 桌面悬浮歌词
-  toggleDesktopLyrics: (enabled: boolean) => ipcRenderer.invoke('desktop-lyrics:toggle', enabled),
-  updateDesktopLyrics: (text: string, translation: string, isPlaying: boolean) => ipcRenderer.invoke('desktop-lyrics:update', text, translation, isPlaying),
-  setDesktopLyricsPosition: (x?: number, y?: number) => ipcRenderer.invoke('desktop-lyrics:position', x, y),
-  onDesktopLyricsReady: (cb: () => void) => {
-    const listener = () => cb()
-    ipcRenderer.on('desktop-lyrics:ready', listener)
-    return () => ipcRenderer.removeListener('desktop-lyrics:ready', listener)
-  },
-  // 桌面歌词窗口接收主进程转发的歌词更新
-  onDesktopLyricsUpdate: (cb: (data: { text: string; translation: string; isPlaying: boolean }) => void) => {
-    const listener = (_e: unknown, data: { text: string; translation: string; isPlaying: boolean }) => cb(data)
-    ipcRenderer.on('desktop-lyrics:lyric-update', listener)
-    return () => ipcRenderer.removeListener('desktop-lyrics:lyric-update', listener)
-  },
 })

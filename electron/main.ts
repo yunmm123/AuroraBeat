@@ -1,9 +1,8 @@
-import { app, BrowserWindow, ipcMain, shell, session, globalShortcut, dialog, Tray, Menu, nativeImage, screen } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, session, globalShortcut, dialog, Tray, Menu, nativeImage } from 'electron'
 import path from 'path'
 import { spawn } from 'child_process'
 
 let mainWindow: BrowserWindow | null = null
-let lyricsWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 let serverProcess: ReturnType<typeof spawn> | null = null
 let serverPort = 0
@@ -148,6 +147,11 @@ async function openNeteaseLoginWindow(owner: BrowserWindow | null): Promise<{ ok
       `, true).catch(() => {})
     })
 
+    // v3.8.6 修复：监听页面导航（扫码成功后会跳转），立即检测 cookie，避免 1.2s 轮询延迟
+    loginWindow.webContents.on('did-navigate', () => checkCookies())
+    loginWindow.webContents.on('did-navigate-in-page', () => checkCookies())
+    loginWindow.webContents.on('did-frame-finish-load', () => checkCookies())
+
     loginWindow.on('ready-to-show', () => loginWindow.show())
 
     loginWindow.on('closed', async () => {
@@ -159,7 +163,7 @@ async function openNeteaseLoginWindow(owner: BrowserWindow | null): Promise<{ ok
       } catch { resolve({ ok: false }) }
     })
 
-    pollTimer = setInterval(checkCookies, 1200)
+    pollTimer = setInterval(checkCookies, 600)
     loginWindow.loadURL(NETEASE_LOGIN_URL).catch(() => finish({ ok: false }))
   })
 }
@@ -195,54 +199,16 @@ function createMainWindow() {
 
   mainWindow.on('closed', () => {
     mainWindow = null
-    // v3.8.6: 主窗口关闭时一并关闭桌面歌词窗口，避免阻止应用退出
-    if (lyricsWindow && !lyricsWindow.isDestroyed()) {
-      lyricsWindow.close()
-      lyricsWindow = null
+  })
+
+  // v3.8.6 修复：关闭按钮改为最小化到托盘，而非真正退出，让音乐继续播放
+  // 真正退出只能通过托盘菜单"退出"
+  mainWindow.on('close', (e) => {
+    if (!app.isQuitting) {
+      e.preventDefault()
+      mainWindow?.hide()
     }
   })
-}
-
-// ========== 桌面悬浮歌词窗口 ==========
-function createLyricsWindow() {
-  const display = screen.getPrimaryDisplay()
-  const { width: screenWidth, height: screenHeight } = display.workAreaSize
-  const winWidth = 1000
-  const winHeight = 120
-  const x = Math.floor((screenWidth - winWidth) / 2)
-  const y = screenHeight - winHeight
-
-  lyricsWindow = new BrowserWindow({
-    transparent: true,
-    frame: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    resizable: false,
-    width: winWidth,
-    height: winHeight,
-    x,
-    y,
-    show: false,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  })
-
-  if (process.env.NODE_ENV === 'development' || process.env.VITE_DEV_SERVER_URL) {
-    const devUrl = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173'
-    lyricsWindow.loadURL(`${devUrl}#desktop-lyrics`)
-  } else {
-    lyricsWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), { hash: 'desktop-lyrics' })
-  }
-
-  // 歌词窗口加载完成后通知主窗口（前端可据此开始推送歌词）
-  lyricsWindow.webContents.on('did-finish-load', () => {
-    mainWindow?.webContents.send('desktop-lyrics:ready')
-  })
-
-  lyricsWindow.on('closed', () => { lyricsWindow = null })
 }
 
 // ========== App 生命周期 ==========
@@ -252,9 +218,8 @@ app.whenReady().then(async () => {
   console.log('[Main] Server port:', serverPort)
 
   createMainWindow()
-  createLyricsWindow()
 
-  // v3.8.6: 系统托盘 mini 播放器
+  // v3.8.6: 系统托盘 mini 播放器（关闭主窗口时最小化到托盘，音乐继续播放）
   tray = new Tray(nativeImage.createEmpty())
   tray.setToolTip('AuroraBeat')
   const trayMenu = Menu.buildFromTemplate([
@@ -262,11 +227,15 @@ app.whenReady().then(async () => {
     { label: '上一首', click: () => mainWindow?.webContents.send('playback:prev') },
     { label: '下一首', click: () => mainWindow?.webContents.send('playback:next') },
     { label: '显示主窗口', click: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show() } },
-    { label: '退出', click: () => app.quit() },
+    { type: 'separator' },
+    { label: '退出', click: () => { app.isQuitting = true; app.quit() } },
   ])
   tray.setContextMenu(trayMenu)
   tray.on('click', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isVisible()) mainWindow.hide()
+      else mainWindow.show()
+    }
   })
 
   // IPC
@@ -406,29 +375,6 @@ app.whenReady().then(async () => {
     }
   })
 
-  // v3.8.6: 桌面悬浮歌词
-  ipcMain.handle('desktop-lyrics:toggle', (_e, enabled: boolean) => {
-    if (!lyricsWindow) return
-    if (enabled) {
-      lyricsWindow.show()
-      // 鼠标穿透：点击事件转发到下方窗口
-      lyricsWindow.setIgnoreMouseEvents(true, { forward: true })
-    } else {
-      lyricsWindow.hide()
-    }
-  })
-
-  ipcMain.handle('desktop-lyrics:update', (_e, text: string, translation: string, isPlaying: boolean) => {
-    // 用独立的 channel 名转发到歌词窗口，避免与 invoke channel 混淆
-    lyricsWindow?.webContents.send('desktop-lyrics:lyric-update', { text, translation, isPlaying })
-  })
-
-  ipcMain.handle('desktop-lyrics:position', (_e, x?: number, y?: number) => {
-    if (!lyricsWindow) return
-    const [curX, curY] = lyricsWindow.getPosition()
-    lyricsWindow.setPosition(x ?? curX, y ?? curY)
-  })
-
   // 全局快捷键
   const togglePlay = () => mainWindow?.webContents.send('playback:toggle')
   const nextTrack = () => mainWindow?.webContents.send('playback:next')
@@ -442,14 +388,20 @@ app.whenReady().then(async () => {
   })
 })
 
+// v3.8.6: 标记是否真正退出（托盘"退出"或 Cmd+Q），区分于"关闭按钮最小化到托盘"
+;(app as any).isQuitting = false
+
 app.on('window-all-closed', () => {
+  // v3.8.6: 不在 window-all-closed 时退出应用，让托盘保持运行
+  // 主窗口隐藏后不算"关闭"，只有托盘"退出"才真正退出
+  if (!(app as any).isQuitting) return
   if (serverProcess) { serverProcess.kill(); serverProcess = null }
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', () => {
+  (app as any).isQuitting = true
   if (serverProcess) { serverProcess.kill(); serverProcess = null }
-  // v3.8.6: 退出时关闭桌面歌词窗口并销毁托盘
-  if (lyricsWindow && !lyricsWindow.isDestroyed()) { lyricsWindow.close(); lyricsWindow = null }
+  // v3.8.6: 退出时销毁托盘
   if (tray) { tray.destroy(); tray = null }
 })

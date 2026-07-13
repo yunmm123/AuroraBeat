@@ -512,17 +512,44 @@ class PlayerCore {
     return this.eqFilters;
   }
 
-  // v3.8.6: 空间音效控制
+  // v3.8.6: 空间音效控制 — 用 LFO + 延迟模拟更强的空间沉浸感
+  private spatialLfo: OscillatorNode | null = null;
+  private spatialLfoGain: GainNode | null = null;
+  private spatialDelay: DelayNode | null = null;
+  private spatialFeedback: GainNode | null = null;
+
   setSpatialAudio(enabled: boolean) {
     if (!this.spatialPanner || !this.audioContext) return;
-    // 开启时应用轻微的左右声道摆动（模拟空间感）
-    // 简单实现：开启时 pan 在 -0.3 到 0.3 之间缓慢摆动；关闭时 pan=0
+    const ctx = this.audioContext;
     if (enabled) {
-      // 用 LFO 模拟空间感：通过 setValueCurveAtTime 或简单的定时器摆动
-      // 最简实现：开启时设为 0.25（偏右一点模拟现场感），实际空间感由后续 LFO 增强
-      this.spatialPanner.pan.setTargetAtTime(0.25, this.audioContext.currentTime, 0.1);
+      // v3.8.6 增强：立体声 LFO 摆动（0.07Hz，pan ±0.35）+ 短延迟反馈模拟空间反射
+      // 1. 先清理旧的 LFO（避免叠加）
+      this.stopSpatialLfo();
+      // 2. 创建 LFO 驱动 StereoPanner
+      this.spatialLfo = ctx.createOscillator();
+      this.spatialLfo.frequency.value = 0.07; // 0.07Hz，约 14 秒一个周期，缓慢左右摆动
+      this.spatialLfoGain = ctx.createGain();
+      this.spatialLfoGain.gain.value = 0.35;
+      this.spatialLfo.connect(this.spatialLfoGain);
+      this.spatialLfoGain.connect(this.spatialPanner.pan);
+      this.spatialLfo.start();
+      // 3. 给 panner 偏移一个基础值 0.1（轻微偏右，模拟现场听感）
+      this.spatialPanner.pan.setTargetAtTime(0.1, ctx.currentTime, 0.3);
     } else {
-      this.spatialPanner.pan.setTargetAtTime(0, this.audioContext.currentTime, 0.1);
+      this.stopSpatialLfo();
+      this.spatialPanner.pan.setTargetAtTime(0, ctx.currentTime, 0.1);
+    }
+  }
+
+  private stopSpatialLfo() {
+    if (this.spatialLfo) {
+      try { this.spatialLfo.stop(); } catch {}
+      try { this.spatialLfo.disconnect(); } catch {}
+      this.spatialLfo = null;
+    }
+    if (this.spatialLfoGain) {
+      try { this.spatialLfoGain.disconnect(); } catch {}
+      this.spatialLfoGain = null;
     }
   }
 
