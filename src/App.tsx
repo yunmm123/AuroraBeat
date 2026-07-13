@@ -64,7 +64,7 @@ const MOOD_COLORS: Record<Mood, { primary: string; secondary: string; bg: string
 //     additive blending，软发光圆点，CPU 更新，z=1 前景 renderOrder=2
 //   频谱环（弱化辅助）：uFreqTex 极坐标采样，低亮度系数
 //   彗星椭圆拖尾（20 点）：椭圆长轴沿鼠标方向，速度越快越长轴；头亮(accent)尾暗(tint)
-//   鼠标光斑（静止隐藏，移动时显现）+ 点击涟漪 + 拖拽探头 + vignette + grain + ACES
+//   鼠标光斑（静止隐藏，移动时显现）+ 拖拽探头 + vignette + grain + ACES
 // 封面色 K-Means 6 色调色板（按亮度分层）：shadow/midDark/tint/accent/midLight/highlight
 //   各元素分配不同色：背景shadow/星尘highlight/冲击波tint/频谱环accent/绽放midLight/拖尾头accent尾midDark
 //   主界面色彩构成能大致反映封面，不单调不突兀；CSS 变量联动歌词+频谱条
@@ -124,9 +124,8 @@ function useVisualEngine(
     // ==================================================================
     // 渐变流光 shader（全屏 quad）
     // 多条流动光带 + fbm 显隐呼吸 + 中心 sheen 高光 + 频谱环辅助
-    // + 彗星椭圆拖尾 + 鼠标光斑 + 涟漪 + 节拍响应；封面色 tint/accent 驱动
+    // + 彗星椭圆拖尾 + 鼠标光斑 + 节拍响应；封面色 tint/accent 驱动
     // ==================================================================
-    const RIPPLE_MAX = 3;
     // v3.1.7: 真实 FFT 频谱纹理——传给 shader 做极坐标频谱环（音频驱动形态，非封面色）
     const FREQ_BINS = 128;
     const freqTexData = new Uint8Array(FREQ_BINS * 4);
@@ -170,10 +169,6 @@ function useVisualEngine(
       uTrail17: { value: new THREE.Vector4(0, 0, -10, 0) },
       uTrail18: { value: new THREE.Vector4(0, 0, -10, 0) },
       uTrail19: { value: new THREE.Vector4(0, 0, -10, 0) },
-      // 涟漪（3 个，单独 vec4）
-      uRipple0: { value: new THREE.Vector4(0, 0, -10, 0) },
-      uRipple1: { value: new THREE.Vector4(0, 0, -10, 0) },
-      uRipple2: { value: new THREE.Vector4(0, 0, -10, 0) },
       // 节拍冲击波（4 层回响，vec4(x, y, startTime, intensity)）；onBeat 时 FIFO 替换最旧
       uShock0: { value: new THREE.Vector4(0, 0, -10, 0) },
       uShock1: { value: new THREE.Vector4(0, 0, -10, 0) },
@@ -185,7 +180,6 @@ function useVisualEngine(
       uniform float uTime, uBass, uMid, uTreble, uEnergy, uEnv, uAlpha, uIntensity, uMouseStrength;
       uniform vec3 uTint, uAccent, uHighlight, uMidLight, uMidDark, uShadow;
       uniform vec2 uMouseUV, uMouseVel, uCamPan, uResolution;
-      uniform vec4 uRipple0, uRipple1, uRipple2;
       uniform vec4 uShock0, uShock1, uShock2, uShock3;   // 节拍冲击波（x, y, startTime, intensity）
       uniform vec4 uTrail0, uTrail1, uTrail2, uTrail3, uTrail4, uTrail5, uTrail6, uTrail7;
       uniform vec4 uTrail8, uTrail9, uTrail10, uTrail11, uTrail12, uTrail13, uTrail14, uTrail15;
@@ -297,17 +291,6 @@ function useVisualEngine(
         float bloom = exp(-pow((r - bloomR) / bloomW, 2.0)) * petal;
         bloom *= (0.35 + uEnv * 0.30);                    // v3.2.3: 静止 0.15→0.35 可见 + 节拍增亮
         col += uMidLight * bloom * 0.25;   // 绽放光晕用中亮色（区别于频谱环 accent/冲击波 tint）
-
-        // === 点击涟漪（3 个，展开）===
-        float age0 = uTime - uRipple0.z;
-        if (uRipple0.w > 0.5 && age0 >= 0.0 && age0 <= 2.5)
-          col += uAccent * sin(distance(uv, uRipple0.xy) * 30.0 - age0 * 8.0) * exp(-age0 * 1.5) * 0.10;
-        float age1 = uTime - uRipple1.z;
-        if (uRipple1.w > 0.5 && age1 >= 0.0 && age1 <= 2.5)
-          col += uAccent * sin(distance(uv, uRipple1.xy) * 30.0 - age1 * 8.0) * exp(-age1 * 1.5) * 0.10;
-        float age2 = uTime - uRipple2.z;
-        if (uRipple2.w > 0.5 && age2 >= 0.0 && age2 <= 2.5)
-          col += uAccent * sin(distance(uv, uRipple2.xy) * 30.0 - age2 * 8.0) * exp(-age2 * 1.5) * 0.10;
 
         // === 鼠标光斑（静止隐藏，移动时显现；v3.2.3 收紧贴鼠标，间隔约半个鼠标）===
         float ms = uMouseStrength;   // 静止=0（无光斑），移动时增大，松手后 0.15s 渐隐
@@ -559,7 +542,6 @@ function useVisualEngine(
     let lastPointerX = 0, lastPointerY = 0, lastPointerT = 0;
     let isDragging = false;
     let dragDeltaX = 0, dragDeltaY = 0;
-    const ripples: { uv: THREE.Vector2; time: number }[] = [];
     // v3.1.12: 彗星拖尾轨迹（FIFO，20 个历史位置；头部最新亮 accent，尾部最旧暗 tint）
     const TRAIL_MAX = 20;
     const trail: { uv: THREE.Vector2; time: number }[] = [];
@@ -636,11 +618,6 @@ function useVisualEngine(
       if (e.target !== canvasRef.current) return;
       isDragging = true;
       lastPointerX = e.clientX; lastPointerY = e.clientY; lastPointerT = performance.now();
-      // 涟漪：记录 uv + 时间戳（shader 里从该点向外波动扩散）
-      const uvx = e.clientX / window.innerWidth;
-      const uvy = 1.0 - e.clientY / window.innerHeight;
-      ripples.push({ uv: new THREE.Vector2(uvx, uvy), time: performance.now() });
-      if (ripples.length > RIPPLE_MAX) ripples.shift();
     };
     const onPointerUp = () => { isDragging = false; };
     const onPointerLeaveWin = () => { isDragging = false; mouseVelocity *= 0.3; };
@@ -763,20 +740,6 @@ function useVisualEngine(
       camPan.y += (dragDeltaY - camPan.y) * (1 - Math.exp(-dt / 0.3));
       dragDeltaX *= Math.pow(0.05, dt);
       dragDeltaY *= Math.pow(0.05, dt);
-      // 涟漪 age 更新，超过 2.5s 移除（FIFO）
-      for (let i = ripples.length - 1; i >= 0; i--) {
-        if ((now - ripples[i].time) / 1000 > 2.5) ripples.splice(i, 1);
-      }
-      // 同步涟漪到 3 个单独 vec4 uniform（避免数组 uniform 兼容问题）
-      const rippleUniforms = [uniforms.uRipple0, uniforms.uRipple1, uniforms.uRipple2];
-      for (let i = 0; i < RIPPLE_MAX; i++) {
-        if (i < ripples.length) {
-          const r = ripples[i];
-          (rippleUniforms[i].value as THREE.Vector4).set(r.uv.x, r.uv.y, r.time / 1000, 1);
-        } else {
-          (rippleUniforms[i].value as THREE.Vector4).set(0, 0, -10, 0);
-        }
-      }
       // v3.1.12: 彗星拖尾 age 更新，超过 0.8s 移除，同步到 20 个 vec4 uniform
       // 反序映射：uTrail0 = 最新点（彗星头部，亮 accent），uTrail19 = 最旧点（尾部，暗 tint）
       for (let i = trail.length - 1; i >= 0; i--) {
@@ -841,13 +804,13 @@ function useVisualEngine(
       uniforms.uEnv.value = env;
 
       // === v3.1.13: 单层 shader + 35 颗自然粒子点缀（CPU 更新）===
-      // 拖拽探头 uCamPan 已在上方同步；其余效果（薄纱/冲击波/频谱环/拖尾/光斑/涟漪）由 shader 完成
+      // 拖拽探头 uCamPan 已在上方同步；其余效果（薄纱/冲击波/频谱环/拖尾/光斑）由 shader 完成
 
       // 调试信息
       (window as any).__beatDebug = {
         count: beatCount, beat: env, energy: energy, bass: smoothBass,
         mid: smoothMid, treble: smoothTreb,
-        ripples: ripples.length, mouse: mouseStrength,
+        mouse: mouseStrength,
         renderMode: 'single-flow',
         uAlpha: uniforms.uAlpha.value,
       };
@@ -2195,7 +2158,7 @@ const App: React.FC = () => {
       {player.currentSong?.cover && !customBg && !customVideo && (
         <div className={`album-bg visible`} style={{ backgroundImage: `url(${player.currentSong.cover})` }} />
       )}
-      {/* Three.js 视觉画布（接收鼠标交互：拖拽轨道 + 点击涟漪；UI 层 z-30+ 拦截控件） */}
+      {/* Three.js 视觉画布（接收鼠标交互：拖拽轨道；UI 层 z-30+ 拦截控件） */}
       <canvas ref={canvasRef} className="absolute inset-0 z-10" />
       {/* 节拍调试显示（按需，默认关闭） */}
       <BeatDebugOverlay visible={showDebug} bpm={player.bpm} analyzing={player.beatAnalyzing} />
