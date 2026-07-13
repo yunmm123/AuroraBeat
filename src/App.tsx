@@ -1921,41 +1921,102 @@ const App: React.FC = () => {
   }, [aiReady, ai, player, showGestureHint, openAiKeyPanel]);
 
   // AI 歌曲鉴赏模式：切歌时自动生成解说（每首歌只调用一次）
+  // v3.8.6 修复：用 ref 跟踪"调用中"状态，避免 appreciationText 闭包过期导致重复调用
+  const appreciatingSongIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!appreciateMode || !aiReady || !player.currentSong) {
       setAppreciationText(null);
       setAppreciating(false);
+      appreciatingSongIdRef.current = null;
       return;
     }
     const songId = player.currentSong.id;
-    // 同一首歌不重复调用
-    if (lastAppreciatedSongId.current === songId && appreciationText) return;
+    // 同一首歌：如果已经在调用或已拿到结果，跳过
+    if (appreciatingSongIdRef.current === songId) return;
+    appreciatingSongIdRef.current = songId;
     lastAppreciatedSongId.current = songId;
     setAppreciationText(null);
     setAppreciating(true);
     let cancelled = false;
     ai.appreciateSong({ title: player.currentSong.title, artist: player.currentSong.artist, album: player.currentSong.album })
       .then(result => { if (!cancelled) setAppreciationText(result); })
-      .catch(() => { if (!cancelled) setAppreciationText(null); })
+      .catch((err) => {
+        if (!cancelled) {
+          setAppreciationText(null);
+          const msg = String(err?.message || err || '');
+          if (msg.includes('BUSY')) {
+            // AI 忙：清空 ref，1.5s 后重试（下次 effect 会再次调用）
+            appreciatingSongIdRef.current = null;
+            setAppreciating(false);
+            setTimeout(() => {
+              if (!cancelled && appreciateMode) {
+                // 触发重试：通过 state 变化让 effect 重跑
+                setAppreciating(true);
+              }
+            }, 1500);
+          } else {
+            setAppreciating(false);
+            showGestureHint('陪听失败：' + (msg || '未知错误'));
+          }
+        }
+      })
       .finally(() => { if (!cancelled) setAppreciating(false); });
     return () => { cancelled = true; };
   }, [appreciateMode, aiReady, ai, player.currentSong]);
 
-  // 高潮段落识别：根据节拍密度判断高潮段
-  // 关键：依赖只留 [player.isPlaying]，player 用 playerRef，否则 player 每次渲染变化
-  // 会导致 onBeat 订阅不断重置 + decay setInterval 不断清除重建，decay 永不触发
+  // 高潮段落识别：综合频谱能量 + BPM 判断
+  // v3.8.6 修复：原实现 BPM>100 就持续累积，整首歌都判定为高潮
+  // 改为：实时频谱能量必须超过动态基线（最近 N 秒平均）才算"能量飙升"，
+  // 且只在飙升时累积 climaxGlow，其他时间快速衰减
+  // 关键：依赖只留 [player.isPlaying]，player 用 playerRef
   useEffect(() => {
     if (!player.isPlaying) { setClimaxGlow(0); return; }
+    // 动态能量基线：维护最近 8 秒（约 480 帧 @60fps）的能量滑动窗口
+    const WINDOW = 480;
+    const energyBuf: number[] = [];
+    let energySum = 0;
+    // 频谱取样：用高频段平均值（高潮通常高频能量提升明显）
+    const SAMPLE_SIZE = 24;
+    let rafId = 0;
+    let lastBeatEnergy = 0;
     const offBeat = playerRef.current.onBeat(() => {
       const bpm = playerRef.current.getBpm() || 0;
-      // BPM > 100 且正在播放时增加高潮值，否则衰减
-      if (bpm > 100) setClimaxGlow(v => Math.min(1, v + 0.05));
-      else setClimaxGlow(v => Math.max(0, v - 0.02));
+      // BPM 需 > 90 才考虑（慢歌不触发）
+      if (bpm < 90) return;
+      // 当前能量必须 > 基线 × 1.4 才算"飙升"
+      const baseline = energyBuf.length > 30 ? (energySum / energyBuf.length) : 0;
+      if (lastBeatEnergy > baseline * 1.4 && lastBeatEnergy > 0.18) {
+        setClimaxGlow(v => Math.min(1, v + 0.08));
+      } else {
+        setClimaxGlow(v => Math.max(0, v - 0.02));
+      }
     });
+    const sampleLoop = () => {
+      rafId = requestAnimationFrame(sampleLoop);
+      const analyser = playerRef.current.getAnalyser();
+      if (!analyser) return;
+      const buf = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(buf as any);
+      // 高频段平均能量（后半部分）
+      let sum = 0;
+      const start = Math.floor(buf.length * 0.4);
+      const end = Math.min(buf.length, start + SAMPLE_SIZE * 4);
+      for (let i = start; i < end; i++) sum += buf[i];
+      const energy = sum / (end - start) / 255;
+      lastBeatEnergy = energy;
+      // 加入滑动窗口
+      energyBuf.push(energy);
+      energySum += energy;
+      if (energyBuf.length > WINDOW) {
+        energySum -= energyBuf.shift()!;
+      }
+    };
+    sampleLoop();
+    // 衰减：每 200ms 衰减一次，比之前快（原 1000ms -0.01）
     const decay = setInterval(() => {
-      setClimaxGlow(v => Math.max(0, v - 0.01));
-    }, 1000);
-    return () => { offBeat?.(); clearInterval(decay); };
+      setClimaxGlow(v => Math.max(0, v - 0.025));
+    }, 200);
+    return () => { offBeat?.(); clearInterval(decay); cancelAnimationFrame(rafId); };
   }, [player.isPlaying]);
 
   // v3.8.6 鼠标交互粒子涟漪：点击页面产生扩散粒子环
@@ -2644,50 +2705,127 @@ const App: React.FC = () => {
         </>
       )}
 
-      {/* 听歌统计面板 */}
+      {/* 听歌统计面板 — v3.8.6 重新设计：Top 3 高亮卡片 + 列表清爽布局 */}
       {showStatsPanel && (
         <>
           <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => setShowStatsPanel(false)} />
-          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[420px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl p-5">
+          <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[460px] max-h-[600px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl p-5 flex flex-col">
             <div className="flex items-center justify-between mb-4">
-              <span className="text-sm font-semibold text-white/90">听歌统计</span>
-              <button onClick={() => setShowStatsPanel(false)} className="text-white/40 hover:text-white text-sm">✕</button>
+              <div>
+                <div className="text-sm font-semibold text-white/90">听歌统计</div>
+                <div className="text-[10px] text-white/35 mt-0.5">最近播放时长累积</div>
+              </div>
+              <button onClick={() => setShowStatsPanel(false)} className="text-white/40 hover:text-white text-sm w-7 h-7 flex items-center justify-center rounded-md hover:bg-white/10">✕</button>
             </div>
             {(() => {
               const stats = player.getPlayStats();
               const allEntries = Object.entries(stats).sort((a, b) => b[1] - a[1]);
-              const entries = allEntries.slice(0, statsVisibleCount);
               const totalSec = allEntries.reduce((s, [, v]) => s + v, 0);
+              const top3 = allEntries.slice(0, 3);
+              const listEntries = allEntries.slice(3, statsVisibleCount);
               const hasMore = allEntries.length > statsVisibleCount;
-              if (!allEntries.length) return <div className="text-center text-white/40 text-sm py-8">还没有听歌记录</div>;
+              if (!allEntries.length) return (
+                <div className="flex flex-col items-center justify-center py-12 text-white/30">
+                  <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.2" className="mb-3"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 6-6"/></svg>
+                  <div className="text-sm">还没有听歌记录</div>
+                  <div className="text-[11px] mt-1">播放歌曲后会自动统计</div>
+                </div>
+              );
+              const maxSec = allEntries[0][1];
+              const getSongInfo = (id: string) => {
+                const h = player.history.find(s => s.id === id);
+                return h ? { title: h.title, artist: h.artist, cover: h.cover } : null;
+              };
+              const formatDuration = (sec: number) => {
+                if (sec >= 3600) return `${(sec / 3600).toFixed(1)}h`;
+                if (sec >= 60) return `${Math.round(sec / 60)}m`;
+                return `${Math.round(sec)}s`;
+              };
               return (
                 <>
-                  <div className="text-xs text-white/50 mb-3">总时长 {Math.round(totalSec / 60)} 分钟 · 共 {allEntries.length} 首歌</div>
-                  <div
-                    className="space-y-1.5 max-h-[300px] overflow-y-auto"
-                    onScroll={(e) => {
-                      const el = e.currentTarget;
-                      if (el.scrollHeight - el.scrollTop - el.clientHeight < 40 && hasMore) {
-                        setStatsVisibleCount(c => c + 10);
-                      }
-                    }}
-                  >
-                    {entries.map(([id, sec], i) => {
-                      const h = player.history.find(s => s.id === id);
-                      const name = h ? `${h.title} - ${h.artist}` : `ID: ${id}`;
-                      return (
-                        <div key={id} className="flex items-center gap-2 text-xs">
-                          <span className="text-white/30 w-6">{i + 1}</span>
-                          <span className="text-white/70 flex-1 truncate">{name}</span>
-                          <span className="text-white/40">{Math.round(sec / 60)}m</span>
-                          <div className="w-20 h-1.5 rounded-full bg-white/5 overflow-hidden">
-                            <div className="h-full bg-[#00f5d4]" style={{ width: `${(sec / allEntries[0][1]) * 100}%` }} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {hasMore && <div className="text-center text-white/25 text-[10px] py-2">↓ 下滑加载更多 ({allEntries.length - statsVisibleCount} 首)</div>}
+                  {/* 总览统计 */}
+                  <div className="grid grid-cols-3 gap-2 mb-4 px-1">
+                    <div className="text-center">
+                      <div className="text-[18px] font-bold text-[#00f5d4]">{Math.floor(totalSec / 60)}</div>
+                      <div className="text-[10px] text-white/40 mt-0.5">总分钟</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-[18px] font-bold text-white/85">{allEntries.length}</div>
+                      <div className="text-[10px] text-white/40 mt-0.5">听过歌曲</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-[18px] font-bold text-[#f4d28a]">{formatDuration(maxSec)}</div>
+                      <div className="text-[10px] text-white/40 mt-0.5">最常听</div>
+                    </div>
                   </div>
+
+                  {/* Top 3 高亮卡片 */}
+                  {top3.length > 0 && (
+                    <div className="grid grid-cols-3 gap-2 mb-3">
+                      {top3.map(([id, sec], i) => {
+                        const info = getSongInfo(id);
+                        const medals = ['🥇', '🥈', '🥉'];
+                        const colors = ['from-[#00f5d4]/20 to-transparent', 'from-[#f4d28a]/15 to-transparent', 'from-[#c0a87a]/10 to-transparent'];
+                        return (
+                          <div key={id} className={`rounded-xl p-2.5 bg-gradient-to-b ${colors[i]} border border-white/[0.06]`}>
+                            <div className="flex items-center justify-between mb-1.5">
+                              <span className="text-[14px]">{medals[i]}</span>
+                              <span className="text-[10px] text-white/50">{formatDuration(sec)}</span>
+                            </div>
+                            {info?.cover && (
+                              <div className="w-full aspect-square rounded-lg bg-cover bg-center mb-2" style={{ backgroundImage: `url(${info.cover})` }} />
+                            )}
+                            <div className="text-[11px] text-white/90 font-medium truncate leading-tight">{info?.title || `#${id.slice(-6)}`}</div>
+                            <div className="text-[10px] text-white/35 truncate mt-0.5">{info?.artist || ''}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* 4 名之后列表（默认显示前 10，下滑加载更多） */}
+                  {listEntries.length > 0 && (
+                    <div className="flex-1 overflow-y-auto -mr-2 pr-2 space-y-1"
+                      onScroll={(e) => {
+                        const el = e.currentTarget;
+                        if (el.scrollHeight - el.scrollTop - el.clientHeight < 40 && hasMore) {
+                          setStatsVisibleCount(c => c + 10);
+                        }
+                      }}
+                    >
+                      {listEntries.map(([id, sec], i) => {
+                        const info = getSongInfo(id);
+                        const rank = i + 4;
+                        const pct = (sec / maxSec) * 100;
+                        return (
+                          <div key={id} className="flex items-center gap-3 px-2 py-1.5 rounded-lg hover:bg-white/[0.03] transition-colors">
+                            <span className="text-[11px] text-white/30 w-5 text-center">{rank}</span>
+                            {info?.cover ? (
+                              <div className="w-8 h-8 rounded-md bg-cover bg-center flex-shrink-0" style={{ backgroundImage: `url(${info.cover})` }} />
+                            ) : (
+                              <div className="w-8 h-8 rounded-md bg-white/[0.04] flex items-center justify-center flex-shrink-0 text-[10px] text-white/20">♪</div>
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[12px] text-white/85 truncate leading-tight">{info?.title || `#${id.slice(-6)}`}</div>
+                              <div className="text-[10px] text-white/35 truncate mt-0.5">{info?.artist || '未知'}</div>
+                            </div>
+                            <div className="flex flex-col items-end gap-0.5">
+                              <span className="text-[11px] text-white/55">{formatDuration(sec)}</span>
+                              <div className="w-16 h-1 rounded-full bg-white/[0.06] overflow-hidden">
+                                <div className="h-full bg-gradient-to-r from-[#00f5d4]/60 to-[#00f5d4]" style={{ width: `${pct}%` }} />
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {hasMore && (
+                        <div className="text-center text-white/25 text-[10px] py-2">
+                          ↓ 下滑加载更多（{allEntries.length - statsVisibleCount} 首）
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <button
                     onClick={() => { player.clearPlayStats(); setShowStatsPanel(false); setStatsVisibleCount(10); showGestureHint('统计已清空'); }}
                     className="mt-3 w-full text-xs text-red-400/70 hover:text-red-400 py-1.5"
@@ -2750,10 +2888,14 @@ const App: React.FC = () => {
 
       {/* AI 歌曲鉴赏面板（沉浸式陪听，非模态，右下角浮窗） */}
       {appreciateMode && player.currentSong && (appreciationText || appreciating) && (
-        <div className="fixed right-5 bottom-28 z-[65] w-[340px] max-h-[260px] rounded-2xl border border-[#00f5d4]/15 bg-[#0E1014]/92 backdrop-blur-2xl shadow-2xl p-4 flex flex-col">
+        <div className="fixed right-5 bottom-28 z-[75] w-[340px] max-h-[260px] rounded-2xl border border-[#00f5d4]/15 bg-[#0E1014]/92 backdrop-blur-2xl shadow-2xl p-4 flex flex-col">
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-semibold text-[#00f5d4]">🎵 歌曲鉴赏</span>
-            <button onClick={() => { setAppreciateMode(false); setAppreciationText(null); }} className="text-white/40 hover:text-white text-xs">✕</button>
+            <button
+              onClick={() => { setAppreciateMode(false); setAppreciationText(null); setAppreciating(false); appreciatingSongIdRef.current = null; }}
+              className="text-white/40 hover:text-white text-sm w-7 h-7 flex items-center justify-center rounded-md hover:bg-white/10 transition-colors"
+              aria-label="关闭歌曲鉴赏"
+            >✕</button>
           </div>
           {appreciating ? (
             <div className="flex items-center gap-2 py-6 text-white/40 text-xs">
@@ -2765,57 +2907,68 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* 歌曲卡片分享面板 */}
+      {/* 歌曲卡片分享面板 — v3.8.6 比例从 1:1 改为 3:4，让 50 字解读完整显示 */}
       {showShareCard && player.currentSong && (
         <>
           <div className="fixed inset-0 z-[70] bg-black/40 backdrop-blur-sm" onClick={() => setShowShareCard(false)} />
           <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[71] w-[360px] rounded-2xl border border-white/[0.08] bg-[#0E1014]/95 backdrop-blur-2xl shadow-2xl overflow-hidden">
-            <div className="relative w-full aspect-square" style={{ background: `linear-gradient(135deg, ${moodColors.primary}33, ${moodColors.secondary}33)` }}>
+            <div className="relative w-full" style={{ paddingBottom: '133.33%', background: `linear-gradient(135deg, ${moodColors.primary}33, ${moodColors.secondary}33)` }}>
               {player.currentSong.cover && <img src={player.currentSong.cover} className="absolute inset-0 w-full h-full object-cover opacity-60" alt="" />}
-              <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
+              <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/20 to-transparent" />
               <div className="absolute bottom-0 left-0 right-0 p-5">
                 <div className="text-lg font-bold text-white">{player.currentSong.title}</div>
                 <div className="text-sm text-white/60">{player.currentSong.artist}</div>
-                {shareCardCaption && <div className="text-[11px] text-white/70 mt-1.5 leading-snug">{shareCardCaption}</div>}
-                <div className="text-[10px] text-[#00f5d4]/70 mt-2 font-mono">AuroraBeat</div>
+                {shareCardCaption && <div className="text-[12px] text-white/80 mt-2 leading-relaxed">{shareCardCaption}</div>}
+                <div className="text-[10px] text-[#00f5d4]/70 mt-3 font-mono">AuroraBeat</div>
               </div>
             </div>
             <div className="p-3 flex gap-2">
               <button
                 onClick={async () => {
                   const canvas = document.createElement('canvas');
-                  canvas.width = 360; canvas.height = 360;
+                  // v3.8.6: 3:4 比例（360×480），让 50 字解读完整显示
+                  const W = 360, H = 480;
+                  canvas.width = W; canvas.height = H;
                   const ctx = canvas.getContext('2d')!;
-                  const grad = ctx.createLinearGradient(0, 0, 360, 360);
+                  const grad = ctx.createLinearGradient(0, 0, W, H);
                   grad.addColorStop(0, moodColors.primary + '55');
                   grad.addColorStop(1, moodColors.secondary + '55');
-                  ctx.fillStyle = grad; ctx.fillRect(0, 0, 360, 360);
+                  ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
                   if (player.currentSong?.cover) {
-                    // v3.8.6 修复：必须走 /api/cover 代理，否则网易云 CDN 不返回 CORS 头，
-                    // crossOrigin='anonymous' 会导致加载失败 + canvas 污染 + toDataURL 抛 SecurityError
                     const coverUrl = `${apiBase}/api/cover?url=${encodeURIComponent(player.currentSong.cover)}`;
                     const img = new Image(); img.crossOrigin = 'anonymous';
                     img.src = coverUrl;
                     await new Promise(r => { img.onload = r; img.onerror = r; });
-                    // 仅在图片真正加载成功后绘制，避免 InvalidStateError
                     if (img.complete && img.naturalWidth > 0) {
-                      ctx.globalAlpha = 0.6; ctx.drawImage(img, 0, 0, 360, 360); ctx.globalAlpha = 1;
+                      ctx.globalAlpha = 0.6; ctx.drawImage(img, 0, 0, W, H); ctx.globalAlpha = 1;
                     }
                   }
-                  ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(0, 240, 360, 120);
-                  ctx.fillStyle = '#fff'; ctx.font = 'bold 20px sans-serif';
-                  ctx.fillText(player.currentSong?.title || '', 20, 275);
-                  ctx.font = '14px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.6)';
-                  ctx.fillText(player.currentSong?.artist || '', 20, 300);
-                  // v3.8.6: AI 音乐解读（50 字以内）
+                  // 底部渐暗区域扩展到 H-200 ~ H
+                  const fadeGrad = ctx.createLinearGradient(0, H - 220, 0, H);
+                  fadeGrad.addColorStop(0, 'rgba(0,0,0,0)');
+                  fadeGrad.addColorStop(1, 'rgba(0,0,0,0.88)');
+                  ctx.fillStyle = fadeGrad; ctx.fillRect(0, H - 220, W, 220);
+                  // 标题
+                  ctx.fillStyle = '#fff'; ctx.font = 'bold 22px sans-serif';
+                  ctx.fillText(player.currentSong?.title || '', 20, H - 130);
+                  // 歌手
+                  ctx.font = '14px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
+                  ctx.fillText(player.currentSong?.artist || '', 20, H - 105);
+                  // AI 音乐解读（50 字以内，3:4 比例下可显示完整）
                   if (shareCardCaption) {
-                    ctx.font = '11px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.75)';
-                    // 简单换行：每行最多 18 个字符
-                    const lines = shareCardCaption.match(/.{1,18}/g) || [shareCardCaption];
-                    lines.slice(0, 2).forEach((line, i) => ctx.fillText(line, 20, 315 + i * 13));
+                    ctx.font = '12px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                    // 自动换行：每行约 22 个中文字符
+                    const lines: string[] = [];
+                    let remaining = shareCardCaption;
+                    while (remaining.length > 22) {
+                      lines.push(remaining.slice(0, 22));
+                      remaining = remaining.slice(22);
+                    }
+                    if (remaining) lines.push(remaining);
+                    lines.slice(0, 4).forEach((line, i) => ctx.fillText(line, 20, H - 75 + i * 16));
                   }
                   ctx.fillStyle = '#00f5d4'; ctx.font = '10px monospace';
-                  ctx.fillText('AuroraBeat', 20, 350);
+                  ctx.fillText('AuroraBeat', 20, H - 12);
                   try {
                     const link = document.createElement('a');
                     link.download = `${player.currentSong?.title}-share.png`;
@@ -3403,7 +3556,12 @@ const App: React.FC = () => {
                       <input
                         className="search-input"
                         value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setSearchQuery(v);
+                          // v3.8.6 修复：用户修改搜索词时清空上次搜索结果，避免遮挡最近搜索/热搜榜
+                          if (v !== searchQuery && searchResults.length > 0) setSearchResults([]);
+                        }}
                         onKeyDown={(e) => e.key === 'Enter' && (aiSearchMode ? aiNaturalSearch(searchQuery) : handleSearch())}
                         onFocus={() => { setSearchFocused(true); fetchHotSearch(); }}
                         onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
@@ -3469,11 +3627,15 @@ const App: React.FC = () => {
                     <button onClick={() => aiSearchMode ? aiNaturalSearch(searchQuery) : handleSearch()} disabled={searching || !searchQuery.trim()} className="px-6 py-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all">{searching ? '搜索中' : (aiSearchMode ? 'AI 搜歌' : '搜索')}</button>
                   </div>
                   <div className="flex-1 overflow-y-auto">
-                    {searchResults.length === 0 && !searching && (
+                    {/* v3.8.6 修复：聚焦搜索框时隐藏上次搜索结果，避免遮挡最近搜索/热搜榜浮层 */}
+                    {searchResults.length === 0 && !searching && !searchFocused && (
                       <div className="flex flex-col items-center justify-center h-60 text-white/25">
                         <svg width="40" height="40" fill="none" stroke="currentColor" strokeWidth="1.5" className="mb-4"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
                         <div className="text-sm">输入关键词搜索音乐</div>
                       </div>
+                    )}
+                    {searchFocused && searchResults.length === 0 && !searching && (
+                      <div className="flex items-center justify-center h-40 text-white/20 text-xs">⬆ 从最近搜索/热搜榜选择，或输入关键词</div>
                     )}
                     {searchResults.map((song, i) => {
                       const isCurrent = player.currentSong?.id === song.id;
