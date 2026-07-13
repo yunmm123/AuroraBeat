@@ -7,14 +7,10 @@ export interface Song {
   cover: string
   duration: number
   url: string
-  source: 'local' | 'netease' | 'kugou'
+  source: 'local' | 'netease'
   path?: string
   size?: number
   fee?: number
-  // v3.8.6 酷狗源字段（kugou-api 需要的额外标识，其他源为空）
-  hash?: string       // 酷狗歌曲 hash
-  audioId?: string    // 酷狗 audio_id
-  albumId?: string    // 酷狗 album_id（注意是字符串）
 }
 
 export interface YrcWord {
@@ -37,7 +33,7 @@ export interface Playlist {
   name: string
   cover: string
   songs: Song[]
-  source: 'local' | 'netease' | 'kugou'
+  source: 'local' | 'netease'
 }
 
 export type PlayMode = 'sequence' | 'shuffle' | 'single'

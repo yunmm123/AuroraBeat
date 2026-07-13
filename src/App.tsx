@@ -1162,9 +1162,6 @@ const App: React.FC = () => {
   const [viewingTracks, setViewingTracks] = useState<Song[]>([]);
   const [viewingName, setViewingName] = useState('');
   const [neteaseUser, setNeteaseUser] = useState<NeteaseUser | null>(null);
-  // v3.8.6 酷狗音源：独立状态，与网易云互不影响
-  const [kugouUser, setKugouUser] = useState<{ userid: string; nickname: string; vipType: number; isSvip: boolean } | null>(null);
-  const [searchSource, setSearchSource] = useState<'netease' | 'kugou'>('netease');
   const [serverPort, setServerPort] = useState(0);
   const [intensity, setIntensity] = useState(0.85);
   const [showDebug, setShowDebug] = useState(false);
@@ -1336,7 +1333,6 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!serverPort) return;
     checkLogin(); loadHome();
-    checkKugouLogin();
   }, [serverPort]);
 
   const checkLogin = async () => {
@@ -1372,24 +1368,11 @@ const App: React.FC = () => {
     const seq = ++searchSeqRef.current;
     setSearching(true);
     try {
-      // v3.8.6: 按当前选中的源分发（网易走 /api/search，酷狗走 /api/kugou/search）
-      const url = searchSource === 'kugou'
-        ? `${apiBase}/api/kugou/search?keywords=${encodeURIComponent(searchQuery)}&limit=30`
-        : `${apiBase}/api/search?keywords=${encodeURIComponent(searchQuery)}&limit=30`;
+      const url = `${apiBase}/api/search?keywords=${encodeURIComponent(searchQuery)}&limit=30`;
       const res = await fetch(url);
       if (seq !== searchSeqRef.current) return;
       const data = await res.json();
       const songs: Song[] = (data.songs || []).map((s: any) => {
-        if (searchSource === 'kugou') {
-          // 酷狗返回的字段（kugou-bridge 已映射好）
-          return {
-            id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
-            album: s.album || '', cover: s.cover || '', duration: Number(s.duration) || 0,
-            url: '', source: 'kugou' as const,
-            hash: s.hash, audioId: s.audioId, albumId: s.albumId,
-          };
-        }
-        // 网易云
         return {
           id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
           album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
@@ -1399,7 +1382,7 @@ const App: React.FC = () => {
       setSearchResults(songs);
     } catch { if (seq === searchSeqRef.current) setSearchResults([]); }
     finally { if (seq === searchSeqRef.current) setSearching(false); }
-  }, [searchQuery, serverPort, player, searchSource]);
+  }, [searchQuery, serverPort, player]);
 
   // v3.6.0 A2: 用关键词快速搜索（点击历史/热搜时调用）
   const searchWith = useCallback((keyword: string) => {
@@ -1411,22 +1394,11 @@ const App: React.FC = () => {
       const seq = ++searchSeqRef.current;
       setSearching(true);
       try {
-        // v3.8.6: 按当前选中的源分发
-        const url = searchSource === 'kugou'
-          ? `${apiBase}/api/kugou/search?keywords=${encodeURIComponent(keyword)}&limit=30`
-          : `${apiBase}/api/search?keywords=${encodeURIComponent(keyword)}&limit=30`;
+        const url = `${apiBase}/api/search?keywords=${encodeURIComponent(keyword)}&limit=30`;
         const res = await fetch(url);
         if (seq !== searchSeqRef.current) return;
         const data = await res.json();
         const songs: Song[] = (data.songs || []).map((s: any) => {
-          if (searchSource === 'kugou') {
-            return {
-              id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
-              album: s.album || '', cover: s.cover || '', duration: Number(s.duration) || 0,
-              url: '', source: 'kugou' as const,
-              hash: s.hash, audioId: s.audioId, albumId: s.albumId,
-            };
-          }
           return {
             id: String(s.id), title: s.name || '未知', artist: s.artist || '未知',
             album: s.album || '', cover: s.cover || '', duration: (s.duration || 0) / 1000,
@@ -1437,7 +1409,7 @@ const App: React.FC = () => {
       } catch { if (seq === searchSeqRef.current) setSearchResults([]); }
       finally { if (seq === searchSeqRef.current) setSearching(false); }
     })();
-  }, [serverPort, player, searchSource]);
+  }, [serverPort, player]);
 
   // v3.6.0 A2: 搜索框聚焦时拉取热搜榜（懒加载）
   const fetchHotSearch = useCallback(async () => {
@@ -1476,32 +1448,6 @@ const App: React.FC = () => {
     await electron?.neteaseClearLogin?.();
     setNeteaseUser(null); setUserPlaylists([]);
     await loadHome();
-  };
-
-  // v3.8.6 酷狗登录/登出（与网易云完全独立）
-  const checkKugouLogin = async () => {
-    if (!serverPort) return;
-    try {
-      const res = await fetch(`${apiBase}/api/kugou/login/status`);
-      const data = await res.json();
-      if (data.loggedIn) {
-        setKugouUser({ userid: data.userid, nickname: data.nickname, vipType: data.vipType, isSvip: data.isSvip });
-      } else {
-        setKugouUser(null);
-      }
-    } catch {}
-  };
-  const loginKugou = async () => {
-    const result = await electron?.kugouOpenLogin?.();
-    if (!result?.ok) return;
-    await new Promise(r => setTimeout(r, 300));
-    await checkKugouLogin();
-  };
-  const logoutKugou = async () => {
-    await electron?.kugouClearLogin?.();
-    setKugouUser(null);
-    // 如果当前在酷狗源，切回网易
-    if (searchSource === 'kugou') setSearchSource('netease');
   };
 
   const importLocal = async () => {
@@ -3515,23 +3461,6 @@ const App: React.FC = () => {
                 ) : (
                   <button onClick={loginNetease} className="login-btn w-full">登录网易云</button>
                 )}
-                {/* v3.8.6 酷狗登录（独立，与网易云互不影响）*/}
-                {kugouUser ? (
-                  <div className="flex items-center gap-2 px-2 mt-2">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-orange-400 to-pink-500 flex items-center justify-center text-xs font-bold">🐶</div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-medium truncate flex items-center gap-1">
-                        <span className="truncate">{kugouUser.nickname}</span>
-                        {kugouUser.isSvip && <span className="text-[8px] px-1 rounded bg-gradient-to-r from-yellow-400 to-orange-500 text-black font-bold flex-shrink-0">SVIP</span>}
-                      </div>
-                      <button onClick={logoutKugou} className="text-[10px] text-white/30 hover:text-red-400">退出登录</button>
-                    </div>
-                  </div>
-                ) : (
-                  <button onClick={loginKugou} className="login-btn w-full mt-2" style={{ background: 'linear-gradient(to right, rgba(255,149,0,0.15), rgba(236,72,153,0.15))', border: '1px solid rgba(255,149,0,0.25)' }}>
-                    <span className="text-orange-400">登录酷狗 SVIP</span>
-                  </button>
-                )}
               </div>
             </div>
 
@@ -3745,24 +3674,6 @@ const App: React.FC = () => {
                         </div>
                       )}
                     </div>
-                    {/* v3.8.6 酷狗源切换：未登录酷狗时点击切换会跳转到酷狗登录 */}
-                    <button
-                      onClick={() => {
-                        if (searchSource === 'netease') {
-                          if (!kugouUser) { loginKugou(); return; }
-                          setSearchSource('kugou');
-                          setSearchResults([]);
-                        } else {
-                          setSearchSource('netease');
-                          setSearchResults([]);
-                        }
-                      }}
-                      className={`px-3 py-2 rounded-full text-xs font-medium transition-all flex items-center gap-1.5 flex-shrink-0 ${searchSource === 'kugou' ? 'bg-gradient-to-r from-orange-400 to-pink-500 text-black' : 'bg-white/[0.06] text-white/60 hover:text-white/90'}`}
-                      title={searchSource === 'kugou' ? '当前：酷狗音源（点击切回网易云）' : (kugouUser ? '当前：网易云（点击切到酷狗）' : '点击登录酷狗 SVIP 后启用')}
-                    >
-                      <span>{searchSource === 'kugou' ? '🐶 酷狗' : '🎵 网易'}</span>
-                      {kugouUser?.isSvip && <span className="text-[9px] px-1 rounded bg-black/30">SVIP</span>}
-                    </button>
                     <button onClick={() => aiSearchMode ? aiNaturalSearch(searchQuery) : handleSearch()} disabled={searching || !searchQuery.trim()} className="px-6 py-3 rounded-full bg-gradient-to-r from-cyan-400 to-blue-500 text-black font-semibold text-sm hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all">{searching ? '搜索中' : (aiSearchMode ? 'AI 搜歌' : '搜索')}</button>
                   </div>
                   <div className="flex-1 overflow-y-auto">

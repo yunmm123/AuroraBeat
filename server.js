@@ -29,10 +29,6 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-// v3.8.6 酷狗音源（独立模块，不污染网易云逻辑）
-// kugou-bridge.js 内部管理酷狗独立的 cookie 文件和设备指纹
-const kugou = require('./kugou-bridge.js');
-
 const PORT = process.env.AURORA_PORT || 0; // 0 = 自动选端口
 const HOST = '127.0.0.1';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -327,70 +323,6 @@ const server = http.createServer(async (req, res) => {
       } catch (e) {
         sendJSON(res, { hots: [], error: String(e?.message || e) });
       }
-      return;
-    }
-
-    // ========== 酷狗音源（独立，不影响网易云）==========
-    // v3.8.6: 用户酷狗 SVIP 接入
-    // 所有酷狗路由都以 /api/kugou/ 前缀，与网易云 /api/ 路由完全分离
-    if (pn === '/api/kugou/search') {
-      try {
-        const kw = url.searchParams.get('keywords') || '';
-        const limit = parseInt(url.searchParams.get('limit') || '30');
-        const songs = await kugou.searchSongs(kw, limit);
-        sendJSON(res, { songs });
-      } catch (e) {
-        sendJSON(res, { songs: [], error: String(e?.message || e) });
-      }
-      return;
-    }
-
-    if (pn === '/api/kugou/song/url') {
-      const hash = url.searchParams.get('hash') || '';
-      const albumId = url.searchParams.get('album_id') || url.searchParams.get('albumId') || '0';
-      const audioId = url.searchParams.get('audio_id') || url.searchParams.get('audioId') || '0';
-      if (!hash) { sendJSON(res, { error: 'Missing hash', playable: false }, 400); return; }
-      try {
-        const info = await kugou.getSongUrl(hash, albumId, audioId);
-        sendJSON(res, info);
-      } catch (e) {
-        sendJSON(res, { error: String(e?.message || e), playable: false });
-      }
-      return;
-    }
-
-    if (pn === '/api/kugou/lyric') {
-      const hash = url.searchParams.get('hash') || '';
-      if (!hash) { sendJSON(res, { error: 'Missing hash', lyric: '' }, 400); return; }
-      try {
-        const { lyric } = await kugou.getLyrics(hash);
-        sendJSON(res, { lyric, yrc: '', tlyric: '' });
-      } catch (e) {
-        sendJSON(res, { lyric: '', error: String(e?.message || e) });
-      }
-      return;
-    }
-
-    if (pn === '/api/kugou/login/status') {
-      sendJSON(res, kugou.getLoginInfo());
-      return;
-    }
-
-    if (pn === '/api/kugou/login/cookie') {
-      const body = await readRequestBody(req);
-      const cookie = body.cookie || body.data || body.text || '';
-      if (typeof cookie !== 'string' || !cookie.includes('token=') || !cookie.includes('userid=')) {
-        sendJSON(res, { loggedIn: false, error: 'INVALID_COOKIE' }, 400);
-        return;
-      }
-      kugou.saveCookie(cookie);
-      sendJSON(res, { ...kugou.getLoginInfo(), saved: true });
-      return;
-    }
-
-    if (pn === '/api/kugou/logout') {
-      kugou.clearCookie();
-      sendJSON(res, { ok: true });
       return;
     }
 
