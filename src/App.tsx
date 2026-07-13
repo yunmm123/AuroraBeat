@@ -1287,10 +1287,20 @@ const App: React.FC = () => {
   // 媒体键
   useEffect(() => {
     if (!electron) return;
-    const u1 = electron.onPlaybackToggle(() => player.togglePlay());
-    const u2 = electron.onPlaybackNext(() => player.next());
-    const u3 = electron.onPlaybackPrev(() => player.prev());
-    return () => { u1?.(); u2?.(); u3?.(); };
+    const u1 = electron.onPlaybackToggle(() => playerRef.current.togglePlay());
+    const u2 = electron.onPlaybackNext(() => playerRef.current.next());
+    const u3 = electron.onPlaybackPrev(() => playerRef.current.prev());
+    // v3.8.6: 桌面歌词窗口就绪后，立即推送一次当前歌词，避免启动早期更新丢失
+    const u4 = electron.onDesktopLyricsReady?.(() => {
+      const p = playerRef.current;
+      let idx = -1;
+      for (let i = 0; i < p.lyrics.length; i++) {
+        if (p.currentTime >= p.lyrics[i].time - 0.3) idx = i; else break;
+      }
+      const line = idx >= 0 ? p.lyrics[idx] : null;
+      electron.updateDesktopLyrics?.(line?.text || '', line?.translation || '', p.isPlaying);
+    });
+    return () => { u1?.(); u2?.(); u3?.(); u4?.(); };
   }, []);
 
   // 手势提示气泡
@@ -1783,20 +1793,26 @@ const App: React.FC = () => {
   // ============ v3.8.6 新增功能函数 ============
 
   // 沉浸模式：开启时隐藏所有 UI，鼠标移动临时浮出
+  // v3.8.6 修复：当工具菜单/FX 面板/各类弹窗打开时，保持 UI 可见，避免 pointer-events-none 导致无法点击
   useEffect(() => {
     if (!immersiveMode) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const onMove = () => {
       setImmersiveHover(true);
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => setImmersiveHover(false), 2500);
+      // 若有浮层打开，延长超时到 8 秒，给用户充足操作时间
+      const hasOverlay = showToolsMenu || showFx || showEqPanel || showStatsPanel || showSimilarPanel || showMoodDiary || showShareCard || showShortcutsPanel || showAiKeyPanel || lyricsInterpretation;
+      timer = setTimeout(() => setImmersiveHover(false), hasOverlay ? 8000 : 2500);
     };
     window.addEventListener('mousemove', onMove);
+    // 进入沉浸模式立即浮出一次，让用户看到控件
+    setImmersiveHover(true);
+    timer = setTimeout(() => setImmersiveHover(false), 3000);
     return () => {
       window.removeEventListener('mousemove', onMove);
       if (timer) clearTimeout(timer);
     };
-  }, [immersiveMode]);
+  }, [immersiveMode, showToolsMenu, showFx, showEqPanel, showStatsPanel, showSimilarPanel, showMoodDiary, showShareCard, showShortcutsPanel, showAiKeyPanel, lyricsInterpretation]);
 
   // EQ 均衡器：5 段 BiquadFilter 链路（60Hz / 250Hz / 1kHz / 4kHz / 12kHz）
   const eqFiltersRef = useRef<BiquadFilterNode[]>([]);
@@ -1810,35 +1826,48 @@ const App: React.FC = () => {
   }, []);
 
   // v3.8.6: EQ 滤波器就绪后填充 ref 并应用当前 bands
+  // 注意：依赖只留 [eqBands, applyEqBands]，player 用 playerRef 读取，避免 player 每次渲染变化导致轮询重启
   useEffect(() => {
+    let cancelled = false;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let outerTimer: ReturnType<typeof setTimeout> | null = null;
     let tries = 0;
     const tryGet = () => {
-      const filters = player.getEqFilters?.();
+      if (cancelled) return true;
+      const filters = playerRef.current.getEqFilters?.();
       if (filters && filters.length === 5) {
         eqFiltersRef.current = filters;
         applyEqBands(eqBands);
         return true;
       }
-      if (++tries < 20) setTimeout(tryGet, 300);
+      if (++tries < 20) {
+        pendingTimer = setTimeout(tryGet, 300);
+      }
       return false;
     };
     if (!tryGet()) {
-      const t = setTimeout(tryGet, 600);
-      return () => clearTimeout(t);
+      outerTimer = setTimeout(tryGet, 600);
     }
-  }, [player, eqBands, applyEqBands]);
+    return () => {
+      cancelled = true;
+      if (pendingTimer) clearTimeout(pendingTimer);
+      if (outerTimer) clearTimeout(outerTimer);
+    };
+  }, [eqBands, applyEqBands]);
 
   // v3.8.6: EQ bands 变化时实时应用
   useEffect(() => {
     applyEqBands(eqBands);
   }, [eqBands, applyEqBands]);
 
-  // v3.8.6: 空间音效开关
+  // v3.8.6: 空间音效开关（依赖只留 [spatialAudio]，player 用 playerRef）
   useEffect(() => {
-    player.setSpatialAudio?.(spatialAudio);
-  }, [spatialAudio, player]);
+    playerRef.current.setSpatialAudio?.(spatialAudio);
+  }, [spatialAudio]);
 
   // v3.8.6: 全局音频反应环境——读取 analyser 振幅写入 CSS 变量 --audio-energy
+  // 关键：依赖只留 [audioReactiveBg]，player 用 playerRef，否则 player 每次渲染变化
+  // 会导致 RAF 循环不断重建 + cleanup 把 --audio-energy 清零，平滑逻辑失效
   useEffect(() => {
     if (!audioReactiveBg) {
       document.documentElement.style.setProperty('--audio-energy', '0');
@@ -1846,9 +1875,10 @@ const App: React.FC = () => {
     }
     let raf = 0;
     const buf = new Uint8Array(256);
+    let smoothed = 0; // 局部累积，避免依赖 DOM 读取
     const tick = () => {
       raf = requestAnimationFrame(tick);
-      const analyser = player.getAnalyser?.();
+      const analyser = playerRef.current.getAnalyser?.();
       if (!analyser) return;
       const n = Math.min(buf.length, analyser.frequencyBinCount);
       analyser.getByteFrequencyData(buf.subarray(0, n) as any);
@@ -1856,16 +1886,15 @@ const App: React.FC = () => {
       for (let i = 0; i < n; i++) sum += buf[i];
       const avg = sum / n / 255; // 0-1
       // 平滑（保留 70% 上一帧）
-      const prev = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--audio-energy') || '0') || 0;
-      const next = prev * 0.7 + avg * 0.3;
-      document.documentElement.style.setProperty('--audio-energy', next.toFixed(3));
+      smoothed = smoothed * 0.7 + avg * 0.3;
+      document.documentElement.style.setProperty('--audio-energy', smoothed.toFixed(3));
     };
     tick();
     return () => {
       cancelAnimationFrame(raf);
       document.documentElement.style.setProperty('--audio-energy', '0');
     };
-  }, [audioReactiveBg, player]);
+  }, [audioReactiveBg]);
 
   // 听歌统计：每 5 秒累积一次播放时间
   useEffect(() => {
@@ -1997,10 +2026,12 @@ const App: React.FC = () => {
   }, [appreciateMode, aiReady, ai, player.currentSong]);
 
   // 高潮段落识别：根据节拍密度判断高潮段
+  // 关键：依赖只留 [player.isPlaying]，player 用 playerRef，否则 player 每次渲染变化
+  // 会导致 onBeat 订阅不断重置 + decay setInterval 不断清除重建，decay 永不触发
   useEffect(() => {
     if (!player.isPlaying) { setClimaxGlow(0); return; }
-    const offBeat = player.onBeat(() => {
-      const bpm = player.getBpm() || 0;
+    const offBeat = playerRef.current.onBeat(() => {
+      const bpm = playerRef.current.getBpm() || 0;
       // BPM > 100 且正在播放时增加高潮值，否则衰减
       if (bpm > 100) setClimaxGlow(v => Math.min(1, v + 0.05));
       else setClimaxGlow(v => Math.max(0, v - 0.02));
@@ -2009,7 +2040,7 @@ const App: React.FC = () => {
       setClimaxGlow(v => Math.max(0, v - 0.01));
     }, 1000);
     return () => { offBeat?.(); clearInterval(decay); };
-  }, [player.isPlaying, player]);
+  }, [player.isPlaying]);
 
   // v3.8.6 鼠标交互粒子涟漪：点击页面产生扩散粒子环
   useEffect(() => {
@@ -2079,6 +2110,7 @@ const App: React.FC = () => {
   }, [player.currentSong?.id]);
 
   // 键盘快捷键（沉浸式控制）— v3.6.0 B1: 支持自定义快捷键
+  // v3.8.6: 依赖用 playerRef 读取 player，避免 player 每次渲染变化导致监听器增删
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -2086,11 +2118,13 @@ const App: React.FC = () => {
       // v3.6.0 B1: 当用户正在录制新快捷键时禁用快捷键触发
       if (recordingShortcut) return;
 
-      const sc = player.shortcuts;
+      const p = playerRef.current;
+      const sc = p.shortcuts;
       const code = e.code;
       // v3.8.6: F 键沉浸模式（独立于快捷键系统）
       if (code === 'KeyF') {
         setImmersiveMode(v => !v);
+        showGestureHint('沉浸模式已切换，再按 F 退出');
         return;
       }
       // 找到对应动作
@@ -2103,37 +2137,37 @@ const App: React.FC = () => {
       e.preventDefault();
       switch (action) {
         case 'play/pause':
-          player.togglePlay(); showGestureHint('播放 / 暂停'); break;
+          p.togglePlay(); showGestureHint('播放 / 暂停'); break;
         case 'next':
-          player.next(); showGestureHint('下一首'); break;
+          p.next(); showGestureHint('下一首'); break;
         case 'prev':
-          player.prev(); showGestureHint('上一首'); break;
+          p.prev(); showGestureHint('上一首'); break;
         case 'volume-up': {
-          const v = Math.min(1, player.volume + 0.05);
-          player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); break;
+          const v = Math.min(1, p.volume + 0.05);
+          p.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); break;
         }
         case 'volume-down': {
-          const v = Math.max(0, player.volume - 0.05);
-          player.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); break;
+          const v = Math.max(0, p.volume - 0.05);
+          p.setVolume(v); showGestureHint(`音量 ${Math.round(v * 100)}%`); break;
         }
         case 'mute':
-          player.setVolume(player.volume > 0 ? 0 : 0.8);
-          showGestureHint(player.volume > 0 ? '静音' : '取消静音'); break;
+          p.setVolume(p.volume > 0 ? 0 : 0.8);
+          showGestureHint(p.volume > 0 ? '静音' : '取消静音'); break;
         case 'like':
-          if (player.currentSong) {
-            handleLike(player.currentSong);
+          if (p.currentSong) {
+            handleLike(p.currentSong);
             showGestureHint('红心');
           }
           break;
         case 'toggle-lyrics':
-          player.toggleLyrics(); showGestureHint(player.showLyrics ? '显示歌词' : '隐藏歌词'); break;
+          p.toggleLyrics(); showGestureHint(p.showLyrics ? '显示歌词' : '隐藏歌词'); break;
         case 'toggle-queue':
           setShowQueue(v => !v); showGestureHint(showQueue ? '隐藏队列' : '显示队列'); break;
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [player, showGestureHint, handleLike, showQueue, recordingShortcut]);
+  }, [showGestureHint, handleLike, showQueue, recordingShortcut]);
 
   const formatTime = (s: number) => {
     if (!isFinite(s) || s < 0) return '0:00';
@@ -2823,10 +2857,16 @@ const App: React.FC = () => {
                   grad.addColorStop(1, moodColors.secondary + '55');
                   ctx.fillStyle = grad; ctx.fillRect(0, 0, 360, 360);
                   if (player.currentSong?.cover) {
+                    // v3.8.6 修复：必须走 /api/cover 代理，否则网易云 CDN 不返回 CORS 头，
+                    // crossOrigin='anonymous' 会导致加载失败 + canvas 污染 + toDataURL 抛 SecurityError
+                    const coverUrl = `${apiBase}/api/cover?url=${encodeURIComponent(player.currentSong.cover)}`;
                     const img = new Image(); img.crossOrigin = 'anonymous';
-                    img.src = player.currentSong.cover;
+                    img.src = coverUrl;
                     await new Promise(r => { img.onload = r; img.onerror = r; });
-                    ctx.globalAlpha = 0.6; ctx.drawImage(img, 0, 0, 360, 360); ctx.globalAlpha = 1;
+                    // 仅在图片真正加载成功后绘制，避免 InvalidStateError
+                    if (img.complete && img.naturalWidth > 0) {
+                      ctx.globalAlpha = 0.6; ctx.drawImage(img, 0, 0, 360, 360); ctx.globalAlpha = 1;
+                    }
                   }
                   ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(0, 240, 360, 120);
                   ctx.fillStyle = '#fff'; ctx.font = 'bold 20px sans-serif';
@@ -2835,10 +2875,14 @@ const App: React.FC = () => {
                   ctx.fillText(player.currentSong?.artist || '', 20, 300);
                   ctx.fillStyle = '#00f5d4'; ctx.font = '10px monospace';
                   ctx.fillText('AuroraBeat', 20, 330);
-                  const link = document.createElement('a');
-                  link.download = `${player.currentSong?.title}-share.png`;
-                  link.href = canvas.toDataURL(); link.click();
-                  showGestureHint('已保存到下载');
+                  try {
+                    const link = document.createElement('a');
+                    link.download = `${player.currentSong?.title}-share.png`;
+                    link.href = canvas.toDataURL('image/png'); link.click();
+                    showGestureHint('已保存到下载');
+                  } catch (err) {
+                    showGestureHint('生成图片失败，请重试');
+                  }
                 }}
                 className="flex-1 py-2 rounded-lg bg-[#00f5d4]/15 text-[#00f5d4] text-xs font-semibold hover:bg-[#00f5d4]/25"
               >下载图片</button>
@@ -3570,7 +3614,7 @@ const App: React.FC = () => {
 
       {/* 顶部栏打开音乐库按钮（overlay收起时显示） */}
       {!showOverlay && (
-        <button onClick={() => setShowOverlay(true)} className="absolute top-9 left-4 z-50 glass-btn h-[30px] px-3 flex items-center gap-1.5 text-xs" style={{ WebkitAppRegion: 'no-drag' } as any} title="打开音乐库">
+        <button onClick={() => setShowOverlay(true)} className={`absolute top-9 left-4 z-50 glass-btn h-[30px] px-3 flex items-center gap-1.5 text-xs transition-opacity duration-500 ${immersiveMode && !immersiveHover ? 'opacity-0 pointer-events-none' : ''}`} style={{ WebkitAppRegion: 'no-drag' } as any} title="打开音乐库">
           <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
           <span>音乐库</span>
         </button>
