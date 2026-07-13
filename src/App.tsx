@@ -80,12 +80,16 @@ function useVisualEngine(
   player: any,
   intensity: number,
   enabled: boolean,
+  moodColors: { primary: string; secondary: string; bg: string },
 ) {
   const engineRef = useRef<any>(null);
   // v3.8.6 修复：避免 effect 闭包里 player.isPlaying 永远是首屏值（stale closure）
   // player 每次 render 都是新对象，但 playerRef.current 始终指向最新
   const playerRef = useRef(player);
   playerRef.current = player;
+  // v3.8.6 极光天空：颜色 uniform 跟随 moodColors 变化，不重建 effect
+  const moodColorsRef = useRef(moodColors);
+  moodColorsRef.current = moodColors;
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -223,6 +227,33 @@ function useVisualEngine(
 
         // 深色底（封面最暗阴影色 uShadow，带之间透出，不铺满）
         vec3 col = uShadow;
+
+        // === v3.8.6 封面色极光天空 ===
+        // 多层流动极光带，用 fbm 调制位置/亮度，跟随节拍呼吸；封面色 tint/accent 驱动
+        // 垂直分布：底部密集亮 → 顶部稀疏暗（像真实极光从地平线升起）
+        float auroraT = uTime * 0.06;
+        // 水平扭曲：fbm 驱动采样位置偏移，形成流动的波浪边界
+        vec2 auroraUV = uv;
+        auroraUV.x += (fbm(uv * 1.8 + vec2(auroraT, 0.0)) - 0.5) * 0.25;
+        // 底部权重：y 越低极光越强
+        float yWeight = smoothstep(0.85, 0.15, uv.y);
+        // 极光带 1（主带，中低高度，tint 色）
+        float band1Mask = smoothstep(0.55, 0.45, auroraUV.y) * smoothstep(0.05, 0.25, auroraUV.y);
+        float band1Noise = fbm(vec2(auroraUV.x * 2.5 + auroraT * 1.5, auroraUV.y * 6.0 + auroraT));
+        band1Mask *= pow(band1Noise, 1.5);
+        band1Mask *= yWeight;
+        band1Mask *= (0.5 + uEnergy * 0.5);   // 节拍呼吸
+        // 极光带 2（副带，更高更细，accent 色，跟随 bass 脉冲）
+        float band2Mask = smoothstep(0.70, 0.60, auroraUV.y) * smoothstep(0.20, 0.40, auroraUV.y);
+        float band2Noise = fbm(vec2(auroraUV.x * 3.5 - auroraT * 1.2, auroraUV.y * 9.0 - auroraT * 0.5));
+        band2Mask *= pow(band2Noise, 2.0);
+        band2Mask *= yWeight;
+        band2Mask *= (0.3 + uBass * 0.7);     // bass 驱动
+        // 极光色：底部 tint → 高处 accent 渐变，亮度由噪声调制
+        vec3 auroraCol = mix(uTint, uAccent, smoothstep(0.3, 0.7, uv.y));
+        col += auroraCol * (band1Mask * 0.18 + band2Mask * 0.12);
+        // 极光底部辉光（从地平线升起的柔光）
+        col += auroraCol * smoothstep(0.3, 0.0, uv.y) * 0.05 * (0.5 + uEnergy * 0.5);
 
         // === 远景星尘（网格 hash 生成，~144 颗静态闪烁，纵深背景不抢戏）===
         // 每格一颗星，hash 决定位置/亮度/闪烁相位；极小极暗铺满背景增加纵深
@@ -825,6 +856,20 @@ function useVisualEngine(
         renderMode: 'single-flow',
         uAlpha: uniforms.uAlpha.value,
       };
+      // v3.8.6 极光天空：颜色 uniform 跟随 moodColors 变化（不重建 effect，每帧 lerp 平滑过渡）
+      // 从 moodColors.primary/secondary/bg 派生 6 色调色板（亮度分层）
+      const mc = moodColorsRef.current;
+      const tmpP = new THREE.Color(mc.primary);
+      const tmpS = new THREE.Color(mc.secondary);
+      const tmpBg = new THREE.Color(mc.bg);
+      // lerp 系数 0.06：约 2 秒过渡到新色（切歌时颜色渐变，不突兀）
+      shadowColor.lerp(tmpBg, 0.06);
+      midDarkColor.lerp(tmpBg.clone().lerp(tmpP, 0.3), 0.06);
+      tintColor.lerp(tmpP, 0.06);
+      accentColor.lerp(tmpS, 0.06);
+      midLightColor.lerp(tmpP.clone().lerp(tmpS, 0.5).lerp(new THREE.Color('#ffffff'), 0.2), 0.06);
+      highlightColor.lerp(tmpS.clone().lerp(new THREE.Color('#ffffff'), 0.4), 0.06);
+
       // 同步 CSS 变量驱动沉浸式歌词（beat 脉冲 + 封面色辉光）— 用平滑 env（节拍包络）
       const rootStyle = document.documentElement.style;
       rootStyle.setProperty('--beat-pulse', String(env));
@@ -1153,7 +1198,7 @@ const App: React.FC = () => {
 
   // 媒体上传时关闭全部特效
   const visualEnabled = !customBg && !customVideo;
-  useVisualEngine(canvasRef, player, intensity, visualEnabled);
+  useVisualEngine(canvasRef, player, intensity, visualEnabled, moodColors);
   useSpectrum(spectrumCanvasRef, visualMode);   // v3.1.5: 底部播放栏上方频谱（v3.8.6: 支持流体波浪模式）
 
   // v3.8.5 旋转封面：底部播放栏封面随节拍呼吸 + BPM 自转
@@ -1974,59 +2019,49 @@ const App: React.FC = () => {
     return () => { cancelled = true; };
   }, [appreciateMode, aiReady, ai, player.currentSong, showGestureHint]);
 
-  // 高潮段落识别：综合频谱能量 + BPM 判断
-  // v3.8.6 修复：原实现 BPM>100 就持续累积，整首歌都判定为高潮
-  // 改为：实时频谱能量必须超过动态基线（最近 N 秒平均）才算"能量飙升"，
-  // 且只在飙升时累积 climaxGlow，其他时间快速衰减
-  // 关键：依赖只留 [player.isPlaying]，player 用 playerRef
+  // 高潮段落识别：全频段能量动态基线检测
+  // v3.8.6 重写：原实现依赖 BPM>90 + onBeat 累积，慢歌永不触发，且累积速度被衰减抵消
+  // 新方案：全频段能量 vs 10 秒滑动窗口基线，持续超阈值 → 高潮；不依赖 BPM/onBeat
   useEffect(() => {
     if (!player.isPlaying) { setClimaxGlow(0); return; }
-    // 动态能量基线：维护最近 8 秒（约 480 帧 @60fps）的能量滑动窗口
-    const WINDOW = 480;
+    const WINDOW = 600;  // 10 秒 @ 60fps
     const energyBuf: number[] = [];
     let energySum = 0;
-    // 频谱取样：用高频段平均值（高潮通常高频能量提升明显）
-    const SAMPLE_SIZE = 24;
     let rafId = 0;
-    let lastBeatEnergy = 0;
-    const offBeat = playerRef.current.onBeat(() => {
-      const bpm = playerRef.current.getBpm() || 0;
-      // BPM 需 > 90 才考虑（慢歌不触发）
-      if (bpm < 90) return;
-      // 当前能量必须 > 基线 × 1.4 才算"飙升"
-      const baseline = energyBuf.length > 30 ? (energySum / energyBuf.length) : 0;
-      if (lastBeatEnergy > baseline * 1.4 && lastBeatEnergy > 0.18) {
-        setClimaxGlow(v => Math.min(1, v + 0.08));
-      } else {
-        setClimaxGlow(v => Math.max(0, v - 0.02));
-      }
-    });
+    let lastUpdate = 0;
     const sampleLoop = () => {
       rafId = requestAnimationFrame(sampleLoop);
       const analyser = playerRef.current.getAnalyser();
       if (!analyser) return;
       const buf = new Uint8Array(analyser.frequencyBinCount);
       analyser.getByteFrequencyData(buf as any);
-      // 高频段平均能量（后半部分）
+      // 全频段平均能量（高潮时所有频段都提升，不只是高频）
       let sum = 0;
-      const start = Math.floor(buf.length * 0.4);
-      const end = Math.min(buf.length, start + SAMPLE_SIZE * 4);
-      for (let i = start; i < end; i++) sum += buf[i];
-      const energy = sum / (end - start) / 255;
-      lastBeatEnergy = energy;
-      // 加入滑动窗口
+      for (let i = 0; i < buf.length; i++) sum += buf[i];
+      const energy = sum / buf.length / 255;
+      // 更新滑动窗口
       energyBuf.push(energy);
       energySum += energy;
-      if (energyBuf.length > WINDOW) {
-        energySum -= energyBuf.shift()!;
+      if (energyBuf.length > WINDOW) energySum -= energyBuf.shift()!;
+      // 动态基线（前 1 秒用当前能量 * 0.7 作为基线，避免启动时误判）
+      const baseline = energyBuf.length > 60 ? (energySum / energyBuf.length) : energy * 0.7;
+      // 高潮判定：能量 > 基线 × 1.25 且绝对值 > 0.06（排除静音段）
+      const isClimax = energy > baseline * 1.25 && energy > 0.06;
+      // 每 150ms 更新一次 state（避免每帧 setState 导致 re-render）
+      const now = performance.now();
+      if (now - lastUpdate > 150) {
+        lastUpdate = now;
+        if (isClimax) {
+          // 高潮：向 1 快速逼近（约 1.5 秒到 0.9+）
+          setClimaxGlow(v => v + (1 - v) * 0.12);
+        } else {
+          // 非高潮：向 0 缓慢衰减（约 3 秒归零）
+          setClimaxGlow(v => v * 0.92);
+        }
       }
     };
     sampleLoop();
-    // 衰减：每 200ms 衰减一次，比之前快（原 1000ms -0.01）
-    const decay = setInterval(() => {
-      setClimaxGlow(v => Math.max(0, v - 0.025));
-    }, 200);
-    return () => { offBeat?.(); clearInterval(decay); cancelAnimationFrame(rafId); };
+    return () => { cancelAnimationFrame(rafId); };
   }, [player.isPlaying]);
 
   // v3.8.6 鼠标交互粒子涟漪：点击页面产生扩散粒子环
