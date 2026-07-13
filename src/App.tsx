@@ -1315,6 +1315,10 @@ const App: React.FC = () => {
 
   const handleSearch = useCallback(async () => {
     if (!searchQuery.trim() || !serverPort) return;
+    // v3.8.6 修复：回车搜索时隐藏"最近搜索/热歌榜"浮层，避免遮挡搜索结果
+    setSearchFocused(false);
+    // 让输入框失焦，避免浮层被聚焦状态重新触发
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     player.pushSearchHistory(searchQuery.trim());
     const seq = ++searchSeqRef.current;
     setSearching(true);
@@ -1477,6 +1481,9 @@ const App: React.FC = () => {
   const aiNaturalSearch = useCallback(async (query: string) => {
     if (!query.trim() || !serverPort) return;
     if (!aiReady) { openAiKeyPanel(); return; }
+    // v3.8.6 修复：回车搜索时隐藏"最近搜索/热歌榜"浮层
+    setSearchFocused(false);
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     const seq = ++searchSeqRef.current;
     setSearching(true);
     try {
@@ -2064,10 +2071,10 @@ const App: React.FC = () => {
     if (!player.currentSong) return;
     setShowShareCard(true);
     setShareCardCaption('');
-    // v3.8.6: AI 生成 50 字以内的音乐解读
+    // v3.8.6: 用专用 shareCardCaptionAI（独立 fetch，不走 lockRef 锁）
     if (aiReady) {
       try {
-        const caption = await ai.appreciateSong({ title: player.currentSong.title, artist: player.currentSong.artist, album: player.currentSong.album });
+        const caption = await ai.shareCardCaptionAI({ title: player.currentSong.title, artist: player.currentSong.artist, album: player.currentSong.album });
         // 截取前 50 字
         setShareCardCaption(caption.slice(0, 50));
       } catch {
@@ -2954,18 +2961,30 @@ const App: React.FC = () => {
                   // 歌手
                   ctx.font = '14px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
                   ctx.fillText(player.currentSong?.artist || '', 20, H - 105);
-                  // AI 音乐解读（50 字以内，3:4 比例下可显示完整）
+                  // AI 音乐解读（50 字以内，自动按宽度换行，确保完整显示）
                   if (shareCardCaption) {
-                    ctx.font = '12px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.85)';
-                    // 自动换行：每行约 22 个中文字符
-                    const lines: string[] = [];
-                    let remaining = shareCardCaption;
-                    while (remaining.length > 22) {
-                      lines.push(remaining.slice(0, 22));
-                      remaining = remaining.slice(22);
+                    ctx.font = '13px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.92)';
+                    // 使用 measureText 精确测量，按实际宽度自动换行
+                    const maxWidth = W - 40; // 左右各留 20px 边距
+                    let line = '';
+                    let lineY = H - 80;
+                    const lineHeight = 18;
+                    for (const ch of shareCardCaption) {
+                      const test = line + ch;
+                      if (ctx.measureText(test).width > maxWidth && line) {
+                        ctx.fillText(line, 20, lineY);
+                        line = ch;
+                        lineY += lineHeight;
+                        // 安全上限：最多 5 行
+                        if ((lineY - (H - 80)) / lineHeight >= 5) {
+                          line = '';
+                          break;
+                        }
+                      } else {
+                        line = test;
+                      }
                     }
-                    if (remaining) lines.push(remaining);
-                    lines.slice(0, 4).forEach((line, i) => ctx.fillText(line, 20, H - 75 + i * 16));
+                    if (line) ctx.fillText(line, 20, lineY);
                   }
                   ctx.fillStyle = '#00f5d4'; ctx.font = '10px monospace';
                   ctx.fillText('AuroraBeat', 20, H - 12);
@@ -3340,13 +3359,6 @@ const App: React.FC = () => {
                     >
                       <span>AI 心情日记</span>
                       <span className="text-white/40">📔</span>
-                    </button>
-                    <button
-                      onClick={() => { setAppreciateMode(v => !v); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}
-                      className={`w-full px-4 py-2 text-left text-xs flex items-center justify-between ${appreciateMode ? 'text-[#00f5d4]' : 'text-white/70'} hover:text-white hover:bg-white/05`}
-                    >
-                      <span>AI 歌曲鉴赏</span>
-                      <span className="text-white/40">{appreciateMode ? '开' : '关'}</span>
                     </button>
                     <button
                       onClick={() => { generateShareCard(); setShowToolsMenu(false); setShowLyricOffsetTip(false); }}

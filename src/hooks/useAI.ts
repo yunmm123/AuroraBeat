@@ -195,13 +195,60 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
   }, [chat]);
 
   // A10 AI 歌曲鉴赏陪听：像音乐老师在旁陪听一样给出解说词（200 字以内）
+  // v3.8.6: 改为独立 fetch，不走 lockRef 锁，避免被其他 AI 调用阻塞
   const appreciateSong = useCallback(async (song: { title: string; artist: string; album?: string }) => {
+    if (!apiKey) throw new Error('NO_API_KEY');
+    if (!apiBase) throw new Error('NO_SERVER');
+    if (!aiBaseUrl) throw new Error('NO_BASE_URL');
+    if (!aiModel) throw new Error('NO_MODEL');
     const msg: AIMessage[] = [
       { role: 'system', content: '你是音乐鉴赏老师，用户正在听一首歌，请像陪听一样给出解说词。包括：这首歌的风格特点、编曲亮点、歌手演绎特色、值得注意的段落。像朋友在旁边轻声解说，不要用 markdown 标题或列表符号，用段落分隔。200字以内。' },
       { role: 'user', content: `请为歌曲《${song.title}》- ${song.artist}${song.album ? `（专辑《${song.album}》）` : ''}给出陪听解说词。` },
     ];
-    return chat(msg, { maxTokens: 400, temperature: 0.8 });
-  }, [chat]);
+    const res = await fetch(`${apiBase}/api/ai/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey,
+        baseUrl: aiBaseUrl,
+        model: aiModel,
+        messages: msg,
+        maxTokens: 400,
+        temperature: 0.8,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return (data.content || '').trim();
+  }, [apiKey, apiBase, aiBaseUrl, aiModel]);
+
+  // v3.8.6: 分享卡片专用音乐解读（30-50 字，简短一行点评）
+  // 独立实现，不走 lockRef 锁，避免和鉴赏模式冲突
+  const shareCardCaptionAI = useCallback(async (song: { title: string; artist: string; album?: string }) => {
+    if (!apiKey) throw new Error('NO_API_KEY');
+    if (!apiBase) throw new Error('NO_SERVER');
+    if (!aiBaseUrl) throw new Error('NO_BASE_URL');
+    if (!aiModel) throw new Error('NO_MODEL');
+    const msg: AIMessage[] = [
+      { role: 'system', content: '你是音乐评论家。请用一句话（30-50 字以内）点评这首歌的音乐特色、情感或亮点，纯文字不带任何符号格式，适合分享卡片显示。' },
+      { role: 'user', content: `请为歌曲《${song.title}》- ${song.artist}给出 30-50 字的简短点评。` },
+    ];
+    const res = await fetch(`${apiBase}/api/ai/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiKey,
+        baseUrl: aiBaseUrl,
+        model: aiModel,
+        messages: msg,
+        maxTokens: 100,
+        temperature: 0.8,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    return (data.content || data.message || '').trim();
+  }, [apiKey, apiBase, aiBaseUrl, aiModel]);
 
   return {
     loading,
@@ -221,5 +268,7 @@ export function useAI(apiBase: string, apiKey: string, aiBaseUrl: string, aiMode
     continuePlaylist,
     analyzeMoodDiary,
     appreciateSong,
+    // v3.8.6 分享卡片专用
+    shareCardCaptionAI,
   };
 }
