@@ -80,16 +80,12 @@ function useVisualEngine(
   player: any,
   intensity: number,
   enabled: boolean,
-  moodColors: { primary: string; secondary: string; bg: string },
 ) {
   const engineRef = useRef<any>(null);
   // v3.8.6 修复：避免 effect 闭包里 player.isPlaying 永远是首屏值（stale closure）
   // player 每次 render 都是新对象，但 playerRef.current 始终指向最新
   const playerRef = useRef(player);
   playerRef.current = player;
-  // v3.8.6 极光天空：颜色 uniform 跟随 moodColors 变化，不重建 effect
-  const moodColorsRef = useRef(moodColors);
-  moodColorsRef.current = moodColors;
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -230,30 +226,33 @@ function useVisualEngine(
 
         // === v3.8.6 封面色极光天空 ===
         // 多层流动极光带，用 fbm 调制位置/亮度，跟随节拍呼吸；封面色 tint/accent 驱动
-        // 垂直分布：底部密集亮 → 顶部稀疏暗（像真实极光从地平线升起）
+        // v3.8.6 调优：原版本系数太弱几乎看不到，现提升亮度 + 扩大覆盖范围 + 用高亮色增强可见性
         float auroraT = uTime * 0.06;
         // 水平扭曲：fbm 驱动采样位置偏移，形成流动的波浪边界
         vec2 auroraUV = uv;
-        auroraUV.x += (fbm(uv * 1.8 + vec2(auroraT, 0.0)) - 0.5) * 0.25;
-        // 底部权重：y 越低极光越强
-        float yWeight = smoothstep(0.85, 0.15, uv.y);
+        auroraUV.x += (fbm(uv * 1.8 + vec2(auroraT, 0.0)) - 0.5) * 0.30;
+        // 底部权重：y 越低极光越强（极光从地平线升起）
+        float yWeight = smoothstep(0.92, 0.10, uv.y);
         // 极光带 1（主带，中低高度，tint 色）
-        float band1Mask = smoothstep(0.55, 0.45, auroraUV.y) * smoothstep(0.05, 0.25, auroraUV.y);
-        float band1Noise = fbm(vec2(auroraUV.x * 2.5 + auroraT * 1.5, auroraUV.y * 6.0 + auroraT));
-        band1Mask *= pow(band1Noise, 1.5);
+        // band1 高度范围扩大到 0.05~0.55，覆盖更多画面；noise 指数 1.2 不太暗
+        float band1Mask = smoothstep(0.55, 0.45, auroraUV.y) * smoothstep(0.02, 0.20, auroraUV.y);
+        float band1Noise = fbm(vec2(auroraUV.x * 2.2 + auroraT * 1.5, auroraUV.y * 5.0 + auroraT));
+        band1Mask *= pow(max(band1Noise, 0.0), 1.2);
         band1Mask *= yWeight;
-        band1Mask *= (0.5 + uEnergy * 0.5);   // 节拍呼吸
+        band1Mask *= (0.6 + uEnergy * 0.6);   // 节拍呼吸（基线 0.6 保证静止也可见）
         // 极光带 2（副带，更高更细，accent 色，跟随 bass 脉冲）
-        float band2Mask = smoothstep(0.70, 0.60, auroraUV.y) * smoothstep(0.20, 0.40, auroraUV.y);
-        float band2Noise = fbm(vec2(auroraUV.x * 3.5 - auroraT * 1.2, auroraUV.y * 9.0 - auroraT * 0.5));
-        band2Mask *= pow(band2Noise, 2.0);
+        float band2Mask = smoothstep(0.72, 0.62, auroraUV.y) * smoothstep(0.15, 0.38, auroraUV.y);
+        float band2Noise = fbm(vec2(auroraUV.x * 3.2 - auroraT * 1.2, auroraUV.y * 8.0 - auroraT * 0.5));
+        band2Mask *= pow(max(band2Noise, 0.0), 1.5);
         band2Mask *= yWeight;
-        band2Mask *= (0.3 + uBass * 0.7);     // bass 驱动
-        // 极光色：底部 tint → 高处 accent 渐变，亮度由噪声调制
+        band2Mask *= (0.4 + uBass * 0.8);     // bass 驱动
+        // 极光色：底部 tint → 高处 accent 渐变；混入 highlight 提亮（封面提取的最亮色）
         vec3 auroraCol = mix(uTint, uAccent, smoothstep(0.3, 0.7, uv.y));
-        col += auroraCol * (band1Mask * 0.18 + band2Mask * 0.12);
-        // 极光底部辉光（从地平线升起的柔光）
-        col += auroraCol * smoothstep(0.3, 0.0, uv.y) * 0.05 * (0.5 + uEnergy * 0.5);
+        vec3 auroraBright = mix(auroraCol, uHighlight, 0.35);   // 加 highlight 提亮可见性
+        // 系数 0.35/0.25（原 0.18/0.12 太弱），加底部辉光 0.12
+        col += auroraBright * (band1Mask * 0.35 + band2Mask * 0.25);
+        // 极光底部辉光（从地平线升起的柔光，扩大范围 + 提亮）
+        col += auroraBright * smoothstep(0.40, 0.0, uv.y) * 0.12 * (0.5 + uEnergy * 0.5);
 
         // === 远景星尘（网格 hash 生成，~144 颗静态闪烁，纵深背景不抢戏）===
         // 每格一颗星，hash 决定位置/亮度/闪烁相位；极小极暗铺满背景增加纵深
@@ -856,19 +855,8 @@ function useVisualEngine(
         renderMode: 'single-flow',
         uAlpha: uniforms.uAlpha.value,
       };
-      // v3.8.6 极光天空：颜色 uniform 跟随 moodColors 变化（不重建 effect，每帧 lerp 平滑过渡）
-      // 从 moodColors.primary/secondary/bg 派生 6 色调色板（亮度分层）
-      const mc = moodColorsRef.current;
-      const tmpP = new THREE.Color(mc.primary);
-      const tmpS = new THREE.Color(mc.secondary);
-      const tmpBg = new THREE.Color(mc.bg);
-      // lerp 系数 0.06：约 2 秒过渡到新色（切歌时颜色渐变，不突兀）
-      shadowColor.lerp(tmpBg, 0.06);
-      midDarkColor.lerp(tmpBg.clone().lerp(tmpP, 0.3), 0.06);
-      tintColor.lerp(tmpP, 0.06);
-      accentColor.lerp(tmpS, 0.06);
-      midLightColor.lerp(tmpP.clone().lerp(tmpS, 0.5).lerp(new THREE.Color('#ffffff'), 0.2), 0.06);
-      highlightColor.lerp(tmpS.clone().lerp(new THREE.Color('#ffffff'), 0.4), 0.06);
+      // v3.8.6 极光天空：颜色由 updateCover() 从封面提取 6 色后 gsap 过渡到 uniforms
+      // 这里不再额外 lerp（否则会覆盖封面色提取结果）
 
       // 同步 CSS 变量驱动沉浸式歌词（beat 脉冲 + 封面色辉光）— 用平滑 env（节拍包络）
       const rootStyle = document.documentElement.style;
@@ -1198,7 +1186,7 @@ const App: React.FC = () => {
 
   // 媒体上传时关闭全部特效
   const visualEnabled = !customBg && !customVideo;
-  useVisualEngine(canvasRef, player, intensity, visualEnabled, moodColors);
+  useVisualEngine(canvasRef, player, intensity, visualEnabled);
   useSpectrum(spectrumCanvasRef, visualMode);   // v3.1.5: 底部播放栏上方频谱（v3.8.6: 支持流体波浪模式）
 
   // v3.8.5 旋转封面：底部播放栏封面随节拍呼吸 + BPM 自转
