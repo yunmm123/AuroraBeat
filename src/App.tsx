@@ -1103,6 +1103,8 @@ const App: React.FC = () => {
   const [aiPhotoMoodData, setAiPhotoMoodData] = useState<string>('');       // C3 上传的照片
   const [aiPhotoMoodRunning, setAiPhotoMoodRunning] = useState(false);
   const [showFx, setShowFx] = useState(false);
+  // v3.8.5 旋转封面圆盘：居中悬浮的封面，缓慢自转 + 节拍呼吸
+  const [coverDiscEnabled, setCoverDiscEnabled] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -1142,6 +1144,89 @@ const App: React.FC = () => {
   const visualEnabled = !customBg && !customVideo;
   useVisualEngine(canvasRef, player, intensity, visualEnabled);
   useSpectrum(spectrumCanvasRef);   // v3.1.5: 底部播放栏上方频谱
+
+  // v3.8.5 旋转封面圆盘：RAF 累积旋转 + onBeat 节拍呼吸
+  // 设计要点：旋转速度跟随 BPM（一拍约转 30°，自然不眩晕），暂停时不转；
+  //          节拍触发 scale 1→1.06→1 缓动（300ms），低频 RMS 持续微呼吸（1.0-1.025）
+  const coverDiscRef = useRef<HTMLDivElement>(null);
+  const coverBeatPulseRef = useRef(0);
+  const coverRmsRef = useRef(0);
+  useEffect(() => {
+    if (!coverDiscEnabled) return;
+    let raf = 0;
+    let rotation = 0;
+    let lastT = performance.now();
+    let scale = 1;
+    let scaleTarget = 1;
+    let analyser: AnalyserNode | null = null;
+    let rmsBuf: Uint8Array | null = null;
+    const tryGetAnalyser = () => {
+      if (!analyser) {
+        const a = player.getAnalyser?.();
+        if (a) { analyser = a; rmsBuf = new Uint8Array(a.frequencyBinCount); }
+      }
+    };
+    tryGetAnalyser();
+    const t = setTimeout(tryGetAnalyser, 600);
+
+    // 节拍回调：注入脉冲（scale 缓动到 1.06 再回 1）
+    const offBeat = player.onBeat(() => {
+      coverBeatPulseRef.current = 1;
+      scaleTarget = 1.06;
+    });
+    player.setAnalyserReadyHandler?.(tryGetAnalyser);
+
+    const loop = () => {
+      const now = performance.now();
+      const dt = Math.min(0.05, (now - lastT) / 1000);
+      lastT = now;
+      const playing = player.isPlaying;
+      const bpm = player.getBpm?.() || 0;
+
+      // 旋转速度：BPM 适配，一拍转约 25-30°（避免眩晕），暂停时不转
+      // 默认无 BPM 时用 12°/s 缓慢兜底
+      let rotSpeed = 0.21; // rad/s ≈ 12°/s
+      if (bpm > 0) {
+        const beatInterval = 60 / bpm;
+        rotSpeed = (Math.PI / 6) / beatInterval; // 一拍 30°
+      }
+      if (playing) rotation += rotSpeed * dt;
+
+      // scale 缓动：节拍脉冲 + 低频 RMS 持续微呼吸
+      tryGetAnalyser();
+      let rms = 0;
+      if (analyser && rmsBuf && playing) {
+        analyser.getByteFrequencyData(rmsBuf as any);
+        let sum = 0;
+        const lowBins = Math.min(12, rmsBuf.length);
+        for (let i = 0; i < lowBins; i++) sum += rmsBuf[i];
+        rms = (sum / lowBins / 255) || 0;
+      }
+      coverRmsRef.current = coverRmsRef.current * 0.9 + rms * 0.1;
+      const rmsBreath = playing ? coverRmsRef.current * 0.025 : 0;
+
+      // 脉冲衰减（300ms 回到 1）
+      if (coverBeatPulseRef.current > 0) {
+        coverBeatPulseRef.current = Math.max(0, coverBeatPulseRef.current - dt / 0.3);
+        if (coverBeatPulseRef.current <= 0) scaleTarget = 1;
+      }
+      // 双目标融合：脉冲峰值 + RMS 呼吸
+      const finalTarget = 1 + Math.max((scaleTarget - 1) * coverBeatPulseRef.current, rmsBreath);
+      scale += (finalTarget - scale) * Math.min(1, dt * 12);
+
+      const el = coverDiscRef.current;
+      if (el) {
+        el.style.transform = `translate(-50%, -50%) rotate(${rotation}rad) scale(${scale.toFixed(4)})`;
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(t);
+      offBeat?.();
+    };
+  }, [coverDiscEnabled, player]);
 
   useEffect(() => {
     electron?.getServerPort?.().then((port: number) => {
@@ -1786,6 +1871,14 @@ const App: React.FC = () => {
       {/* 专辑模糊背景 */}
       {player.currentSong?.cover && !customBg && !customVideo && (
         <div className={`album-bg visible`} style={{ backgroundImage: `url(${player.currentSong.cover})` }} />
+      )}
+      {/* v3.8.5 旋转封面圆盘：居中悬浮，缓慢自转 + 节拍呼吸（FX 面板可开关） */}
+      {coverDiscEnabled && player.currentSong?.cover && !customBg && !customVideo && (
+        <div
+          ref={coverDiscRef}
+          className={`cover-disc visible ${player.isPlaying ? '' : 'paused'}`}
+          style={{ backgroundImage: `url(${player.currentSong.cover})`, width: 'min(42vh, 42vw)', height: 'min(42vh, 42vw)' }}
+        />
       )}
       {/* Three.js 视觉画布（接收鼠标交互：拖拽轨道 + 点击涟漪；UI 层 z-30+ 拦截控件） */}
       <canvas ref={canvasRef} className="absolute inset-0 z-10" />
@@ -2857,6 +2950,21 @@ const App: React.FC = () => {
               <input type="range" min="0.2" max="1.5" step="0.05" value={intensity} onChange={(e) => setIntensity(parseFloat(e.target.value))} className="flex-1" />
               <span className="text-[11px] text-white/40 w-8 text-right font-mono">{intensity.toFixed(2)}</span>
             </div>
+          </div>
+
+          {/* v3.8.5 旋转封面圆盘开关 */}
+          <div>
+            <div className="text-[10px] font-bold tracking-[0.1em] text-white/25 uppercase mb-2">旋转封面</div>
+            <button
+              onClick={() => setCoverDiscEnabled(!coverDiscEnabled)}
+              className={`w-full h-9 rounded-xl border text-xs transition-all flex items-center justify-between px-3 ${coverDiscEnabled ? 'border-[#00f5d4]/30 bg-[#00f5d4]/06 text-[#00f5d4]' : 'border-white/08 bg-white/[0.02] text-white/50 hover:bg-white/5'}`}
+            >
+              <span>{coverDiscEnabled ? '已开启' : '已关闭'}</span>
+              <span className={`w-9 h-5 rounded-full relative transition-all ${coverDiscEnabled ? 'bg-[#00f5d4]/40' : 'bg-white/10'}`}>
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${coverDiscEnabled ? 'left-4 bg-[#00f5d4]' : 'left-0.5 bg-white/60'}`} />
+              </span>
+            </button>
+            <div className="text-[10px] text-white/25 mt-1.5">封面居中悬浮，随节拍呼吸旋转</div>
           </div>
 
           {/* AI情绪 */}
