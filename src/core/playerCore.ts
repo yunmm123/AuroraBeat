@@ -591,6 +591,25 @@ class PlayerCore {
         console.error('[PlayerCore] resolveSongUrl error:', e);
       }
     }
+    // v3.8.6 酷狗歌曲：走酷狗独立路由 /api/kugou/song/url（带 SVIP cookie）
+    if (song.source === 'kugou' && this.serverPort && song.hash) {
+      try {
+        const params = new URLSearchParams({
+          hash: song.hash,
+          album_id: song.albumId || '0',
+          audio_id: song.audioId || '0',
+        });
+        const res = await fetch(`${this.apiBase}/api/kugou/song/url?${params}`);
+        const data = await res.json();
+        if (data.url) {
+          // 酷狗的 CDN 也有 CORS 限制，走本地代理
+          return `${this.apiBase}/api/audio?url=${encodeURIComponent(data.url)}`;
+        }
+        console.warn('[PlayerCore] No kugou URL for song', song.id, data);
+      } catch (e) {
+        console.error('[PlayerCore] resolveKugouUrl error:', e);
+      }
+    }
     return null;
   }
 
@@ -605,6 +624,11 @@ class PlayerCore {
         lrc = data.lyric || '';
         yrc = data.yrc || '';
         tlyric = data.tlyric || '';
+      } else if (song.source === 'kugou' && this.serverPort && song.hash) {
+        // v3.8.6 酷狗歌词：走独立路由 /api/kugou/lyric
+        const res = await fetch(`${this.apiBase}/api/kugou/lyric?hash=${song.hash}`);
+        const data = await res.json();
+        lrc = data.lyric || '';
       } else if (song.source === 'local') {
         const result = await (window as any).electronAPI?.searchLyrics?.(song.title || song.name || '', song.artist);
         lrc = result?.lyric || '';

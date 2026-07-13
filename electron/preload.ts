@@ -13,6 +13,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   neteaseOpenLogin: () => ipcRenderer.invoke('netease:openLogin'),
   neteaseClearLogin: () => ipcRenderer.invoke('netease:clearLogin'),
 
+  // v3.8.6 酷狗登录（独立，与网易云互不影响）
+  kugouOpenLogin: () => ipcRenderer.invoke('kugou:openLogin'),
+  kugouClearLogin: () => ipcRenderer.invoke('kugou:clearLogin'),
+
   // 本地文件
   selectLocalFiles: () => ipcRenderer.invoke('dialog:selectLocalFiles'),
   selectImageFile: () => ipcRenderer.invoke('dialog:selectImageFile'),

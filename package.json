@@ -53,10 +53,18 @@
     "files": [
       "dist",
       "dist-electron",
-      "server.js"
+      "server.js",
+      "kugou-bridge.js",
+      "kugou-api",
+      "kugou-api/node_modules",
+      "kugou-api/module",
+      "kugou-api/util"
     ],
     "extraResources": [
-      { "from": "public/icon.png", "to": "icon.png" }
+      { "from": "public/icon.png", "to": "icon.png" },
+      { "from": "kugou-api/node_modules", "to": "kugou-api/node_modules" },
+      { "from": "kugou-api/module", "to": "kugou-api/module" },
+      { "from": "kugou-api/util", "to": "kugou-api/util" }
     ],
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"

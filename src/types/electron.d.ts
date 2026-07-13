@@ -15,6 +15,10 @@ declare global {
       neteaseOpenLogin: () => Promise<{ ok: boolean; cookie?: string; reused?: boolean }>
       neteaseClearLogin: () => Promise<{ ok: boolean }>
 
+      // v3.8.6 酷狗登录（独立，与网易云互不影响）
+      kugouOpenLogin: () => Promise<{ ok: boolean; cookie?: string; reused?: boolean }>
+      kugouClearLogin: () => Promise<{ ok: boolean }>
+
       // 本地文件
       selectLocalFiles: () => Promise<any[]>
       selectImageFile: () => Promise<{ path: string }>
