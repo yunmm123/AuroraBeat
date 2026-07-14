@@ -24,8 +24,8 @@
 
   /* 玻璃效果 */
   --glass-bg: linear-gradient(112deg, rgba(72,74,76,.62), rgba(24,27,30,.70) 48%, rgba(8,12,14,.74));
-  --glass-border: rgba(0,245,212,.30);
-  --glass-shadow: 0 22px 64px rgba(0,0,0,.30), 0 0 34px rgba(0,245,212,.052), inset 0 1px 0 rgba(255,255,255,.16);
+  --glass-border: color-mix(in srgb, var(--cover-tint, #00f5d4) 30%, transparent);
+  --glass-shadow: 0 22px 64px rgba(0,0,0,.30), 0 0 34px color-mix(in srgb, var(--cover-tint, #00f5d4) 5%, transparent), inset 0 1px 0 rgba(255,255,255,.16);
 
   /* 控制条玻璃 */
   --control-glass-bg: rgba(0,0,0,.10);
@@ -126,7 +126,7 @@ html, body {
 }
 .play-btn:hover {
   transform: scale(1.06);
-  box-shadow: var(--control-glass-shadow), 0 0 24px rgba(0,245,212,.18);
+  box-shadow: var(--control-glass-shadow), 0 0 24px color-mix(in srgb, var(--cover-tint, #00f5d4) 18%, transparent);
 }
 .play-btn:active { transform: scale(0.95); }
 
@@ -149,13 +149,13 @@ html, body {
   color: #fff; transform: scale(1.04);
 }
 .control-btn.accent {
-  border-color: rgba(0,245,212,.22);
+  border-color: color-mix(in srgb, var(--cover-tint, #00f5d4) 22%, transparent);
   background: rgba(255,255,255,.04);
   color: rgba(232,236,239,.76);
 }
 .control-btn.accent:hover {
-  border-color: rgba(0,245,212,.44);
-  background: rgba(0,245,212,.06);
+  border-color: color-mix(in srgb, var(--cover-tint, #00f5d4) 44%, transparent);
+  background: color-mix(in srgb, var(--cover-tint, #00f5d4) 6%, transparent);
   color: #fff;
 }
 .control-btn.active {
@@ -413,6 +413,42 @@ html, body {
   user-select: none;
 }
 
+/* v3.8.7: 逐字流光扫过 — 在揭示前沿叠加一道高亮光带，跟随 word-progress 移动 */
+/* active 时显示，past 时扩散消失（字尾星屑效果） */
+.lyric-word::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  /* 扫光：从透明到高亮白再到透明，中心始终在 word-progress 揭示前沿 */
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    transparent calc(var(--word-progress, 0) * 100% - 14%),
+    color-mix(in srgb, #ffffff 60%, var(--cover-highlight, #ffffff) 40%) calc(var(--word-progress, 0) * 100%),
+    transparent calc(var(--word-progress, 0) * 100% + 14%),
+    transparent 100%
+  );
+  mix-blend-mode: screen;
+  opacity: 0;
+  transform: scale(1);
+  transition: opacity 280ms ease, transform 280ms ease;
+  z-index: 2;
+}
+/* 演唱中：扫光亮起，跟随揭示前沿移动 */
+.lyric-word[data-state="active"]::after {
+  opacity: 0.85;
+}
+/* 字唱完：扫光扩散消失，模拟星屑飞散 */
+.lyric-word[data-state="past"]::after {
+  opacity: 0;
+  transform: scale(1.4);
+  transition: opacity 420ms ease, transform 420ms ease;
+}
+
 /* 当前演唱字：轻微上浮 + scale 弹簧放大（v3.4.1: brightness 1.15→1.05 避免过亮） */
 .lyric-word[data-state="active"] {
   transform: translateY(-2px) scale(1.06);
@@ -462,8 +498,8 @@ html, body {
   transition: border-color 0.28s, box-shadow 0.28s, transform 0.28s;
 }
 .search-box:focus-within {
-  border-color: rgba(0,245,212,.44);
-  box-shadow: 0 24px 72px rgba(0,0,0,.34), 0 0 0 1px rgba(0,245,212,.10), 0 0 42px rgba(0,245,212,.06), inset 0 1px 0 rgba(255,255,255,.18);
+  border-color: color-mix(in srgb, var(--cover-tint, #00f5d4) 44%, transparent);
+  box-shadow: 0 24px 72px rgba(0,0,0,.34), 0 0 0 1px color-mix(in srgb, var(--cover-tint, #00f5d4) 10%, transparent), 0 0 42px color-mix(in srgb, var(--cover-tint, #00f5d4) 6%, transparent), inset 0 1px 0 rgba(255,255,255,.18);
   transform: translateY(-1px);
 }
 .search-input {
@@ -479,7 +515,7 @@ html, body {
   border-bottom: 1px solid rgba(255,255,255,.02);
 }
 .search-result-item:last-child { border-bottom: none; }
-.search-result-item:hover { background: rgba(0,245,212,.06); }
+.search-result-item:hover { background: color-mix(in srgb, var(--cover-tint, #00f5d4) 6%, transparent); }
 
 /* === 首页卡片 === */
 .home-card {
@@ -498,19 +534,19 @@ html, body {
 }
 .home-card::before {
   content: ''; position: absolute; inset: 0;
-  background: linear-gradient(118deg, rgba(0,245,212,.16), transparent 38%, rgba(36,66,255,.10) 74%, transparent);
+  background: linear-gradient(118deg, color-mix(in srgb, var(--cover-tint, #00f5d4) 16%, transparent), transparent 38%, color-mix(in srgb, var(--cover-accent, #2442ff) 10%, transparent) 74%, transparent);
   opacity: 0.86; pointer-events: none;
 }
 .home-card:hover {
   transform: translateY(-3px);
-  border-color: rgba(0,245,212,.36);
+  border-color: color-mix(in srgb, var(--cover-tint, #00f5d4) 36%, transparent);
   background: linear-gradient(142deg, rgba(36,33,39,.72), rgba(10,10,14,.84));
-  box-shadow: 0 28px 84px rgba(0,0,0,.36), 0 0 34px rgba(0,245,212,.12), inset 0 1px 0 rgba(255,255,255,.08);
+  box-shadow: 0 28px 84px rgba(0,0,0,.36), 0 0 34px color-mix(in srgb, var(--cover-tint, #00f5d4) 12%, transparent), inset 0 1px 0 rgba(255,255,255,.08);
 }
 .home-card-label {
   position: relative; z-index: 2;
   font-size: 10px; font-weight: 760; letter-spacing: 0.14em;
-  text-transform: uppercase; color: rgba(0,245,212,.78);
+  text-transform: uppercase; color: color-mix(in srgb, var(--cover-tint, #00f5d4) 78%, transparent);
   margin-bottom: 8px;
 }
 .home-card-title {
@@ -534,8 +570,8 @@ html, body {
 }
 .sidebar-tab:hover { color: rgba(255,255,255,.78); background: rgba(255,255,255,.04); }
 .sidebar-tab.active {
-  color: #fff; background: rgba(0,245,212,.08);
-  border-color: rgba(0,245,212,.18);
+  color: #fff; background: color-mix(in srgb, var(--cover-tint, #00f5d4) 8%, transparent);
+  border-color: color-mix(in srgb, var(--cover-tint, #00f5d4) 18%, transparent);
 }
 
 /* === 队列项 === */
@@ -545,7 +581,7 @@ html, body {
   border-radius: 8px;
 }
 .queue-item:hover { background: rgba(255,255,255,.04); }
-.queue-item.current { background: rgba(0,245,212,.06); }
+.queue-item.current { background: color-mix(in srgb, var(--cover-tint, #00f5d4) 6%, transparent); }
 
 /* === 登录按钮 === */
 .login-btn {
@@ -569,8 +605,8 @@ html, body {
 @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes pulseGlow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(0,245,212,.20); }
-  50% { box-shadow: 0 0 0 8px rgba(0,245,212,0); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--cover-tint, #00f5d4) 20%, transparent); }
+  50% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--cover-tint, #00f5d4) 0%, transparent); }
 }
 
 /* === 音量滑块 === */
@@ -582,8 +618,8 @@ input[type="range"] {
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
   width: 12px; height: 12px; border-radius: 50%;
-  background: var(--fc-accent); cursor: pointer;
-  box-shadow: 0 0 8px rgba(0,245,212,.4);
+  background: var(--cover-tint, #00f5d4); cursor: pointer;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--cover-tint, #00f5d4) 40%, transparent);
 }
 
 /* === 工具类 === */

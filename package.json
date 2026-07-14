@@ -1,6 +1,6 @@
 {
   "name": "aurorabeat",
-  "version": "3.8.6",
+  "version": "3.8.7",
   "description": "AuroraBeat - 沉浸式高端音乐播放器",
   "main": "dist-electron/main.js",
   "author": "AuroraBeat Team <aurorabeat@example.com>",

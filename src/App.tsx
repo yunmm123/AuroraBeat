@@ -80,6 +80,7 @@ function useVisualEngine(
   player: any,
   intensity: number,
   enabled: boolean,
+  climaxRef?: React.MutableRefObject<number>,
 ) {
   const engineRef = useRef<any>(null);
   // v3.8.6 修复：避免 effect 闭包里 player.isPlaying 永远是首屏值（stale closure）
@@ -142,6 +143,7 @@ function useVisualEngine(
       uBass: { value: 0 }, uMid: { value: 0 }, uTreble: { value: 0 },
       uEnergy: { value: 0 }, uEnv: { value: 0 },
       uAlpha: { value: 0 }, uIntensity: { value: intensity },
+      uClimax: { value: 0 }, // v3.8.7: 高潮段强度（0~1，驱动色温偏移 + 镜头微震 + 极光加速）
       uTint: { value: tintColor }, uAccent: { value: accentColor },
       uHighlight: { value: highlightColor }, uMidLight: { value: midLightColor },
       uMidDark: { value: midDarkColor }, uShadow: { value: shadowColor },
@@ -181,7 +183,7 @@ function useVisualEngine(
     };
     const fieldFS = `
       precision highp float;
-      uniform float uTime, uBass, uMid, uTreble, uEnergy, uEnv, uAlpha, uIntensity, uMouseStrength;
+      uniform float uTime, uBass, uMid, uTreble, uEnergy, uEnv, uAlpha, uIntensity, uMouseStrength, uClimax;
       uniform vec3 uTint, uAccent, uHighlight, uMidLight, uMidDark, uShadow;
       uniform vec2 uMouseUV, uMouseVel, uCamPan, uResolution;
       uniform vec4 uShock0, uShock1, uShock2, uShock3;   // 节拍冲击波（x, y, startTime, intensity）
@@ -213,6 +215,8 @@ function useVisualEngine(
 
       void main() {
         vec2 uv = vUv + uCamPan;            // 拖拽探头偏移
+        // v3.8.7: 高潮段镜头微震（高频小幅抖动，营造副歌爆发的临场震感）
+        uv += vec2(sin(uTime * 47.0), cos(uTime * 43.0)) * uClimax * 0.0025;
         vec2 centered = uv - 0.5;
         float r = length(centered) * 2.0;
         float ang = atan(centered.y, centered.x);
@@ -227,7 +231,8 @@ function useVisualEngine(
         // === v3.8.6 封面色极光天空 ===
         // 多层流动极光带，用 fbm 调制位置/亮度，跟随节拍呼吸；封面色 tint/accent 驱动
         // v3.8.6 调优：原版本系数太弱几乎看不到，现提升亮度 + 扩大覆盖范围 + 用高亮色增强可见性
-        float auroraT = uTime * 0.06;
+        // v3.8.7: 高潮段极光加速（auroraT 倍率随 climax 提升，副歌时流动加快）
+        float auroraT = uTime * (0.06 + uClimax * 0.10);  // v3.8.7: 高潮时极光流动加速
         // 水平扭曲：fbm 驱动采样位置偏移，形成流动的波浪边界
         vec2 auroraUV = uv;
         auroraUV.x += (fbm(uv * 1.8 + vec2(auroraT, 0.0)) - 0.5) * 0.30;
@@ -414,6 +419,14 @@ function useVisualEngine(
         // 简化 bloom
         float brightness = dot(col, vec3(0.299, 0.587, 0.114));
         col += col * smoothstep(0.5, 0.9, brightness) * (0.3 + uEnergy * 0.4);
+
+        // v3.8.7: 高潮段色温偏移 — 画面向 accent+highlight 暖色混合，副歌"升温"
+        // bloom 阈值降低让高光更溢出，营造副歌爆发的"过曝"感
+        if (uClimax > 0.01) {
+          vec3 climaxTint = mix(uAccent, uHighlight, 0.5);
+          col = mix(col, col + climaxTint * 0.15, uClimax * 0.6);
+          col += col * smoothstep(0.35, 0.75, brightness) * uClimax * 0.25;
+        }
 
         // film grain
         col += (hash(uv * uResolution + uTime) - 0.5) * 0.04;
@@ -672,6 +685,8 @@ function useVisualEngine(
       const dt = Math.min((now - prevTime) / 1000, 0.05);
       prevTime = now;
       uniforms.uTime.value += dt;
+      // v3.8.7: 同步 climaxGlow 到 shader（通过 ref 传递，不触发 effect 重建）
+      if (climaxRef) uniforms.uClimax.value = climaxRef.current;
       // uAlpha fallback：确保不卡在 0（gsap 万一没执行也能渐显）
       if (uniforms.uAlpha.value < 0.999) {
         uniforms.uAlpha.value = Math.min(1, uniforms.uAlpha.value + dt * 0.6);
@@ -1186,7 +1201,10 @@ const App: React.FC = () => {
 
   // 媒体上传时关闭全部特效
   const visualEnabled = !customBg && !customVideo;
-  useVisualEngine(canvasRef, player, intensity, visualEnabled);
+  // v3.8.7: climaxGlow 通过 ref 传给 visual engine，避免 state 变化触发 effect 重建
+  const climaxRef = useRef(0);
+  useEffect(() => { climaxRef.current = climaxGlow; }, [climaxGlow]);
+  useVisualEngine(canvasRef, player, intensity, visualEnabled, climaxRef);
   useSpectrum(spectrumCanvasRef, visualMode);   // v3.1.5: 底部播放栏上方频谱（v3.8.6: 支持流体波浪模式）
 
   // v3.8.5 旋转封面：底部播放栏封面随节拍呼吸 + BPM 自转
@@ -2292,7 +2310,7 @@ const App: React.FC = () => {
             className="fixed top-1/2 left-1/2 -translate-x-1/2 translate-y-[120px] z-[24] pointer-events-none transition-opacity duration-700"
             style={{ opacity: climaxGlow > 0.35 ? Math.min(1, (climaxGlow - 0.35) * 3) : 0 }}
           >
-            <span className="text-[10px] tracking-[0.4em] font-bold uppercase" style={{ color: 'rgba(0,245,212,0.8)', textShadow: '0 0 12px rgba(0,245,212,0.6)' }}>♪ CLIMAX ♪</span>
+            <span className="text-[10px] tracking-[0.4em] font-bold uppercase" style={{ color: 'var(--cover-tint, rgba(0,245,212,0.8))', textShadow: '0 0 12px color-mix(in srgb, var(--cover-tint, #00f5d4) 60%, transparent)' }}>♪ CLIMAX ♪</span>
           </div>
         </>
       )}
@@ -2699,7 +2717,7 @@ const App: React.FC = () => {
           onClick={() => { if (!aiReady) { openAiKeyPanel(); return; } setShowAiChat(true); }}
           className={`fixed right-5 bottom-28 z-[65] w-12 h-12 rounded-full bg-[#00f5d4]/15 border border-[#00f5d4]/30 backdrop-blur-xl flex items-center justify-center text-[#00f5d4] hover:bg-[#00f5d4]/25 hover:scale-105 transition-all shadow-2xl duration-500 ${immersiveMode && !immersiveHover ? 'opacity-0 pointer-events-none' : ''}`}
           title="AI 音乐陪伴"
-          style={{ boxShadow: '0 0 24px rgba(0,245,212,0.25)' }}
+          style={{ boxShadow: '0 0 24px color-mix(in srgb, var(--cover-tint, #00f5d4) 25%, transparent)' }}
         >
           <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
             <path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/>

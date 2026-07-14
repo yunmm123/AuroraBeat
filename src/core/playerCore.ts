@@ -146,6 +146,9 @@ class PlayerCore {
   private eqFilters: BiquadFilterNode[] = [];
   // v3.8.6: 空间音效（StereoPanner，默认 0 = 居中）
   private spatialPanner: StereoPannerNode | null = null;
+  // v3.8.7: 卷积混响（程序化 IR，无外部音频文件依赖）
+  private convolver: ConvolverNode | null = null;
+  private reverbWetGain: GainNode | null = null;
   private progressRaf: number | null = null;
   private onTimeUpdate: ((time: number) => void) | null = null;
   private onAnalyserReady: ((analyser: AnalyserNode) => void) | null = null;
@@ -342,14 +345,26 @@ class PlayerCore {
       // v3.8.6: 空间音效（StereoPanner，默认 0 = 居中）
       this.spatialPanner = this.audioContext.createStereoPanner();
       this.spatialPanner.pan.value = 0;
+      // v3.8.7: 卷积混响 — 程序化生成 IR（指数衰减白噪声，模拟大厅混响）
+      // 链路：spatialPanner → [dry: destination] + [wet: convolver → wetGain → destination]
+      // wetGain 默认 0（关闭空间音效时静音 wet），setSpatialAudio 控制开/关
+      this.convolver = this.audioContext.createConvolver();
+      this.convolver.buffer = this.generateReverbIR(2.8, 2.2); // 2.8s 大厅，衰减指数 2.2
+      this.reverbWetGain = this.audioContext.createGain();
+      this.reverbWetGain.gain.value = 0; // 默认静音
       // 可视化支路（进 destination 出声）：
-      // source → analyser → eq[0..4] → gainNode → spatialPanner → destination
+      // source → analyser → eq[0..4] → gainNode → spatialPanner → [dry + wet] → destination
       this.source.connect(this.analyser);
       let prevNode: AudioNode = this.analyser;
       this.eqFilters.forEach(f => { prevNode.connect(f); prevNode = f; });
       prevNode.connect(this.gainNode);
       this.gainNode.connect(this.spatialPanner);
+      // dry（干声直达）
       this.spatialPanner.connect(this.audioContext.destination);
+      // wet（混响支路）
+      this.spatialPanner.connect(this.convolver);
+      this.convolver.connect(this.reverbWetGain);
+      this.reverbWetGain.connect(this.audioContext.destination);
       // 节拍分析支路（不进 destination，避免双重发声）：source → lowpass → beatAnalyser
       this.source.connect(this.beatLowpass);
       this.beatLowpass.connect(this.beatAnalyser);
@@ -518,6 +533,24 @@ class PlayerCore {
   private spatialDelay: DelayNode | null = null;
   private spatialFeedback: GainNode | null = null;
 
+  // v3.8.7: 程序化生成混响脉冲响应（IR）— 指数衰减白噪声，无需外部音频文件
+  // duration: 混响时长（秒）；decay: 衰减指数（越大衰减越快，2.0~3.0 常用）
+  private generateReverbIR(duration: number, decay: number): AudioBuffer {
+    const ctx = this.audioContext!;
+    const sampleRate = ctx.sampleRate;
+    const length = Math.max(1, Math.floor(sampleRate * duration));
+    const ir = ctx.createBuffer(2, length, sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const data = ir.getChannelData(ch);
+      for (let i = 0; i < length; i++) {
+        // 指数衰减包络 × 白噪声
+        const env = Math.pow(1 - i / length, decay);
+        data[i] = (Math.random() * 2 - 1) * env;
+      }
+    }
+    return ir;
+  }
+
   setSpatialAudio(enabled: boolean) {
     if (!this.spatialPanner || !this.audioContext) return;
     const ctx = this.audioContext;
@@ -535,9 +568,17 @@ class PlayerCore {
       this.spatialLfo.start();
       // 3. 给 panner 偏移一个基础值 0.1（轻微偏右，模拟现场听感）
       this.spatialPanner.pan.setTargetAtTime(0.1, ctx.currentTime, 0.3);
+      // v3.8.7: 开启卷积混响 wet 支路（35% 湿声，0.5s 平滑过渡避免爆音）
+      if (this.reverbWetGain) {
+        this.reverbWetGain.gain.setTargetAtTime(0.35, ctx.currentTime, 0.5);
+      }
     } else {
       this.stopSpatialLfo();
       this.spatialPanner.pan.setTargetAtTime(0, ctx.currentTime, 0.1);
+      // v3.8.7: 关闭混响 wet（0.2s 平滑回落）
+      if (this.reverbWetGain) {
+        this.reverbWetGain.gain.setTargetAtTime(0, ctx.currentTime, 0.2);
+      }
     }
   }
 
